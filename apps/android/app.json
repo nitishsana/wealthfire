@@ -8,6 +8,10 @@
     "backgroundColor": "#0f1115",
     "platforms": ["android"],
     "experiments": { "tsconfigPaths": false },
+    "scheme": "com.nitishsana.wealthfire",
+    "extra": {
+      "googleAndroidClientId": ""
+    },
     "android": {
       "package": "com.nitishsana.wealthfire",
       "versionCode": 1,

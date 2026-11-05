@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BackHandler } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { WealthfireApp, type TabKey } from '@wealthfire/mobile-ui';
+import appJson from './app.json';
 
 export default function App() {
   const [tab, setTab] = useState<TabKey>('home');
@@ -21,7 +22,7 @@ export default function App() {
   return (
     <>
       <StatusBar style="light" />
-      <WealthfireApp platform="android" tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
+      <WealthfireApp platform="android" google={{ androidClientId: appJson.expo.extra.googleAndroidClientId || undefined }} tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
     </>
   );
 }

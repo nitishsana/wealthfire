@@ -115,4 +115,6 @@ export interface AppData {
   assumptions: Assumptions;
   buckets: BucketState | null;
   snapshots: Snapshot[];
+  /** Last successful Gmail sync, ISO date-time. The token itself is never stored. */
+  gmailLastSync: string | null;
 }

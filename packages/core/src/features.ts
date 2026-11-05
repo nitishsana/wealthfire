@@ -13,7 +13,8 @@ export const FEATURES = [
   { id: 'portfolio', name: 'Suggested mutual fund portfolio by risk and time' },
   { id: 'buckets', name: '3-bucket plan with timed move suggestions' },
   { id: 'progress', name: 'Monthly check-ins and progress vs plan' },
-  { id: 'connect', name: 'Connect apps and Gmail (coming soon in v1)' },
+  { id: 'connect', name: 'Connect apps (bank, CAS, broker: coming soon)' },
+  { id: 'gmail', name: 'Gmail: read card spend alerts into expenses' },
   { id: 'demo', name: 'Load demo data / reset' },
 ] as const;
 

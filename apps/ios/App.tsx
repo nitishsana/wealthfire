@@ -2,12 +2,13 @@
 // iOS-only behaviour lives here (no hardware back button; light status bar on dark UI).
 import { StatusBar } from 'expo-status-bar';
 import { WealthfireApp } from '@wealthfire/mobile-ui';
+import appJson from './app.json';
 
 export default function App() {
   return (
     <>
       <StatusBar style="light" />
-      <WealthfireApp platform="ios" />
+      <WealthfireApp platform="ios" google={{ iosClientId: appJson.expo.extra.googleIosClientId || undefined }} />
     </>
   );
 }

@@ -5,6 +5,7 @@ import { RiskPage } from './pages/Risk';
 import { NetWorthPage } from './pages/NetWorth';
 import { ExpensesPage } from './pages/Expenses';
 import { FirePage } from './pages/Fire';
+import { GmailPage } from './pages/Gmail';
 import { PortfolioPage } from './pages/Portfolio';
 import { BucketsPage } from './pages/Buckets';
 import { ProgressPage } from './pages/Progress';
@@ -17,6 +18,7 @@ const NAV = [
   { to: '/risk', label: 'Risk', icon: '🎯' },
   { to: '/networth', label: 'Net worth', icon: '💼' },
   { to: '/expenses', label: 'Expenses', icon: '🧾' },
+  { to: '/gmail', label: 'Gmail spends', icon: '📧' },
   { to: '/fire', label: 'FIRE plan', icon: '🔥' },
   { to: '/portfolio', label: 'Portfolio', icon: '📊' },
   { to: '/buckets', label: 'Buckets', icon: '🪣' },
@@ -49,6 +51,7 @@ export function App() {
           <Route path="/risk" element={<RiskPage />} />
           <Route path="/networth" element={<NetWorthPage />} />
           <Route path="/expenses" element={<ExpensesPage />} />
+          <Route path="/gmail" element={<GmailPage />} />
           <Route path="/fire" element={<FirePage />} />
           <Route path="/portfolio" element={<PortfolioPage />} />
           <Route path="/buckets" element={<BucketsPage />} />

@@ -10,6 +10,7 @@ import {
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Missing } from './Core';
+import { useNav } from '../nav';
 import { Bar, Btn, Card, Chips, Field, Line, Mix, NumField, s, Screen, Stat, Stats, Tips } from '../ui';
 
 const SAMPLE = `05/10/2026, SWIGGY BANGALORE, 450.00
@@ -62,7 +63,7 @@ export function ExpensesScreen() {
         <Btn primary title="Import" disabled={!text.trim()} onPress={() => importText(text)} />
         <Btn title="Try a sample" onPress={() => setText(SAMPLE)} />
         {msg ? <Text style={[s.muted, { marginTop: 8 }]} accessibilityLiveRegion="polite">{msg}</Text> : null}
-        <Text style={s.small}>Auto-read from Gmail is coming. See Connect.</Text>
+        <Text style={s.small}>Or let Wealthfire read card alerts from Gmail (Gmail tab).</Text>
       </Card>
       <Card title="✍️ Add a spend">
         <Field label="What" value={desc} onChangeText={setDesc} placeholder="e.g. Swiggy" />
@@ -249,7 +250,6 @@ export function ProgressScreen() {
 }
 
 const SOURCES = [
-  { icon: '📧', name: 'Gmail', what: 'Read credit card statement emails and add spends automatically.' },
   { icon: '🏦', name: 'Bank accounts (Account Aggregator)', what: 'Pull balances and FDs with your consent.' },
   { icon: '📊', name: 'Mutual funds (CAS)', what: 'Import all your mutual funds from CAMS / KFintech.' },
   { icon: '📈', name: 'Stocks (Zerodha, Groww, etc.)', what: 'Import stock holdings.' },
@@ -257,8 +257,13 @@ const SOURCES = [
 ];
 
 export function ConnectScreen() {
+  const go = useNav();
   return (
-    <Screen feature="connect" title="Connect apps" intro="Link your accounts for one full view. These links come in the next release.">
+    <Screen feature="connect" title="Connect apps" intro="Link your accounts for one full view. Gmail works now; the rest come next.">
+      <Card title="📧 Gmail">
+        <Text style={s.text}>Read card spend alert emails and add spends automatically.</Text>
+        <Btn primary title="Set up Gmail" onPress={() => go('gmail')} />
+      </Card>
       {SOURCES.map((src) => (
         <Card key={src.name} title={`${src.icon} ${src.name}`}>
           <Text style={s.text}>{src.what}</Text>

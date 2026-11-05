@@ -6,6 +6,7 @@ export const TABS = [
   { key: 'risk', label: 'Risk', icon: '🎯' },
   { key: 'networth', label: 'Net worth', icon: '💼' },
   { key: 'expenses', label: 'Expenses', icon: '🧾' },
+  { key: 'gmail', label: 'Gmail', icon: '📧' },
   { key: 'fire', label: 'FIRE', icon: '🔥' },
   { key: 'portfolio', label: 'Portfolio', icon: '📊' },
   { key: 'buckets', label: 'Buckets', icon: '🪣' },

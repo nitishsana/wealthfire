@@ -6,12 +6,15 @@ import { NavCtx, TABS, type TabKey } from './nav';
 import { theme } from './theme';
 import { HomeScreen, NetWorthScreen, ProfileScreen, RiskScreen } from './screens/Core';
 import { BucketsScreen, ConnectScreen, ExpensesScreen, FireScreen, PortfolioScreen, ProgressScreen, SettingsScreen } from './screens/Plan';
+import { GmailScreen, GoogleCtx, type GoogleConfig } from './screens/Gmail';
+
+export type { GoogleConfig } from './screens/Gmail';
 
 export { TABS, type TabKey } from './nav';
 export { theme } from './theme';
 
 const SCREENS: Record<TabKey, ComponentType> = {
-  home: HomeScreen, profile: ProfileScreen, risk: RiskScreen, networth: NetWorthScreen, expenses: ExpensesScreen,
+  home: HomeScreen, profile: ProfileScreen, risk: RiskScreen, networth: NetWorthScreen, expenses: ExpensesScreen, gmail: GmailScreen,
   fire: FireScreen, portfolio: PortfolioScreen, buckets: BucketsScreen, progress: ProgressScreen, connect: ConnectScreen, settings: SettingsScreen,
 };
 
@@ -23,6 +26,8 @@ export interface WealthfireAppProps {
   initialTab?: TabKey;
   tab?: TabKey;
   setTab?: (t: TabKey) => void;
+  /** Google OAuth client ids for Gmail sign-in (from the app's app.json extra). */
+  google?: GoogleConfig;
 }
 
 function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: TabKey; setTab: (t: TabKey) => void }) {
@@ -55,15 +60,17 @@ function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: Tab
 }
 
 /** The full Wealthfire app. apps/android and apps/ios each render this with their platform. */
-export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab }: WealthfireAppProps) {
+export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {} }: WealthfireAppProps) {
   const [ownTab, setOwnTab] = useState<TabKey>(initialTab);
   const tab = ctlTab ?? ownTab;
   const setTab = (t: TabKey) => { (ctlSetTab ?? setOwnTab)(t); onTabChange?.(t); };
   return (
     <SafeAreaProvider>
-      <DataProvider>
-        <Body platform={platform} tab={tab} setTab={setTab} />
-      </DataProvider>
+      <GoogleCtx.Provider value={google}>
+        <DataProvider>
+          <Body platform={platform} tab={tab} setTab={setTab} />
+        </DataProvider>
+      </GoogleCtx.Provider>
     </SafeAreaProvider>
   );
 }
