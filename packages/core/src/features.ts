@@ -14,7 +14,7 @@ export const FEATURES = [
   { id: 'buckets', name: '3-bucket plan with timed move suggestions' },
   { id: 'progress', name: 'Monthly check-ins and progress vs plan' },
   { id: 'connect', name: 'Connect apps (bank, CAS, broker: coming soon)' },
-  { id: 'gmail', name: 'Gmail: read card spend alerts into expenses' },
+  { id: 'gmail', name: 'Connect Gmail inside Expenses: card spend alerts become expenses' },
   { id: 'demo', name: 'Load demo data / reset' },
 ] as const;
 
