@@ -1,0 +1,118 @@
+// Shared data model. Web, Android and iOS all store and read these shapes,
+// so a change here is a change on every platform.
+
+export interface Profile {
+  name: string;
+  age: number;
+  city: string;
+  monthlyIncome: number; // take-home, INR
+  dependents: number;
+  targetRetireAge: number;
+  lifeExpectancy: number;
+  /** Current monthly SIP already running, INR */
+  currentMonthlySip: number;
+  /** Optional manual override of monthly expenses; else derived from expenses */
+  monthlyExpenseOverride?: number;
+}
+
+export type AssetType =
+  | 'equity_mf'
+  | 'debt_mf'
+  | 'stocks'
+  | 'fd'
+  | 'epf'
+  | 'ppf'
+  | 'nps'
+  | 'gold'
+  | 'cash'
+  | 'real_estate'
+  | 'other';
+
+export interface Asset {
+  id: string;
+  name: string;
+  type: AssetType;
+  value: number;
+  /** Where it came from: typed in, or linked app (future) */
+  source: 'manual' | 'linked' | 'demo';
+}
+
+export type LiabilityType = 'home_loan' | 'car_loan' | 'personal_loan' | 'credit_card' | 'education_loan' | 'other';
+
+export interface Liability {
+  id: string;
+  name: string;
+  type: LiabilityType;
+  outstanding: number;
+  monthlyEmi: number;
+  interestRate: number; // % per year
+}
+
+export type ExpenseCategory =
+  | 'Food'
+  | 'Groceries'
+  | 'Shopping'
+  | 'Transport'
+  | 'Fuel'
+  | 'Bills'
+  | 'Entertainment'
+  | 'Travel'
+  | 'Health'
+  | 'Education'
+  | 'Rent'
+  | 'EMI'
+  | 'Other';
+
+export interface Expense {
+  id: string;
+  date: string; // ISO yyyy-mm-dd
+  description: string;
+  amount: number; // positive = spend
+  category: ExpenseCategory;
+  source: 'manual' | 'statement' | 'gmail' | 'demo';
+}
+
+export type RiskProfileName = 'Conservative' | 'Moderate' | 'Balanced' | 'Growth' | 'Aggressive';
+
+export interface RiskResult {
+  score: number; // 0-100
+  profile: RiskProfileName;
+}
+
+export interface Assumptions {
+  inflation: number; // % per year
+  equityReturn: number; // % per year
+  debtReturn: number; // % per year
+  cashReturn: number; // % per year
+  safeWithdrawalRate: number; // % per year
+  sipStepUp: number; // % yearly increase of SIP
+  /** Equity market return over the last 12 months, %. Drives bucket refill tips. */
+  lastYearEquityReturn: number;
+}
+
+export interface BucketState {
+  bucket1: number; // cash / liquid
+  bucket2: number; // debt / hybrid
+  bucket3: number; // equity
+}
+
+export interface Snapshot {
+  date: string; // ISO yyyy-mm-dd
+  investable: number;
+  netWorth: number;
+  fireNumber: number;
+  monthlySip: number;
+}
+
+/** Everything a user owns in the app. Stored on device only in v1. */
+export interface AppData {
+  version: 1;
+  profile: Profile | null;
+  riskAnswers: Record<string, number>;
+  assets: Asset[];
+  liabilities: Liability[];
+  expenses: Expense[];
+  assumptions: Assumptions;
+  buckets: BucketState | null;
+  snapshots: Snapshot[];
+}
