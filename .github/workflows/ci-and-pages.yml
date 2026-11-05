@@ -1,0 +1,71 @@
+name: CI and website
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Core tests
+        run: npm test
+      - name: Type check (core + web)
+        run: npm run typecheck
+      - name: Feature parity (web, Android, iOS)
+        run: npm run parity
+      - name: Build website
+        run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: apps/web/dist
+
+  mobile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [android, ios]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Bundle JS
+        run: npx expo export --platform ${{ matrix.app }} --output-dir ../../.expo-export
+        env:
+          CI: '1'
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: [check, mobile]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

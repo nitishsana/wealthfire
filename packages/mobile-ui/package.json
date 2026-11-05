@@ -1,0 +1,16 @@
+{
+  "name": "@wealthfire/mobile-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "React Native screens shared by apps/android and apps/ios. Business logic stays in @wealthfire/core.",
+  "main": "src/index.tsx",
+  "types": "src/index.tsx",
+  "peerDependencies": {
+    "@react-native-async-storage/async-storage": "*",
+    "expo-document-picker": "*",
+    "expo-file-system": "*",
+    "react": "*",
+    "react-native": "*",
+    "react-native-safe-area-context": "*"
+  }
+}
