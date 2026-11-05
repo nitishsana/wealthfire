@@ -6,7 +6,7 @@ import { NavCtx, TABS, type TabKey } from './nav';
 import { theme } from './theme';
 import { HomeScreen, NetWorthScreen, ProfileScreen, RiskScreen } from './screens/Core';
 import { BucketsScreen, ConnectScreen, ExpensesScreen, FireScreen, PortfolioScreen, ProgressScreen, SettingsScreen } from './screens/Plan';
-import { GmailScreen, GoogleCtx, type GoogleConfig } from './screens/Gmail';
+import { GoogleCtx, type GoogleConfig } from './screens/Gmail';
 
 export type { GoogleConfig } from './screens/Gmail';
 
@@ -14,7 +14,7 @@ export { TABS, type TabKey } from './nav';
 export { theme } from './theme';
 
 const SCREENS: Record<TabKey, ComponentType> = {
-  home: HomeScreen, profile: ProfileScreen, risk: RiskScreen, networth: NetWorthScreen, expenses: ExpensesScreen, gmail: GmailScreen,
+  home: HomeScreen, profile: ProfileScreen, risk: RiskScreen, networth: NetWorthScreen, expenses: ExpensesScreen,
   fire: FireScreen, portfolio: PortfolioScreen, buckets: BucketsScreen, progress: ProgressScreen, connect: ConnectScreen, settings: SettingsScreen,
 };
 

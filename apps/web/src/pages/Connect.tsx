@@ -13,8 +13,8 @@ export function ConnectPage() {
     <Page feature="connect" title="Connect apps" intro="Link your accounts for one full view. Gmail works now; the rest come next.">
       <div className="grid two">
         <Card title="📧 Gmail">
-          <p>Read card spend alert emails and add spends automatically.</p>
-          <Link className="btn primary" to="/gmail">Set up Gmail</Link>
+          <p>Connect your credit cards through Gmail. Spends land in Expenses.</p>
+          <Link className="btn primary" to="/expenses">Connect in Expenses</Link>
         </Card>
         {SOURCES.map((s) => (
           <Card key={s.name} title={`${s.icon} ${s.name}`}>

@@ -2,6 +2,7 @@ import { useState, type ChangeEvent, type FormEvent } from 'react';
 import { categorize, EXPENSE_CATEGORIES, inr, newId, parseStatement, todayIso, type ExpenseCategory } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Card, Donut, NumberField, Page, Stat } from '../ui';
+import { GmailConnect } from '../components/GmailConnect';
 
 const SAMPLE = `05/10/2026, SWIGGY BANGALORE, 450.00
 06 Oct 2026  AMAZON PAY INDIA  1,299.00 Dr
@@ -46,12 +47,14 @@ export function ExpensesPage() {
   const recent = [...data.expenses].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 40);
 
   return (
-    <Page feature="expenses" title="Expenses" intro="Upload a credit card statement or add spends. We sort them for you.">
+    <Page feature="expenses" title="Expenses" intro="Connect Gmail for your credit cards, upload a statement, or add spends. We sort them for you.">
       <div className="grid stats">
         <Stat label="Monthly spend" value={inr(s.monthlyAverage)} sub={`${s.months} month${s.months === 1 ? '' : 's'} of data`} />
         <Stat label="Without EMIs" value={inr(s.monthlyLiving)} sub="Used for FIRE" />
         <Stat label="Top category" value={s.byCategory[0]?.category ?? '—'} sub={s.byCategory[0] ? inr(s.byCategory[0].monthly) + '/mo' : ''} />
       </div>
+
+      <GmailConnect />
 
       <div className="grid two">
         <Card title="📥 Upload statement">
@@ -66,7 +69,6 @@ export function ExpensesPage() {
             <button className="btn" onClick={() => setText(SAMPLE)}>Try a sample</button>
           </div>
           {msg && <p role="status" className="muted">{msg}</p>}
-          <p className="muted small">Or let Wealthfire read card alerts from <a href="#/gmail">Gmail</a>.</p>
         </Card>
 
         <Card title="✍️ Add a spend">

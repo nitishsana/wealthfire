@@ -11,6 +11,7 @@ import {
 import { useStore } from '../store';
 import { Missing } from './Core';
 import { useNav } from '../nav';
+import { GmailConnect } from './Gmail';
 import { Bar, Btn, Card, Chips, Field, Line, Mix, NumField, s, Screen, Stat, Stats, Tips } from '../ui';
 
 const SAMPLE = `05/10/2026, SWIGGY BANGALORE, 450.00
@@ -51,19 +52,19 @@ export function ExpensesScreen() {
   const recent = [...data.expenses].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 40);
 
   return (
-    <Screen feature="expenses" title="Expenses" intro="Upload a credit card statement or add spends. We sort them for you.">
+    <Screen feature="expenses" title="Expenses" intro="Connect Gmail for your credit cards, upload a statement, or add spends. We sort them for you.">
       <Stats>
         <Stat label="Monthly spend" value={inr(sm.monthlyAverage)} sub={`${sm.months} month${sm.months === 1 ? '' : 's'} of data`} />
         <Stat label="Without EMIs" value={inr(sm.monthlyLiving)} sub="Used for FIRE" />
         <Stat label="Top category" value={sm.byCategory[0]?.category ?? '—'} sub={sm.byCategory[0] ? `${inr(sm.byCategory[0].monthly)}/mo` : undefined} />
       </Stats>
+      <GmailConnect />
       <Card title="📥 Upload statement">
         <Btn title="Pick a CSV or text file" onPress={pickFile} />
         <Field label="Or paste statement lines" value={text} onChangeText={setText} placeholder={SAMPLE} multiline />
         <Btn primary title="Import" disabled={!text.trim()} onPress={() => importText(text)} />
         <Btn title="Try a sample" onPress={() => setText(SAMPLE)} />
         {msg ? <Text style={[s.muted, { marginTop: 8 }]} accessibilityLiveRegion="polite">{msg}</Text> : null}
-        <Text style={s.small}>Or let Wealthfire read card alerts from Gmail (Gmail tab).</Text>
       </Card>
       <Card title="✍️ Add a spend">
         <Field label="What" value={desc} onChangeText={setDesc} placeholder="e.g. Swiggy" />
@@ -261,8 +262,8 @@ export function ConnectScreen() {
   return (
     <Screen feature="connect" title="Connect apps" intro="Link your accounts for one full view. Gmail works now; the rest come next.">
       <Card title="📧 Gmail">
-        <Text style={s.text}>Read card spend alert emails and add spends automatically.</Text>
-        <Btn primary title="Set up Gmail" onPress={() => go('gmail')} />
+        <Text style={s.text}>Connect your credit cards through Gmail. Spends land in Expenses.</Text>
+        <Btn primary title="Connect in Expenses" onPress={() => go('expenses')} />
       </Card>
       {SOURCES.map((src) => (
         <Card key={src.name} title={`${src.icon} ${src.name}`}>

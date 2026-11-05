@@ -19,7 +19,8 @@ const errors = [];
 
 for (const id of features) {
   if (!web.includes(`feature="${id}"`)) errors.push(`web is missing feature "${id}"`);
-  if (!mobile.includes(`feature="${id}"`)) errors.push(`mobile (Android + iOS) is missing feature "${id}"`);
+  // Mobile marks whole screens with feature="id" and sections inside a screen with testID="feature-id".
+  if (!mobile.includes(`feature="${id}"`) && !mobile.includes(`testID="feature-${id}"`)) errors.push(`mobile (Android + iOS) is missing feature "${id}"`);
 }
 for (const app of ['android', 'ios']) {
   const src = read(`apps/${app}/App.tsx`);
