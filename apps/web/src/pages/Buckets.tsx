@@ -16,7 +16,7 @@ export function BucketsPage() {
   const fromHoldings = data.buckets === null;
 
   return (
-    <Page feature="buckets" title="Bucket plan" intro="Three pots with three jobs. Tips change as FIRE gets closer and as markets move.">
+    <Page feature="buckets" title="Bucket plan" intro={`Three pots with three jobs, sized for ${a.fireType?.name ?? 'FIRE'} spending. Tips change as FIRE gets closer and as markets move.`}>
       <Missing missing={a.missing} />
       {b && (
         <>

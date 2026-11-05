@@ -13,6 +13,8 @@ export const FEATURES = [
   { id: 'portfolio', name: 'Suggested mutual fund portfolio by risk and time' },
   { id: 'buckets', name: '3-bucket plan with timed move suggestions' },
   { id: 'progress', name: 'Monthly check-ins and progress vs plan' },
+  { id: 'firetypes', name: 'FIRE types: Lean, FIRE, Barista, Fat side by side, plus Coast FIRE milestone' },
+  { id: 'firetype-pick', name: 'Pick your FIRE type (and part-time income for Barista) in Profile' },
   { id: 'connect', name: 'Connect apps (bank, CAS, broker: coming soon)' },
   { id: 'gmail', name: 'Connect Gmail inside Expenses: card spend alerts become expenses' },
   { id: 'demo', name: 'Load demo data / reset' },

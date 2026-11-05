@@ -2,11 +2,12 @@
 import { useState } from 'react';
 import { Alert, Switch, Text, View } from 'react-native';
 import {
-  ASSET_TYPE_LABELS, computeRiskScore, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, RISK_QUESTIONS,
+  ASSET_TYPE_LABELS, computeRiskScore, DEFAULT_BARISTA_SHARE, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, RISK_QUESTIONS,
   type AssetType, type LiabilityType, type Profile,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { useNav, type TabKey } from '../nav';
+import { FireTypePicker, FireTypesCompare } from './FireTypes';
 import { Bar, Btn, Card, Chips, Field, Line, Mix, NumField, s, Screen, Stat, Stats, Tips } from '../ui';
 
 const STATUS_TEXT = { on_track: 'On track', close: 'Almost there', off_track: 'Off track' } as const;
@@ -38,11 +39,12 @@ export function HomeScreen() {
         <Stat label="Net worth" value={inrShort(a.netWorth.netWorth)} sub={`Investable ${inrShort(a.netWorth.investable)}`} />
         <Stat label="Monthly spend" value={inr(f?.monthlyExpenseToday ?? a.expenses.monthlyLiving)} />
         <Stat label="Risk profile" value={a.risk?.profile ?? '—'} sub={a.risk ? `Score ${a.risk.score}/100` : undefined} />
-        {f ? <Stat label="FIRE status" value={STATUS_TEXT[f.status]} tone={STATUS_TONE[f.status]} /> : null}
+        {f ? <Stat label={`${a.fireType?.name ?? 'FIRE'} status`} value={STATUS_TEXT[f.status]} tone={STATUS_TONE[f.status]} /> : null}
       </Stats>
       {f && data.profile ? (
         <>
-          <Card title="🔥 FIRE progress">
+          <Card title={`${a.fireType?.emoji ?? '🔥'} ${a.fireType?.name ?? 'FIRE'} progress`}>
+            <FireTypePicker />
             <Text style={s.big}>{Math.round(f.progressPct)}%</Text>
             <Bar pct={f.progressPct} label="FIRE progress" />
             <Text style={s.muted}>{inrShort(a.netWorth.investable)} of {inrShort(f.fireNumberToday)} (today's rupees)</Text>
@@ -67,16 +69,17 @@ export function HomeScreen() {
             <Tips items={a.progress.messages} />
             <Btn title="Save a check-in" onPress={() => go('progress')} />
           </Card>
+          <FireTypesCompare compact />
         </>
       ) : null}
     </Screen>
   );
 }
 
-const BLANK: Profile = { name: '', age: 30, city: '', monthlyIncome: 0, dependents: 0, targetRetireAge: 45, lifeExpectancy: 85, currentMonthlySip: 0 };
+const BLANK: Profile = { name: '', age: 30, city: '', monthlyIncome: 0, dependents: 0, targetRetireAge: 45, lifeExpectancy: 85, currentMonthlySip: 0, fireType: 'regular' };
 
 export function ProfileScreen() {
-  const { data, update } = useStore();
+  const { data, analysis, update } = useStore();
   const go = useNav();
   const [p, setP] = useState<Profile>(data.profile ?? BLANK);
   const [useOverride, setUseOverride] = useState(p.monthlyExpenseOverride !== undefined);
@@ -106,6 +109,14 @@ export function ProfileScreen() {
         <NumField label="Current monthly SIP" suffix="₹" value={p.currentMonthlySip} onChange={(v) => set('currentMonthlySip', v)} />
         <NumField label="Age you want to retire" value={p.targetRetireAge} onChange={(v) => set('targetRetireAge', v)} />
         <NumField label="Plan money till age" value={p.lifeExpectancy} onChange={(v) => set('lifeExpectancy', v)} />
+        <Text style={[s.muted, { marginTop: 6 }]}>Which FIRE are you aiming for?</Text>
+        <FireTypePicker value={p.fireType ?? 'regular'} onChange={(id) => set('fireType', id)} />
+        {p.fireType === 'barista' ? (
+          <NumField label="Part-time income after FIRE (per month)" suffix="₹"
+            value={p.partTimeIncome ?? Math.round((p.monthlyExpenseOverride ?? analysis.expenses.monthlyLiving) * DEFAULT_BARISTA_SHARE)}
+            onChange={(v) => set('partTimeIncome', v)} />
+        ) : null}
+        <Text style={s.small}>Not sure? See "Which FIRE fits you" on the FIRE tab.</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 8 }}>
           <Switch accessibilityLabel="Type my monthly spend instead of using my expenses" value={useOverride} onValueChange={(on) => {
             setUseOverride(on);

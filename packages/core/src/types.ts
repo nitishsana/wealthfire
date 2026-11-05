@@ -1,6 +1,8 @@
 // Shared data model. Web, Android and iOS all store and read these shapes,
 // so a change here is a change on every platform.
 
+export type FireTypeId = 'lean' | 'regular' | 'barista' | 'fat';
+
 export interface Profile {
   name: string;
   age: number;
@@ -13,6 +15,10 @@ export interface Profile {
   currentMonthlySip: number;
   /** Optional manual override of monthly expenses; else derived from expenses */
   monthlyExpenseOverride?: number;
+  /** Which FIRE the user is aiming for. Default 'regular'. */
+  fireType?: FireTypeId;
+  /** Barista FIRE: monthly part-time income after quitting full-time work, today's rupees */
+  partTimeIncome?: number;
 }
 
 export type AssetType =

@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { inr, inrShort, PHASE_LABELS } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Bar, Card, Missing, Page, Stat } from '../ui';
+import { FireTypePicker, FireTypesCompare } from '../components/FireTypes';
 
 const STATUS_TEXT = { on_track: 'On track', close: 'Almost there', off_track: 'Off track' } as const;
 const STATUS_TONE = { on_track: 'good', close: 'warn', off_track: 'bad' } as const;
@@ -19,12 +20,13 @@ export function Dashboard() {
         <Stat label="Net worth" value={inrShort(a.netWorth.netWorth)} sub={`Investable ${inrShort(a.netWorth.investable)}`} />
         <Stat label="Monthly spend" value={inr(f?.monthlyExpenseToday ?? a.expenses.monthlyLiving)} sub={a.expenses.months ? `Avg of ${a.expenses.months} months` : 'No expenses yet'} />
         <Stat label="Risk profile" value={a.risk?.profile ?? '—'} sub={a.risk ? `Score ${a.risk.score}/100` : 'Take the quiz'} />
-        {f && <Stat label="FIRE status" value={STATUS_TEXT[f.status]} tone={STATUS_TONE[f.status]} sub={`Target age ${data.profile!.targetRetireAge}`} />}
+        {f && <Stat label={`${a.fireType?.name ?? 'FIRE'} status`} value={STATUS_TEXT[f.status]} tone={STATUS_TONE[f.status]} sub={`Target age ${data.profile!.targetRetireAge}`} />}
       </div>
 
       {f && (
         <div className="grid two">
-          <Card title="🔥 FIRE progress">
+          <Card title={`${a.fireType?.emoji ?? '🔥'} ${a.fireType?.name ?? 'FIRE'} progress`}>
+            <FireTypePicker compact />
             <p className="big">{Math.round(f.progressPct)}%</p>
             <Bar pct={f.progressPct} label="FIRE progress" />
             <p className="muted">
@@ -58,6 +60,7 @@ export function Dashboard() {
           </Card>
         </div>
       )}
+      {f && <FireTypesCompare compact />}
     </Page>
   );
 }
