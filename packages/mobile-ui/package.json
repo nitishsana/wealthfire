@@ -8,7 +8,11 @@
   "peerDependencies": {
     "@react-native-async-storage/async-storage": "*",
     "expo-document-picker": "*",
+    "expo-application": "*",
+    "expo-auth-session": "*",
+    "expo-crypto": "*",
     "expo-file-system": "*",
+    "expo-web-browser": "*",
     "react": "*",
     "react-native": "*",
     "react-native-safe-area-context": "*"

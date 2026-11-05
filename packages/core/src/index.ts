@@ -12,3 +12,4 @@ export * from './engine';
 export * from './store';
 export * from './demo';
 export * from './features';
+export * from './gmail';

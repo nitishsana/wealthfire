@@ -66,7 +66,7 @@ export function ExpensesPage() {
             <button className="btn" onClick={() => setText(SAMPLE)}>Try a sample</button>
           </div>
           {msg && <p role="status" className="muted">{msg}</p>}
-          <p className="muted small">Auto-read from Gmail is coming. See <a href="#/connect">Connect</a>.</p>
+          <p className="muted small">Or let Wealthfire read card alerts from <a href="#/gmail">Gmail</a>.</p>
         </Card>
 
         <Card title="✍️ Add a spend">

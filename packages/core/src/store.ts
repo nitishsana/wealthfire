@@ -15,7 +15,14 @@ export function emptyData(): AppData {
     assumptions: { ...DEFAULT_ASSUMPTIONS },
     buckets: null,
     snapshots: [],
+    gmailLastSync: null,
   };
+}
+
+/** Add Gmail expenses, skipping ids already stored. */
+export function mergeExpenses(data: AppData, incoming: AppData['expenses']): AppData {
+  const have = new Set(data.expenses.map((e) => e.id));
+  return { ...data, expenses: [...data.expenses, ...incoming.filter((e) => !have.has(e.id))] };
 }
 
 /** Parse stored JSON safely. Bad or old data falls back to defaults field by field. */
@@ -35,6 +42,7 @@ export function deserialize(json: string | null | undefined): AppData {
       assumptions: { ...DEFAULT_ASSUMPTIONS, ...(raw.assumptions ?? {}) },
       buckets: raw.buckets ?? null,
       snapshots: Array.isArray(raw.snapshots) ? raw.snapshots : [],
+      gmailLastSync: typeof raw.gmailLastSync === 'string' ? raw.gmailLastSync : null,
     };
   } catch {
     return base;

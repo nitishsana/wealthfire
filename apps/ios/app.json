@@ -8,6 +8,10 @@
     "backgroundColor": "#0f1115",
     "platforms": ["ios"],
     "experiments": { "tsconfigPaths": false },
+    "scheme": "com.nitishsana.wealthfire",
+    "extra": {
+      "googleIosClientId": ""
+    },
     "ios": {
       "bundleIdentifier": "com.nitishsana.wealthfire",
       "buildNumber": "1",
