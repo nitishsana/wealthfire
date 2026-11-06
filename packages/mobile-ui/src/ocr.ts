@@ -35,6 +35,10 @@ function loadEngines(): Engines | null {
   cached = null;
   try {
     // The JS wrappers load even when the native side is absent, so check the native registration too.
+    // @react-native-ml-kit/text-recognition 2.0.0 is a legacy (bridge) module: its own index.ts calls
+    // NativeModules.TextRecognition (no TurboModuleRegistry, no codegen spec). Under the New Architecture that
+    // lookup goes through React Native's legacy-module interop, so this check matches exactly what the package
+    // itself uses; the calls still go through the package's default export below. Not yet checked on a device.
     if (!NativeModules.TextRecognition || !TurboModuleRegistry.get('PdfThumbnail')) return null;
     const mlMod = require('@react-native-ml-kit/text-recognition') as { default?: MlKit };
     const pdfMod = require('react-native-pdf-thumbnail') as { default?: PdfThumb };

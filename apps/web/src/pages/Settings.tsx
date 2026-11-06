@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  DEFAULT_ASSUMPTIONS, demoData, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, serialize,
+  canFinalApprove, DEFAULT_ASSUMPTIONS, demoData, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewReasonText, serialize,
   type Assumptions,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -42,7 +42,7 @@ export function SettingsPage() {
             <dd>{ob.identity ? maskPan(ob.identity.pan) : '—'}</dd>
             <dt>Aadhaar</dt>
             <dd>
-              {ob.aadhaar ? <>{maskAadhaar(ob.aadhaar.last4)} <span className="badge">Verified</span></> : '—'}
+              {ob.aadhaar ? <>{maskAadhaar(ob.aadhaar.last4)} <span className="badge">OTP verified</span></> : '—'}
             </dd>
           </dl>
           <div data-feature="onboard-review" className="account-status">
@@ -60,7 +60,8 @@ export function SettingsPage() {
         </Card>
       </div>
       {/* G2: dev builds only; the production bundle drops the Demo reviewer entirely. */}
-      {import.meta.env.DEV && documentReader.isDemo && <DemoReviewer />}
+      {/* Shown only while a final KYC approval can be given (pre-verified or under review). */}
+      {import.meta.env.DEV && documentReader.isDemo && canFinalApprove(ob.kyc) && <DemoReviewer />}
       <Card title="Assumptions (% per year)">
         <div className="form-grid">
           {FIELDS.map((f) => (
@@ -96,7 +97,9 @@ function DemoReviewer() {
   const [reason, setReason] = useState('');
   const [touched, setTouched] = useState(false);
   const kyc = data.onboarding.kyc;
-  // Only an under-review account has a pending review; a decided review stays as history only.
+  // Under review: a pending hand check (Approve or Reject). Pre-verified: the device checks passed,
+  // so only the final KYC approval is simulated (no Reject).
+  const pre = kyc.status === 'pre-verified';
   const pending = kyc.status === 'under-review' ? kyc.review : null;
   const r = reason.trim();
   const reasonErr = r.length < 1 || r.length > 200 ? 'Enter a reason (1–200 characters).' : null;
@@ -109,16 +112,24 @@ function DemoReviewer() {
     <div>
       <Card title="Demo reviewer">
         <p className="muted small">Demo mode: this stands in for the Wealthfire team's hand check.</p>
-        {!pending ? (
+        {pre ? (
+          <>
+            <p>The documents matched on this device. Final KYC is pending.</p>
+            <div className="row">
+              <button className="btn primary" onClick={() => decide('approved')}>Approve final KYC (demo)</button>
+            </div>
+          </>
+        ) : !pending ? (
           <p>No review waiting.</p>
         ) : (
           <>
             {pending.sentAt ? <p className="muted small">Sent {new Date(pending.sentAt).toLocaleString('en-IN')}</p> : null}
             <table>
-              <thead><tr><th scope="col">Field</th><th scope="col">Typed</th><th scope="col">Read from document</th></tr></thead>
+              <thead><tr><th scope="col">Field</th><th scope="col">Typed</th><th scope="col">Read from document</th><th scope="col">Reason</th></tr></thead>
               <tbody>
+                {/* Review bug 11: the reason column says why each field is under review (numbers differ / name didn't match). */}
                 {pending.fields.map((f) => (
-                  <tr key={f.field}><td>{f.field === 'pan' ? 'PAN' : 'Aadhaar'}</td><td>{f.typedMasked}</td><td>{f.readMasked}</td></tr>
+                  <tr key={f.field}><td>{f.field === 'pan' ? 'PAN' : 'Aadhaar'}</td><td>{f.typedMasked}</td><td>{f.readMasked}</td><td>{reviewReasonText(f)}</td></tr>
                 ))}
               </tbody>
             </table>
@@ -129,7 +140,7 @@ function DemoReviewer() {
             </label>
             {touched && reasonErr && <p id="rv-reason-err" className="error" role="status">{reasonErr}</p>}
             <div className="row">
-              <button className="btn primary" onClick={() => decide('approved')}>Approve</button>
+              <button className="btn primary" onClick={() => decide('approved')}>Approve final KYC (demo)</button>
               <button className="btn danger" disabled={!!reasonErr} onClick={() => decide('rejected')}>Reject</button>
             </div>
           </>

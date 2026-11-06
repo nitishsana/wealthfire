@@ -29,7 +29,6 @@ type Docs = Record<DocKind, DocFile | null>;
 const NO_DOCS: Docs = { selfie: null, aadhaar: null, pan: null };
 const DOC_KINDS: DocKind[] = ['selfie', 'aadhaar', 'pan'];
 
-export const VERIFIED_TEXT = 'Your account is open and verified. You can start investing once investing opens in Wealthfire.';
 export const UNDER_REVIEW_TEXT = "Your account is open. We're checking your details by hand, usually within 1 working day. You can use the planner meanwhile.";
 export const RETYPE_AADHAAR_LABEL = 'Enter your Aadhaar number again';
 export const CONFIRM_FAILED = 'Could not confirm your numbers. Try again.';
@@ -291,7 +290,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
     body = (
       <section data-feature="onboard-aadhaar-otp" aria-label="You're all set">
         {heading(ob.identity ? `You're all set, ${ob.identity.firstName}.` : "You're all set.")}
-        <p className="intro" role="status">{ob.kyc.status === 'verified' ? VERIFIED_TEXT : UNDER_REVIEW_TEXT}</p>
+        <p className="intro" role="status">{ob.kyc.status === 'pre-verified' ? DOC_MESSAGES.donePreVerified : ob.kyc.status === 'verified' ? DOC_MESSAGES.doneVerified : UNDER_REVIEW_TEXT}</p>
         <button type="button" className="btn primary" onClick={onFinish}>Go to Home</button>
       </section>
     );
@@ -453,12 +452,17 @@ function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack
   /** Settles the status; false when the reducer refused it. */
   onConfirm: () => boolean;
 }) {
-  const allMatch = checks.every((c) => c.matched);
+  // Numbers only: "Use number from document" makes final === read even when the name failed (matched is false then).
+  const numbersMatch = checks.every((c) => c.matched || (c.final !== '' && c.final === c.read));
+  // The numbers match but a card still goes to review: its name failed or wasn't checked (null goes to review
+  // like false), or its number was taken without a name match.
+  const nameReview = checks.some((c) => c.nameMatch !== true || !c.matched);
+  const intro = !numbersMatch ? '\u00a0' : nameReview ? DOC_MESSAGES.numbersMatchNameReview : 'Both numbers match your documents.';
   const [confirmError, setConfirmError] = useState('');
 
   return (
     <>
-      <p className="intro" role="status">{allMatch ? 'Both numbers match your documents.' : '\u00a0'}</p>
+      <p className="intro" role="status">{intro}</p>
       {checks.map((c) => (
         <FieldRow key={c.field} check={c} doc={docs[c.field]} otherDoc={docs[c.field === 'pan' ? 'aadhaar' : 'pan']} personName={personName} storedLeft={left[c.field]}
           setDoc={(d) => setDoc(c.field, d)}
@@ -495,8 +499,22 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
   const [uploading, setUploading] = useState(false);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState('');
-  /** The uploaded PDF needs a (correct) password; the field shows under the slot. */
+  /** The PDF being re-read needs a (correct) password; the field shows under the slot or the edit form. */
   const [pdfLocked, setPdfLocked] = useState(false);
+  /**
+   * Review bug 10: the file chosen in "Upload again", kept aside until its read succeeds. Only then it
+   * replaces the old document (and thumbnail); until then the old document and numbers stay together.
+   */
+  const [pending, setPending] = useState<DocFile | null>(null);
+  const pendingRef = useRef<DocFile | null>(null);
+  const keepPending = (d: DocFile | null) => {
+    const old = pendingRef.current;
+    if (old && old.uri !== d?.uri) URL.revokeObjectURL(old.uri);
+    pendingRef.current = d;
+    setPending(d);
+  };
+  // A pending file that never got used is dropped with the row.
+  useEffect(() => () => { if (pendingRef.current) URL.revokeObjectURL(pendingRef.current.uri); }, []);
   const fmt = (v: string) => (isPan ? v : showFull ? groupAadhaar(v) : maskAadhaar(v.slice(-4)));
   const draftN = normalizePan(draft);
   const draftErr = draft ? validatePan(draftN) : null;
@@ -509,15 +527,35 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
   const takenByHand = c.source === 'document' && !c.matched;
 
   /** Strict re-read (Req 8.6) of `d` against the number the user now stands by. */
-  async function reread(final: string, d: DocFile, password?: string) {
+  async function reread(final: string, d: DocFile, password?: string): Promise<'ok' | 'locked' | 'failed'> {
     setReading(true); setError('');
     // Demo reader: the number the document "really" holds is the one first typed.
     const r = await readNumber(d, c.field, true, c.typed, personName, password);
     setReading(false);
-    if ('error' in r) { setError(r.error); setPdfLocked(!!r.locked); return false; }
+    if ('error' in r) { setError(r.error); setPdfLocked(!!r.locked); return r.locked ? 'locked' : 'failed'; }
     setPdfLocked(false);
     onChange(applyReread(c, final, r.value, r.nameMatch), true);
-    return true;
+    return 'ok';
+  }
+
+  /** "Upload again": read the new file first; swap the document in only once that read succeeds. */
+  async function rereadUpload(d: DocFile, password?: string) {
+    keepPending(d); // drops an earlier pending file; this one is revoked below if its read fails
+    // Aadhaar: always checked against the verified number (c.final never changes for Aadhaar).
+    const res = await reread(c.final, d, password);
+    if (res === 'ok') {
+      pendingRef.current = null; setPending(null); // now owned by the parent, which revokes the old one
+      setDoc(d);
+      setUploading(false);
+      return;
+    }
+    // A locked PDF keeps the new file for the password; any other failure drops it.
+    keepPending(res === 'locked' && d.mime === 'application/pdf' ? d : null);
+  }
+
+  function cancelUpload() {
+    keepPending(null);
+    setUploading(false); setPdfLocked(false); setError('');
   }
 
   return (
@@ -538,7 +576,20 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
         <MatchLabel matched={numberMatch} />
       </p>
       {c.nameMatch === true && <p className="name-check good">{DOC_MESSAGES.nameMatches}</p>}
-      {c.nameMatch === false && <p className="name-check warn" role="status">{DOC_MESSAGES.nameMismatch}</p>}
+      {c.nameMatch === false && (
+        // Review bug 3: the mismatch line, then what happens next on its own line.
+        <div className="name-check warn" role="status">
+          <p>{DOC_MESSAGES.nameMismatch}</p>
+          <p>{DOC_MESSAGES.nameReview}</p>
+        </div>
+      )}
+      {c.nameMatch === null && (
+        // Not checked (e.g. a name typed in an Indian script) goes to review like a mismatch.
+        <div className="name-check" role="status">
+          <p className="muted small">{DOC_MESSAGES.nameNotChecked}</p>
+          <p>{DOC_MESSAGES.nameReview}</p>
+        </div>
+      )}
       {!isPan && (
         // R8.3: the text says what the button will do ("Hide" while shown, "Show" while hidden).
         <button type="button" className="link-btn" aria-label={showFull ? 'Hide Aadhaar number' : 'Show Aadhaar number'}
@@ -546,28 +597,26 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
           {showFull ? 'Hide' : 'Show'}
         </button>
       )}
-      {takenByHand && (
-        // "Use number from document" while the name doesn't match: the number is taken, the check goes to review.
-        <div role="status"><p>We'll check this by hand.</p></div>
-      )}
+      {/* "Use number from document" without a name match (false or null): the name lines above already show nameReview. */}
       {!c.matched && !takenByHand && (
         <div role="status">
           <p>The number you typed doesn't match your {DOC_LABEL[c.field]}.</p>
           {(c.rereads > 0 || (locked && !mayReread)) && <p>We'll check this by hand.</p>}
         </div>
       )}
-      {!c.matched && !takenByHand && !editing && !uploading && (locked ? mayReread : true) && (
+      {/* Review bug 9: after "Use number from document" without a name match (false or null), "Upload again" stays on offer. */}
+      {!c.matched && !editing && !uploading && (locked || takenByHand ? mayReread : true) && (
         <>
           <div className="row">
-            {!locked && (
+            {!locked && !takenByHand && (
               <button type="button" className="btn" disabled={reading} onClick={() => onChange(takeDocumentNumber(c), false)}>Use number from document</button>
             )}
             {mayReread && (
               <>
-                {!locked && (
-                  <button type="button" className="btn" disabled={reading} onClick={() => { setDraft(c.final); setEditing(true); setError(''); }}>Edit number</button>
+                {!locked && !takenByHand && (
+                  <button type="button" className="btn" disabled={reading} onClick={() => { setDraft(c.final); setEditing(true); setError(''); setPdfLocked(false); }}>Edit number</button>
                 )}
-                <button type="button" className="btn" disabled={reading} onClick={() => { setUploading(true); setError(''); }}>Upload again</button>
+                <button type="button" className="btn" disabled={reading} onClick={() => { setUploading(true); setError(''); setPdfLocked(false); }}>Upload again</button>
               </>
             )}
           </div>
@@ -578,7 +627,7 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
         <form noValidate onSubmit={async (e) => {
           e.preventDefault();
           if (!doc || draftErr || !draftN) return;
-          if (await reread(draftN, doc)) setEditing(false);
+          if (await reread(draftN, doc) === 'ok') setEditing(false);
         }}>
           <label className="field" htmlFor={`${id}-edit`}>
             <span>PAN</span>
@@ -590,30 +639,35 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
           {draftErr && <p id={`${id}-edit-err`} className="error" role="status">{draftErr}</p>}
           <div className="row">
             <button type="submit" className="btn primary" disabled={!!draftErr || !draftN || reading}>Check again</button>
-            <button type="button" className="btn" disabled={reading} onClick={() => setEditing(false)}>Cancel</button>
+            <button type="button" className="btn" disabled={reading} onClick={() => { setEditing(false); setPdfLocked(false); }}>Cancel</button>
           </div>
         </form>
       )}
+      {editing && !locked && pdfLocked && doc?.mime === 'application/pdf' && (
+        // Review bug 8: the "Edit number" re-read of a locked PDF needs the password too (outside the edit form: no nested forms).
+        <PdfPassword disabled={reading || !!draftErr || !draftN}
+          onOpen={async (pw) => { if (await reread(draftN, doc, pw) === 'ok') setEditing(false); }} />
+      )}
       {uploading && (
         <>
+          {/* Review bug 10: the old document stays in the slot until the new one has been read. */}
           <DocSlot kind={c.field} doc={doc} removable={false} disabled={reading} error={error || undefined}
             onChange={async (d) => {
               if (!d) return;
               // Review bug 1: the same file can't be both cards.
               if (otherDoc && sameDocument(d, otherDoc)) {
                 URL.revokeObjectURL(d.uri);
+                keepPending(null);
                 setPdfLocked(false);
                 setError(DOC_MESSAGES.sameFile);
                 return;
               }
-              setDoc(d);
-              // Aadhaar: always checked against the verified number (c.final never changes for Aadhaar).
-              if (await reread(c.final, d)) setUploading(false);
+              await rereadUpload(d);
             }} />
-          {pdfLocked && doc?.mime === 'application/pdf' && (
-            <PdfPassword disabled={reading} onOpen={async (pw) => { if (await reread(c.final, doc, pw)) setUploading(false); }} />
+          {pdfLocked && pending?.mime === 'application/pdf' && (
+            <PdfPassword disabled={reading} onOpen={(pw) => rereadUpload(pending, pw)} />
           )}
-          <button type="button" className="btn" disabled={reading} onClick={() => { setUploading(false); setPdfLocked(false); }}>Cancel</button>
+          <button type="button" className="btn" disabled={reading} onClick={cancelUpload}>Cancel</button>
         </>
       )}
       <ReadingStatus active={reading} />

@@ -214,6 +214,15 @@ export type OnboardingEvent =
   | { type: 'review-decided'; result: 'approved' | 'rejected'; reason: string | null; at: string }
   | { type: 'redo-documents' };
 
+/**
+ * Review record id from an ISO time: 'rv_' + ms in base 36, not decimal (a 13-digit ms run would
+ * break the "no 12-digit run in storage" check). null when the time doesn't parse.
+ */
+function reviewId(at: string): string | null {
+  const t = Date.parse(at);
+  return Number.isFinite(t) ? `rv_${t.toString(36)}` : null;
+}
+
 function addSend(list: string[], at: string): string[] {
   const t = Date.parse(at);
   return [...(Number.isFinite(t) ? pruneSends(list, t) : list), at];
@@ -291,8 +300,8 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       };
     case 'check-confirmed': {
       if (s.step !== 'check' || !s.identity || !s.aadhaar || validatePan(e.pan)) return s;
-      const t = Date.parse(e.at);
-      if (!Number.isFinite(t)) return s;
+      const id = reviewId(e.at);
+      if (!id) return s;
       if (e.match === 'review') {
         if (e.fields.length === 0 || !e.fields.every((f) => isSafeMask(f.typedMasked) && isSafeMask(f.readMasked))) return s;
         // The Aadhaar is locked to the OTP-verified number: a review can only show that one as typed.
@@ -307,12 +316,12 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
         kyc: {
           ...s.kyc,
           match: e.match,
-          status: e.match === 'matched' ? 'verified' : 'under-review',
+          // The device checks never give 'verified': only a final KYC confirmation does (review-decided).
+          status: e.match === 'matched' ? 'pre-verified' : 'under-review',
           returnedFromCheck: false,
-          // Base 36, not decimal: a 13-digit ms run would break the "no 12-digit run in storage" check.
           // On 'matched', a decided review from an earlier round stays as history.
           review: e.match === 'review'
-            ? { id: `rv_${t.toString(36)}`, sentAt: e.at, fields: e.fields.map((f) => ({ ...f })), decision: null }
+            ? { id, sentAt: e.at, fields: e.fields.map((f) => ({ ...f })), decision: null }
             : s.kyc.review?.decision ? s.kyc.review : null,
         },
       };
@@ -321,16 +330,25 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       if (s.step !== 'aadhaar-otp') return s;
       return { ...s, aadhaarLockedUntil: e.until };
     case 'review-decided': {
-      if (s.step !== 'done' || s.kyc.status !== 'under-review' || !s.kyc.review) return s;
+      if (s.step !== 'done') return s;
+      // Under review: decide the pending review. Pre-verified: the final KYC approval (no pending
+      // review needed; a decided record is created). Rejecting a pre-verified account isn't possible.
+      const pre = s.kyc.status === 'pre-verified';
+      if (pre ? e.result !== 'approved' : s.kyc.status !== 'under-review' || !s.kyc.review) return s;
       const reason = e.reason?.trim() ?? '';
       if (e.result === 'rejected' && (reason.length < 1 || reason.length > 200)) return s;
+      const decision = { result: e.result, reason: e.result === 'rejected' ? reason : null, at: e.at };
+      let base: ReviewRecord;
+      if (!pre && s.kyc.review) base = s.kyc.review;
+      else {
+        // Pre-verified: a new decided record (an earlier round's decided review is replaced, never re-decided).
+        const id = reviewId(e.at);
+        if (!id) return s;
+        base = { id, sentAt: e.at, fields: [], decision: null };
+      }
       return {
         ...s,
-        kyc: {
-          ...s.kyc,
-          status: e.result === 'approved' ? 'verified' : 'rejected',
-          review: { ...s.kyc.review, decision: { result: e.result, reason: e.result === 'rejected' ? reason : null, at: e.at } },
-        },
+        kyc: { ...s.kyc, status: e.result === 'approved' ? 'verified' : 'rejected', review: { ...base, decision } },
       };
     }
     case 'redo-documents':

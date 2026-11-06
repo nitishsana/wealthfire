@@ -33,7 +33,7 @@ const STEPS: readonly OnboardingStep[] = ['signin', 'otp', 'identity', 'aadhaar-
 const PROVIDERS: readonly OtpProviderId[] = ['demo', 'digilocker', 'digio'];
 const READERS: readonly DocReaderId[] = ['ondevice', 'demo', 'digio', 'hyperverge'];
 const MATCHES: readonly KycMatch[] = ['matched', 'review'];
-const STATUSES: readonly KycStatus[] = ['verified', 'under-review', 'rejected'];
+const STATUSES: readonly KycStatus[] = ['pre-verified', 'verified', 'under-review', 'rejected'];
 
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter(isStr) : []);
@@ -55,6 +55,7 @@ function sanitizeReview(raw: unknown): ReviewRecord | null {
     .map((f) => ({
       field: f.field as KycField, typedMasked: f.typedMasked as string, readMasked: f.readMasked as string,
       ...(f.nameMismatch === true ? { nameMismatch: true as const } : {}),
+      ...(f.nameNotChecked === true ? { nameNotChecked: true as const } : {}),
     }));
   const d = r.decision as Record<string, unknown> | null | undefined;
   let decision: ReviewRecord['decision'] = null;
@@ -69,12 +70,17 @@ function sanitizeKyc(raw: unknown): KycState {
   if (!raw || typeof raw !== 'object') return out;
   const k = raw as Record<string, unknown>;
   const rr = (k.rereads && typeof k.rereads === 'object' ? k.rereads : {}) as Record<string, unknown>;
+  const review = sanitizeReview(k.review);
+  let status = pick(STATUSES, k.status);
+  // Only a final KYC approval gives 'verified': stored 'verified' without an approved review
+  // decision (old data from before pre-verified, or a hand edit) is lowered to 'pre-verified'.
+  if (status === 'verified' && review?.decision?.result !== 'approved') status = 'pre-verified';
   return {
     match: pick(MATCHES, k.match),
-    status: pick(STATUSES, k.status),
+    status,
     reader: pick(READERS, k.reader),
     rereads: { pan: rereadCount(rr.pan), aadhaar: rereadCount(rr.aadhaar) },
-    review: sanitizeReview(k.review),
+    review,
     documentsAt: isStr(k.documentsAt) ? k.documentsAt : null,
     returnedFromCheck: k.returnedFromCheck === true,
   };

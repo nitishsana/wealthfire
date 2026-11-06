@@ -148,6 +148,9 @@ async function pdfToCanvas(blob: Blob, password: string | undefined): Promise<HT
     // Self-hosted (scripts/copy-ocr-assets.mjs): image decoders for scanned PDFs and the standard fonts.
     wasmUrl: assetUrl('pdfjs/wasm/'),
     standardFontDataUrl: assetUrl('pdfjs/standard_fonts/'),
+    // Review bug 12: character maps for PDFs whose fonts aren't embedded (otherwise they render without text).
+    cMapUrl: assetUrl('pdfjs/cmaps/'),
+    cMapPacked: true,
   });
   try {
     let pdf;

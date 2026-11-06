@@ -23,7 +23,11 @@ export function previewData(): AppData | null {
     identity: { firstName: 'Demo', lastName: 'User', pan: 'ABCPU1234F' },
     aadhaar: { last4: '2346', verifiedAt: now, provider: 'demo' },
     completedAt: now,
-    kyc: { ...d.onboarding.kyc, match: 'matched', status: 'verified', reader: 'demo', documentsAt: now },
+    // 'verified' needs an approved review decision (final KYC), or sanitize lowers it to 'pre-verified'.
+    kyc: {
+      ...d.onboarding.kyc, match: 'matched', status: 'verified', reader: 'demo', documentsAt: now,
+      review: { id: 'rv_' + Date.now().toString(36), sentAt: now, fields: [], decision: { result: 'approved', reason: null, at: now } },
+    },
   };
   return d;
 }

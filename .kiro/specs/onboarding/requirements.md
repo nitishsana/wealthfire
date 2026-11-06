@@ -222,3 +222,22 @@ Sources: [Zerodha account opening](https://support.zerodha.com/category/account-
 2. Check numbers SHALL show, per card, "Name matches" or "The name on this card doesn't match the name you entered. We'll check this by hand."
 3. A name mismatch on either card SHALL send the account to **Manual review**, even when the numbers match.
 4. "Use number from document" SHALL count as a match only when that card's name matches; otherwise the account goes to **Manual review**. This closes the gap where someone else's PAN card could make an account Verified.
+5. (Re-check fix, 2026-11-06) When the name cannot be checked (for example a name typed in an Indian script), the card SHALL show "We couldn't check the name on this card." and the account SHALL go to **Manual review**, never Verified.
+6. Name matching SHALL be exact for the first name. Surname words may differ only by OCR-confusable characters (0/O, 1/I/L, 5/S, 8/B, rn/m, vv/w), so a sibling with a one-letter-different name (Rakesh vs Rajesh) does not match.
+7. Relation lines (S/O, W/O, D/O, C/O, including OCR forms like SO, S1O, S/0) and the father's-name line SHALL never count towards the name match.
+8. (Final re-check fix) The typed first name SHALL equal the card holder's first name word, and the surname SHALL be the holder's last word(s); a typed first name that only appears as a middle name (for example a father's or husband's name inside the child's or wife's name) SHALL NOT match. A card that shows only an initial for the first name SHALL go to Manual review.
+9. A photo or PDF that contains more than one card SHALL be rejected with "Upload a photo with just one card."
+10. Limit, stated for the record: these on-device checks are a strong filter, not proof of identity. Before investing opens, a server-side KYC check (partner such as Digio, plus the KRA/CKYC record) SHALL confirm the status; `isEligibleToInvest` on the device is not enough on its own.
+
+
+## Change request 2026-11-06 (Nitish): device gives Pre-verified, final KYC gives Verified
+
+Reason: three review rounds showed that on-device reading of card photos cannot prove identity (covered lines, several cards in one photo, edited images). The device checks stay as a strong filter.
+
+1. WHEN Confirm passes with numbers and names matching (scenarios 1 and 2) THEN the status SHALL be **Pre-verified**, not Verified. The done screen SHALL say "Your documents match. A final KYC check confirms your account before you can invest."
+2. Any mismatch, unchecked name or manual-review case SHALL stay **Under review** (unchanged).
+3. **Verified** SHALL only be set by a final KYC confirmation: a KYC partner / KRA-CKYC check (future, server-side) or a human review approval. In local development builds the Demo reviewer can approve a Pre-verified or Under-review account to simulate this.
+4. `isEligibleToInvest(data)` SHALL be true only for **Verified**. Pre-verified is not eligible.
+5. Settings → Account SHALL show "Pre-verified — final KYC pending", "Under review", "Verified" or "Review rejected".
+6. Stored data claiming **Verified** without an approved review decision SHALL be lowered to **Pre-verified** on load.
+7. Filter fixes from round 3: every typed first-name word must match the holder's leading words in order (a shared prefix such as Mohammed/Mohd/Md/Syed/Shaik/Sk/Sri/Shri alone goes to review); an unlabelled pre-2017 PAN needs two name lines before the date (else review); a second date-of-birth or gender line in one Aadhaar or PAN photo counts as more than one card; S/O read as "5 0" is a relation line.

@@ -111,7 +111,7 @@ function Preview({ doc, small }: { doc: DocFile; small?: boolean }) {
   return <Image source={{ uri: doc.uri }} style={small ? st.thumbSmall : st.thumb} accessibilityLabel={`${SLOT_TITLE[doc.kind]} preview`} />;
 }
 
-export function DocSlot({ kind, doc, onChange, number, error: parentError, removable = true, disabled, reject, locked }: {
+export function DocSlot({ kind, doc, onChange, number, error: parentError, removable = true, disabled, reject, locked, keepOld }: {
   kind: DocKind; doc: DocFile | undefined; onChange: (d: DocFile | undefined) => void; number?: number;
   /** Read error for this document from the parent (e.g. "We couldn't read your PAN card..."). */
   error?: string;
@@ -122,6 +122,8 @@ export function DocSlot({ kind, doc, onChange, number, error: parentError, remov
   reject?: (d: DocFile) => string | null;
   /** Message when the file can't be changed any more (no re-reads left): Replace and Remove are off. */
   locked?: string;
+  /** Upload again (review bug 10): the parent keeps the old file until the new one reads, and deletes whichever is dropped. */
+  keepOld?: boolean;
 }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -134,7 +136,7 @@ export function DocSlot({ kind, doc, onChange, number, error: parentError, remov
   function accept(next: DocFile) {
     const bad = reject?.(next) ?? null;
     if (bad) { deleteDoc(next); setChoosing(false); setError(bad); return; } // keep the current file
-    deleteDoc(doc); // Replace: drop the old cache file
+    if (!keepOld) deleteDoc(doc); // Replace: drop the old cache file
     setReplacing(false); setChoosing(false); setError('');
     onChange(next);
   }
@@ -323,20 +325,29 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
   const draftErr = f === 'pan' ? validatePan(draftN) : validateAadhaar(draftN);
   const locked = f === 'aadhaar';
 
-  async function reread(final: string, withDoc: DocFile | undefined) {
+  /**
+   * Strict re-read. `newDoc`: a file from "Upload again". Review bug 10: the old file and numbers stay until the
+   * new file reads; only then is the new file shown and the old one deleted. A failed read deletes the new file.
+   */
+  async function reread(final: string, newDoc?: DocFile) {
+    const withDoc = newDoc ?? doc;
     if (!withDoc) return;
     setBusy(true); setError('');
+    let ok = false;
     try {
       const r = await reader.read(withDoc, f, { strict: true, expected: check.typed, name });
       if (!r.ok) { setError(readFailMessage(f, r)); return; }
       const v = f === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value);
       const bad = readValueError(f, v);
       if (bad) { setError(bad); return; }
+      ok = true;
       setMode('idle');
+      if (newDoc) { deleteDoc(doc); onDoc(newDoc); }
       onChange(applyReread(check, final, v, r.nameMatch), true);
     } catch {
       setError(DOC_MESSAGES.couldNotReadDocs);
     } finally {
+      if (!ok && newDoc) deleteDoc(newDoc);
       setBusy(false);
     }
   }
@@ -346,6 +357,24 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
   const tookDocument = check.source === 'document';
   const numbersMatch = check.matched || tookDocument;
   const matchText = numbersMatch ? DOC_MESSAGES.matchLabel : DOC_MESSAGES.mismatchLabel;
+  // Review bugs 9 and E: after "Use number from document" without a name match (false, or null = not checked, which
+  // also goes to review), "Upload again" stays while re-reads are left.
+  const nameRetry = tookDocument && check.nameMatch !== true && canReread(check);
+
+  const uploadAgain = mode === 'upload' ? (
+    <View style={{ marginTop: 10 }}>
+      <DocSlot kind={FIELD_DOC[f]} doc={doc} removable={false} disabled={busy} keepOld
+        reject={(d) => (otherDoc && sameDocument(d, otherDoc) ? DOC_MESSAGES.sameFile : null)}
+        onChange={(d) => { if (d) void reread(check.final, d); }} />
+      <Btn title="Cancel" disabled={busy} onPress={() => setMode('idle')} />
+    </View>
+  ) : null;
+  const readState = (
+    <>
+      {busy ? <Msg text={READING} tone="muted" /> : null}
+      {error ? <Msg text={error} /> : null}
+    </>
+  );
 
   return (
     <Card title={FIELD_LABEL[f]}>
@@ -362,14 +391,30 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
         <Text style={[st.badge, { color: numbersMatch ? theme.good : theme.bad }]} accessibilityLabel={spoken(matchText)}>{matchText}</Text>
       </View>
       {f === 'aadhaar' ? <Link title={hidden ? 'Show' : 'Hide'} label={hidden ? 'Show Aadhaar number' : 'Hide Aadhaar number'} onPress={() => setHidden(!hidden)} /> : null}
-      {/* Name check, per card (same wording as web). Msg is a polite live region. Nothing when no name was checked. */}
+      {/* Name check, per card (same wording as web). Msg is a polite live region. Review bug 3: a failed name says it goes to review. */}
       {check.nameMatch === true ? <Msg text={DOC_MESSAGES.nameMatches} tone="good" /> : null}
       {check.nameMatch === false ? <Msg text={DOC_MESSAGES.nameMismatch} tone="warn" /> : null}
-      {tookDocument && !check.matched && check.nameMatch !== false ? <Msg text={BY_HAND} tone="warn" /> : null}
+      {check.nameMatch === false ? <Msg text={DOC_MESSAGES.nameReview} tone="warn" /> : null}
+      {/* Not checked (e.g. a name typed in an Indian script) also goes to review, same as web. */}
+      {check.nameMatch === null ? <Msg text={DOC_MESSAGES.nameNotChecked} tone="muted" /> : null}
+      {check.nameMatch === null ? <Msg text={DOC_MESSAGES.nameReview} tone="warn" /> : null}
+      {tookDocument && !check.matched && check.nameMatch === true ? <Msg text={BY_HAND} tone="warn" /> : null}
+      {nameRetry ? (
+        <>
+          {mode === 'idle' ? (
+            <>
+              <Btn title="Upload again" disabled={busy} onPress={() => { setError(''); setMode('upload'); }} />
+              <Text style={[s.small, { marginTop: 6 }]}>{left} re-check{left === 1 ? '' : 's'} left</Text>
+            </>
+          ) : null}
+          {uploadAgain}
+          {readState}
+        </>
+      ) : null}
       {!numbersMatch ? (
         <>
           <Msg text={doesntMatch(f)} />
-          {(check.rereads > 0 || (locked && !canReread(check))) && check.nameMatch !== false ? <Msg text={BY_HAND} tone="warn" /> : null}
+          {(check.rereads > 0 || (locked && !canReread(check))) && check.nameMatch === true ? <Msg text={BY_HAND} tone="warn" /> : null}
           {/* Locked Aadhaar with no re-reads left: nothing to choose, it goes to manual review (same as web). */}
           {mode === 'idle' && (!locked || canReread(check)) ? (
             <>
@@ -392,20 +437,12 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
                 autoCapitalize="characters" autoCorrect={false} autoComplete="off" importantForAutofill="no" textContentType="none"
                 keyboardType={f === 'pan' ? 'default' : 'number-pad'} secureTextEntry={f === 'aadhaar' && hidden} maxLength={f === 'pan' ? 10 : 14}
                 error={draft && draftErr ? draftErr : null} />
-              <Btn primary title="Check again" disabled={busy || draftErr !== null} onPress={() => void reread(draftN, doc)} />
+              <Btn primary title="Check again" disabled={busy || draftErr !== null} onPress={() => void reread(draftN)} />
               <Btn title="Cancel" disabled={busy} onPress={() => setMode('idle')} />
             </View>
           ) : null}
-          {mode === 'upload' ? (
-            <View style={{ marginTop: 10 }}>
-              <DocSlot kind={FIELD_DOC[f]} doc={doc} removable={false} disabled={busy}
-                reject={(d) => (otherDoc && sameDocument(d, otherDoc) ? DOC_MESSAGES.sameFile : null)}
-                onChange={(d) => { if (!d) return; onDoc(d); void reread(check.final, d); }} />
-              <Btn title="Cancel" disabled={busy} onPress={() => setMode('idle')} />
-            </View>
-          ) : null}
-          {busy ? <Msg text={READING} tone="muted" /> : null}
-          {error ? <Msg text={error} /> : null}
+          {uploadAgain}
+          {readState}
         </>
       ) : null}
     </Card>
@@ -428,11 +465,16 @@ export function CheckStep({ checks, setChecks, docs, setDoc, name, onRereadUsed,
 }) {
   const [hidden, setHidden] = useState(false); // Aadhaar shows in full on this screen only, with Hide (Req 8.3)
   const allMatch = checks.every((c) => c.matched);
+  // Review bugs 3 and E: numbers equal but a card's name failed or wasn't checked (null), so Confirm goes to review;
+  // say so instead of "Both numbers match" (same rule as web).
+  const nameFailed = checks.some((c) => c.nameMatch !== true);
+  const numbersEqual = checks.every((c) => c.matched || c.source === 'document');
   // Confirm is allowed straight away (same as web): any field still differing goes to manual review.
 
   return (
     <Screen feature="onboard-check" title="Check your numbers">
-      {allMatch ? <Msg text="Both numbers match your documents." tone="good" /> : null}
+      {allMatch && !nameFailed ? <Msg text="Both numbers match your documents." tone="good" /> : null}
+      {numbersEqual && nameFailed ? <Msg text={DOC_MESSAGES.numbersMatchNameReview} tone="warn" /> : null}
       {checks.map((c, i) => (
         <FieldCard key={c.field} check={c} typedField={c.field} doc={docs[FIELD_DOC[c.field]]} hidden={hidden} setHidden={setHidden}
           otherDoc={docs[c.field === 'pan' ? 'aadhaar' : 'pan']} name={name}

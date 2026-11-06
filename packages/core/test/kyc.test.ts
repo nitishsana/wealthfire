@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_REREADS, applyReread, canReread, checkOutcome, compareField, emptyData, emptyOnboarding, initialChecks,
-  isEligibleToInvest, kycStatusLabel, reviewFields, takeDocumentNumber,
+  isEligibleToInvest, kycStatusLabel, reviewFields, reviewReasonText, takeDocumentNumber, canFinalApprove,
+  type KycStatus,
 } from '../src';
 
 const PAN = 'ABCPS1234F';
@@ -84,9 +85,9 @@ describe('name check', () => {
       { field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'XXXX XXXX 2346', nameMismatch: true },
     ]);
   });
-  it('names true or null (not checked) with matching numbers → matched', () => {
+  it('names true with matching numbers → matched; a read name left null (not checked) → review', () => {
     expect(checkOutcome(initialChecks(typed, typed, { pan: true, aadhaar: true })).match).toBe('matched');
-    expect(checkOutcome(initialChecks(typed, typed, { pan: null, aadhaar: true })).match).toBe('matched');
+    expect(checkOutcome(initialChecks(typed, typed, { pan: null, aadhaar: true })).match).toBe('review');
     expect(reviewFields(initialChecks(typed, typed, { pan: true, aadhaar: true }))).toEqual([]);
   });
   it('number and name both wrong → one review entry with both', () => {
@@ -114,12 +115,13 @@ describe('name check', () => {
 });
 
 describe('eligibility and labels', () => {
-  const withKyc = (step: 'done' | 'aadhaar-otp', status: 'verified' | 'under-review' | 'rejected' | null) => ({
+  const withKyc = (step: 'done' | 'aadhaar-otp', status: KycStatus | null) => ({
     ...emptyData(),
     onboarding: { ...emptyOnboarding(), step, kyc: { ...emptyOnboarding().kyc, match: 'matched' as const, status } },
   });
   it('true only for done + verified', () => {
     expect(isEligibleToInvest(withKyc('done', 'verified'))).toBe(true);
+    expect(isEligibleToInvest(withKyc('done', 'pre-verified'))).toBe(false);
     expect(isEligibleToInvest(withKyc('done', 'under-review'))).toBe(false);
     expect(isEligibleToInvest(withKyc('done', 'rejected'))).toBe(false);
     expect(isEligibleToInvest(withKyc('done', null))).toBe(false);
@@ -131,5 +133,77 @@ describe('eligibility and labels', () => {
     expect(kycStatusLabel('under-review')).toBe('Under review');
     expect(kycStatusLabel('rejected')).toBe('Review rejected');
     expect(kycStatusLabel(null)).toBe('Not started');
+    expect(kycStatusLabel('pre-verified')).toBe('Pre-verified — final KYC pending');
+  });
+  it('canFinalApprove: under review or pre-verified only', () => {
+    const k = (status: KycStatus | null) => ({ ...emptyOnboarding().kyc, status });
+    expect(canFinalApprove(k('under-review'))).toBe(true);
+    expect(canFinalApprove(k('pre-verified'))).toBe(true);
+    expect(canFinalApprove(k('verified'))).toBe(false);
+    expect(canFinalApprove(k('rejected'))).toBe(false);
+    expect(canFinalApprove(k(null))).toBe(false);
+  });
+});
+
+describe('name not checked (nameMatch null)', () => {
+  const typed = { pan: PAN, aadhaar: AADHAAR };
+  it('null after a read that was given a name needs review (same as false)', () => {
+    const cs = initialChecks(typed, typed, { pan: null, aadhaar: null });
+    expect(cs.every((c) => c.nameRequired === true && c.nameMatch === null)).toBe(true);
+    expect(checkOutcome(cs)).toEqual({ match: 'review', differs: ['pan', 'aadhaar'] });
+    expect(reviewFields(cs)).toEqual([
+      { field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'ABCPS****F', nameNotChecked: true },
+      { field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'XXXX XXXX 2346', nameNotChecked: true },
+    ]);
+    // one card checked, one not → only the unchecked one needs review
+    expect(checkOutcome(initialChecks(typed, typed, { pan: true, aadhaar: null }))).toEqual({ match: 'review', differs: ['aadhaar'] });
+    // a re-read that now matches clears it; one that still returns null keeps it in review
+    const [pan] = cs;
+    expect(checkOutcome([applyReread(pan!, PAN, PAN, true)])).toEqual({ match: 'matched', differs: [] });
+    expect(checkOutcome([applyReread(pan!, PAN, PAN, null)])).toEqual({ match: 'review', differs: ['pan'] });
+  });
+  it('no name check at all (initialChecks without nameMatch) still matches on numbers', () => {
+    const cs = initialChecks(typed, typed);
+    expect(cs.some((c) => 'nameRequired' in c)).toBe(false);
+    expect(checkOutcome(cs)).toEqual({ match: 'matched', differs: [] });
+  });
+  it('takeDocumentNumber still needs nameMatch === true', () => {
+    const [pan] = initialChecks({ pan: 'ABCPS1235F', aadhaar: AADHAAR }, typed, { pan: null, aadhaar: null });
+    const used = takeDocumentNumber(pan!);
+    expect(used).toMatchObject({ final: PAN, matched: false, source: 'document', nameMatch: null });
+    expect(checkOutcome([used])).toEqual({ match: 'review', differs: ['pan'] });
+  });
+});
+
+describe('reviewReasonText', () => {
+  it('names the reason for each review row', () => {
+    expect(reviewReasonText({ field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'AAAPZ****Z' })).toBe("Number doesn't match");
+    expect(reviewReasonText({ field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'XXXX XXXX 2346', nameMismatch: true }))
+      .toBe("Name doesn't match");
+    expect(reviewReasonText({ field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'AAAPZ****Z', nameMismatch: true }))
+      .toBe("Number and name don't match");
+    expect(reviewReasonText({ field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'ABCPS****F', nameNotChecked: true }))
+      .toBe('Name not checked');
+    expect(reviewReasonText({ field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'AAAPZ****Z', nameNotChecked: true }))
+      .toBe("Number doesn't match, name not checked");
+  });
+
+  it('Devanagari parent + child PAN → review (end to end)', async () => {
+    const { createOnDeviceReader } = await import('../src');
+    const childPan = 'INCOME TAX DEPARTMENT\nName\nRAHUL SANA\nFather\'s Name\nNITISH SANA\nDate of Birth 01/01/2015\nABCPS1234F';
+    const r = createOnDeviceReader(async () => [childPan]);
+    const file = { kind: 'pan' as const, name: 'p.jpg', mime: 'image/jpeg' as const, size: 1000, uri: 'blob:x' };
+    for (const name of [{ first: 'नितीश', last: 'साना' }, { first: 'Nitish', last: 'साना' }]) {
+      const read = await r.read(file, 'pan', { strict: false, name });
+      expect(read).toEqual({ ok: true, value: PAN, nameMatch: null });
+      const nm = read.ok ? read.nameMatch : null;
+      const cs = initialChecks({ pan: PAN, aadhaar: AADHAAR }, { pan: PAN, aadhaar: AADHAAR }, { pan: nm, aadhaar: true });
+      expect(checkOutcome(cs)).toEqual({ match: 'review', differs: ['pan'] });
+      expect(takeDocumentNumber(cs[0]!).matched).toBe(false);
+    }
+  });
+  it('works on the rows reviewFields makes', () => {
+    const cs = initialChecks({ pan: 'AAAPZ9999Z', aadhaar: AADHAAR }, { pan: PAN, aadhaar: AADHAAR }, { pan: true, aadhaar: false });
+    expect(reviewFields(cs).map(reviewReasonText)).toEqual(["Number doesn't match", "Name doesn't match"]);
   });
 });

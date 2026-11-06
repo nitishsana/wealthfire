@@ -366,11 +366,38 @@ describe('Part C: reducer order (Aadhaar OTP once, before documents)', () => {
     expect(s.step).toBe('documents');
   });
 
-  it('full path signin → done (verified)', () => {
+  it('full path signin → done (pre-verified, not eligible until the final KYC approval)', () => {
     const done = runHappyPath();
     expect(done.step).toBe('done');
-    expect(done.kyc).toMatchObject({ match: 'matched', status: 'verified', review: null, reader: 'ondevice' });
-    expect(isEligibleToInvest({ ...emptyData(), onboarding: done })).toBe(true);
+    expect(done.kyc).toMatchObject({ match: 'matched', status: 'pre-verified', review: null, reader: 'ondevice' });
+    expect(isEligibleToInvest({ ...emptyData(), onboarding: done })).toBe(false);
+    const final = onboardingReducer(done, { type: 'review-decided', result: 'approved', reason: null, at });
+    expect(final.kyc.status).toBe('verified');
+    expect(isEligibleToInvest({ ...emptyData(), onboarding: final })).toBe(true);
+  });
+
+  it('pre-verified approval creates a decided record (fields [], id/sentAt from at)', () => {
+    const done = runHappyPath();
+    const final = onboardingReducer(done, { type: 'review-decided', result: 'approved', reason: 'ignored', at });
+    expect(final.kyc.review).toEqual({
+      id: `rv_${Date.parse(at).toString(36)}`, sentAt: at, fields: [], decision: { result: 'approved', reason: null, at },
+    });
+    // a pre-verified account can't be rejected, bad times are ignored, and the result survives a reload
+    expect(onboardingReducer(done, { type: 'review-decided', result: 'rejected', reason: 'Blurred', at })).toBe(done);
+    expect(onboardingReducer(done, { type: 'review-decided', result: 'approved', reason: null, at: 'nope' })).toBe(done);
+    expect(sanitizeOnboarding(JSON.parse(JSON.stringify(final))).kyc.status).toBe('verified');
+    expect(JSON.stringify(final)).not.toMatch(/\d{12}/);
+  });
+
+  it('pre-verified after a rejected round: approval replaces the old decided record', () => {
+    const no = onboardingReducer(toReviewDone(at), { type: 'review-decided', result: 'rejected', reason: 'Blurred', at });
+    let s = onboardingReducer(no, { type: 'redo-documents' });
+    s = onboardingReducer(s, { type: 'documents-ready', at, reader: 'demo' });
+    s = onboardingReducer(s, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at });
+    const at2 = iso(T0 + 99_000);
+    const ok = onboardingReducer(s, { type: 'review-decided', result: 'approved', reason: null, at: at2 });
+    expect(ok.kyc.status).toBe('verified');
+    expect(ok.kyc.review).toEqual({ id: `rv_${(T0 + 99_000).toString(36)}`, sentAt: at2, fields: [], decision: { result: 'approved', reason: null, at: at2 } });
   });
 
   it('check-confirmed saves the final PAN and finishes', () => {
@@ -488,7 +515,7 @@ describe('Part C: reducer order (Aadhaar OTP once, before documents)', () => {
         type: 'check-confirmed', match: 'review', pan: 'ABCPS1234F', at,
         fields: [{ field: 'aadhaar', typedMasked: '234123412346', readMasked: 'XXXX XXXX 1234' }],
       }],
-      [runHappyPath(), { type: 'review-decided', result: 'approved', reason: null, at }],
+      [runHappyPath(), { type: 'review-decided', result: 'rejected', reason: 'Blurred', at }],
       [runHappyPath(), { type: 'redo-documents' }],
       [runHappyPath(), { type: 'back-to-identity' }],
       [emptyOnboarding(), { type: 'documents-ready', at, reader: 'demo' }],
@@ -601,7 +628,7 @@ describe('Bug 3: matched Confirm keeps only decided review history', () => {
     let s = onboardingReducer(no, { type: 'redo-documents' });
     s = onboardingReducer(s, { type: 'documents-ready', at, reader: 'demo' });
     s = onboardingReducer(s, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at });
-    expect(s.kyc.status).toBe('verified');
+    expect(s.kyc.status).toBe('pre-verified');
     expect(s.kyc.review).toEqual(no.kyc.review);
     expect(s.kyc.review?.decision?.result).toBe('rejected');
   });
@@ -610,7 +637,26 @@ describe('Bug 3: matched Confirm keeps only decided review history', () => {
     const check = onboardingReducer(toDocuments(), { type: 'documents-ready', at, reader: 'demo' });
     const s: OnboardingState = { ...check, kyc: { ...check.kyc, review: { id: 'rv_x', sentAt: at, fields: PAN_REVIEW, decision: null } } };
     const done = onboardingReducer(s, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at });
-    expect(done.kyc).toMatchObject({ status: 'verified', review: null });
+    expect(done.kyc).toMatchObject({ status: 'pre-verified', review: null });
+  });
+});
+
+describe('Pre-verified: stored verified needs an approved review decision', () => {
+  it('verified without an approved decision is lowered to pre-verified on load', () => {
+    const done = runHappyPath();
+    const fake = { ...done, kyc: { ...done.kyc, status: 'verified' } };
+    expect(sanitizeOnboarding(fake).kyc.status).toBe('pre-verified');
+    const rejected = onboardingReducer(toReviewDone(), { type: 'review-decided', result: 'rejected', reason: 'Blurred', at: iso(T0) });
+    expect(sanitizeOnboarding({ ...rejected, kyc: { ...rejected.kyc, status: 'verified' } }).kyc.status).toBe('pre-verified');
+    const pending = toReviewDone();
+    expect(sanitizeOnboarding({ ...pending, kyc: { ...pending.kyc, status: 'verified' } }).kyc.status).toBe('pre-verified');
+    expect(isEligibleToInvest({ ...emptyData(), onboarding: sanitizeOnboarding(fake) })).toBe(false);
+  });
+  it('verified with an approved decision stays verified; pre-verified stays pre-verified', () => {
+    const approved = onboardingReducer(toReviewDone(), { type: 'review-decided', result: 'approved', reason: null, at: iso(T0) });
+    expect(sanitizeOnboarding(approved).kyc.status).toBe('verified');
+    expect(sanitizeOnboarding(runHappyPath()).kyc.status).toBe('pre-verified');
+    expect(sanitizeOnboarding(runHappyPath()).step).toBe('done');
   });
 });
 

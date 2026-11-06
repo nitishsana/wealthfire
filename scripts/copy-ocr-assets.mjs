@@ -10,6 +10,7 @@
 //   ocr/pdfjs/wasm/                         pdf.js image decoders (JPEG2000, JBIG2, colour profiles) for
 //                                           scanned PDFs; passed to pdf.js as wasmUrl (QuickJS scripting skipped)
 //   ocr/pdfjs/standard_fonts/               pdf.js standard fonts, passed as standardFontDataUrl
+//   ocr/pdfjs/cmaps/                        pdf.js packed character maps (.bcmap), passed as cMapUrl
 //
 // Usage: node scripts/copy-ocr-assets.mjs
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -53,6 +54,8 @@ const files = [
   // PDF scripting is never enabled, so the QuickJS engine is not needed.
   ...pdfjsDir('wasm', (name) => name.startsWith('quickjs')),
   ...pdfjsDir('standard_fonts'),
+  // Packed character maps for PDFs whose (CJK / CID) fonts aren't embedded; passed as cMapUrl.
+  ...pdfjsDir('cmaps'),
 ];
 
 for (const [from] of files) {

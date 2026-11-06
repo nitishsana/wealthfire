@@ -116,7 +116,11 @@ export type OtpProviderId = 'demo' | 'digilocker' | 'digio';
 
 export type KycField = 'pan' | 'aadhaar';
 export type KycMatch = 'matched' | 'review';
-export type KycStatus = 'verified' | 'under-review' | 'rejected';
+/**
+ * 'pre-verified': the device checks passed (numbers and names match). Not eligible to invest:
+ * only a final KYC confirmation (KYC partner / KRA-CKYC, or a review approval) sets 'verified'.
+ */
+export type KycStatus = 'pre-verified' | 'verified' | 'under-review' | 'rejected';
 export type DocReaderId = 'ondevice' | 'demo' | 'digio' | 'hyperverge';
 
 /** A manual review of numbers that did not match their documents. Masks only, never a full Aadhaar. */
@@ -126,7 +130,8 @@ export interface ReviewRecord {
   /** ISO, set on Check numbers → Confirm */
   sentAt: string;
   /** `nameMismatch`: the name on that card didn't match the name the user entered. */
-  fields: { field: KycField; typedMasked: string; readMasked: string; nameMismatch?: true }[];
+  /** `nameNotChecked`: the name couldn't be checked (e.g. typed in an Indian script), so a person checks it. */
+  fields: { field: KycField; typedMasked: string; readMasked: string; nameMismatch?: true; nameNotChecked?: true }[];
   decision: { result: 'approved' | 'rejected'; reason: string | null; at: string } | null;
 }
 

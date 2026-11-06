@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import {
-  canSend, checkOutcome, MAX_REREADS, resendIn, groupAadhaar, maskAadhaar, maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan,
+  canSend, checkOutcome, DOC_MESSAGES, MAX_REREADS, resendIn, groupAadhaar, maskAadhaar, maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan,
   onboardingReducer, OTP_RULES, panSurnameWarning, pruneSends, reviewFields, validateAadhaar, validateEmail, validateMobile, validateName,
   validatePan, type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OtpChannel, type OtpProvider, type OtpVerifyResult,
 } from '@wealthfire/core';
@@ -258,8 +258,8 @@ function IdentityStep({ onContinue }: { onContinue: (firstName: string, lastName
   );
 }
 
-// Done-screen texts (Req 9.2, 9.3), same as web.
-const DONE_VERIFIED = 'Your account is open and verified. You can start investing once investing opens in Wealthfire.';
+// Done-screen texts (Req 9.2, 9.3), same as web. A device-only match is 'pre-verified' (DOC_MESSAGES.donePreVerified);
+// DOC_MESSAGES.doneVerified is only for a final KYC approval.
 const DONE_REVIEW = "Your account is open. We're checking your details by hand, usually within 1 working day. You can use the planner meanwhile.";
 const CONFIRM_FAILED = 'Could not confirm your numbers. Try again.';
 
@@ -404,7 +404,7 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
     const first = ob.identity?.firstName;
     return (
       <Screen feature="onboard-aadhaar-otp" title={first ? `You're all set, ${first}.` : "You're all set."}
-        intro={ob.kyc.status === 'verified' ? DONE_VERIFIED : DONE_REVIEW}>
+        intro={ob.kyc.status === 'verified' ? DOC_MESSAGES.doneVerified : ob.kyc.status === 'pre-verified' ? DOC_MESSAGES.donePreVerified : DONE_REVIEW}>
         <Btn primary title="Go to Home" onPress={onFinish} />
       </Screen>
     );

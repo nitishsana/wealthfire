@@ -16,6 +16,11 @@ export interface FieldCheck {
   source: 'typed' | 'document' | 'edited';
   /** Name on this card vs the entered name: true / false, or null when not checked (no name given). */
   nameMatch: boolean | null;
+  /**
+   * true when the read was given a name (initialChecks got a nameMatch argument). Then only
+   * nameMatch === true passes: null (e.g. a name typed in an Indian script) needs review.
+   */
+  nameRequired?: true;
 }
 
 const norm = (field: KycField, v: string) => (field === 'pan' ? normalizePan(v) : normalizeAadhaar(v));
@@ -38,6 +43,7 @@ export function initialChecks(
     return {
       field, typed: t, read: r, final: t, matched: compareField(field, t, r), rereads: 0, source: 'typed',
       nameMatch: nameMatch?.[field] ?? null,
+      ...(nameMatch ? { nameRequired: true as const } : {}),
     };
   });
 }
@@ -97,11 +103,14 @@ export function applyReread(c: FieldCheck, final: string, reread: string, nameMa
   };
 }
 
-/** A field needs a person to look at it: the numbers differ, or the name on the card didn't match. */
-const needsReview = (c: FieldCheck) => !c.matched || c.nameMatch === false;
+/** The name on this card failed, or a required name check couldn't be done (null). */
+const nameFailed = (c: FieldCheck) => c.nameMatch === false || (c.nameRequired === true && c.nameMatch !== true);
+/** A field needs a person to look at it: the numbers differ, or the name check didn't pass. */
+const needsReview = (c: FieldCheck) => !c.matched || nameFailed(c);
 
 /**
- * 'matched' only when every field matched AND no card's name failed (nameMatch === false);
+ * 'matched' only when every field matched AND no card's name failed (nameMatch === false, or null
+ * when the read was given a name: "not checked" is never a pass);
  * otherwise 'review' with the fields that need it (a name failure lists that card's field).
  */
 export function checkOutcome(cs: FieldCheck[]): { match: KycMatch; differs: KycField[] } {
@@ -118,19 +127,41 @@ export function reviewFields(cs: FieldCheck[]): ReviewRecord['fields'] {
     .map((c) => ({
       field: c.field, typedMasked: mask(c.field, c.final), readMasked: mask(c.field, c.read),
       ...(c.nameMatch === false ? { nameMismatch: true as const } : {}),
+      ...(c.nameMatch !== false && nameFailed(c) ? { nameNotChecked: true as const } : {}),
     }));
 }
 
 /**
- * Investing is allowed only after onboarding is done and KYC is verified.
+ * Why a review row needs a person, for the review records table:
+ * "Name doesn't match", "Number doesn't match" or "Number and name don't match".
+ * A row without nameMismatch is always a number difference. With nameMismatch, the number counts
+ * as different only when the masked numbers differ (masks can hide a difference in the middle).
+ */
+export function reviewReasonText(field: ReviewRecord['fields'][number]): string {
+  if (field.nameNotChecked === true && field.nameMismatch !== true) {
+    return field.typedMasked === field.readMasked ? 'Name not checked' : "Number doesn't match, name not checked";
+  }
+  if (field.nameMismatch !== true) return "Number doesn't match";
+  return field.typedMasked === field.readMasked ? "Name doesn't match" : "Number and name don't match";
+}
+
+/**
+ * Investing is allowed only after onboarding is done and KYC is verified (a final KYC confirmation;
+ * 'pre-verified' from the device checks is not enough).
  * Client-side only: the future investment journey must re-check this on a server.
  */
 export function isEligibleToInvest(data: AppData): boolean {
   return data.onboarding?.step === 'done' && data.onboarding.kyc?.status === 'verified';
 }
 
+/** A final KYC approval (review-decided 'approved') can be given: status under review or pre-verified. */
+export function canFinalApprove(kyc: KycState): boolean {
+  return kyc.status === 'under-review' || kyc.status === 'pre-verified';
+}
+
 export function kycStatusLabel(s: KycStatus | null): string {
   switch (s) {
+    case 'pre-verified': return 'Pre-verified — final KYC pending';
     case 'verified': return 'Verified';
     case 'under-review': return 'Under review';
     case 'rejected': return 'Review rejected';

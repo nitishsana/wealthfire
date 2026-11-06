@@ -3,7 +3,7 @@
 // that uploads the file over HTTPS and returns only the number. Files are never stored or logged.
 import type { DocReaderId, KycField } from './types';
 import { normalizeAadhaar, normalizePan, validateAadhaar, validatePan, verhoeffCheckDigit } from './onboarding';
-import { nameOnCard, parseAadhaarText, parsePanText, pickMajority } from './cardtext';
+import { cardBlock, hasMultipleCards, nameOnCard, parseAadhaarText, parsePanText, pickMajority } from './cardtext';
 
 export type DocKind = 'selfie' | 'aadhaar' | 'pan';
 export type DocMime = 'image/jpeg' | 'image/png' | 'application/pdf';
@@ -30,7 +30,10 @@ export interface ReadOptions {
 }
 
 export type ReadResult =
-  /** nameMatch: does the entered name appear on the card? null when no name was given. */
+  /**
+   * nameMatch: is the entered name the card holder's name? null = not checked: no name was given,
+   * or the typed first / last name has no Latin letters (show DOC_MESSAGES.nameNotChecked).
+   */
   | { ok: true; value: string; nameMatch: boolean | null }
   | { ok: false; reason: 'unreadable' | 'invalid' | 'network' | 'locked'; message: string };
 
@@ -61,6 +64,14 @@ export const DOC_MESSAGES = {
   readerUnavailable: "Document reading isn't available in this app build.",
   nameMatches: 'Name matches',
   nameMismatch: "The name on this card doesn't match the name you entered.",
+  /** Shown with nameMismatch: the check goes to manual review. */
+  nameReview: "We'll check this by hand.",
+  /** Check numbers summary when both numbers match but a card's name didn't (instead of "Both numbers match…"). */
+  numbersMatchNameReview: "Both numbers match your documents, but a name doesn't. We'll check this by hand.",
+  /** nameMatch === null after a read with a name (e.g. the name was typed in an Indian script). */
+  nameNotChecked: "We couldn't check the name on this card.",
+  /** More than one card in one photo / file. */
+  oneCardOnly: 'Upload a photo with just one card.',
   companyPan: 'This is a company or firm PAN. Upload your personal PAN card.',
   pdfLocked: "This PDF has a password. Enter it to read the file. It isn't saved.",
   pdfLockedPhone: 'This PDF has a password. Remove the password or upload a photo of the card instead.',
@@ -68,6 +79,10 @@ export const DOC_MESSAGES = {
   sameFile: 'You uploaded the same file for both cards. Upload your Aadhaar and PAN separately.',
   noRereadsLeft: 'No re-checks left for this card.',
   verifiedNumberLabel: 'Verified number',
+  /** Done screen after the device checks pass (status 'pre-verified'). */
+  donePreVerified: 'Your documents match. A final KYC check confirms your account before you can invest.',
+  /** Done screen after a final KYC approval (status 'verified'). Same text on web and phones. */
+  doneVerified: 'Your final KYC check is complete. Your account is verified.',
   unreadable: (field: KycField) =>
     `We couldn't read your ${field === 'pan' ? 'PAN' : 'Aadhaar'} card. Upload a clearer photo or PDF.`,
 } as const;
@@ -169,6 +184,11 @@ export function createOnDeviceReader(extract: TextExtractor): DocumentReader {
       if (!parses.some((p) => p.looksLikeCard)) {
         return { ok: false, reason: 'invalid', message: field === 'pan' ? DOC_MESSAGES.notPan : DOC_MESSAGES.notAadhaar };
       }
+      // One card per photo: a number from one card and a name from another must never pair up.
+      const allTexts = (Array.isArray(texts) ? texts : []).filter((t): t is string => typeof t === 'string');
+      if (allTexts.some((t) => hasMultipleCards(t, field))) {
+        return { ok: false, reason: 'unreadable', message: DOC_MESSAGES.oneCardOnly };
+      }
       // Several different valid numbers: the most frequent across passes wins, a tie is unreadable.
       const value = pickMajority(parses.flatMap((p) => p.candidates));
       // 4th PAN character is the holder type; only 'P' (person) is a personal PAN.
@@ -176,8 +196,9 @@ export function createOnDeviceReader(extract: TextExtractor): DocumentReader {
         return { ok: false, reason: 'invalid', message: DOC_MESSAGES.companyPan };
       }
       if (value) {
-        const strings = (Array.isArray(texts) ? texts : []).filter((t): t is string => typeof t === 'string');
-        const nameMatch = opts.name ? nameOnCard(strings, opts.name.first, opts.name.last) : null;
+        // The name is taken only from the card block that holds the picked number (passes without it don't count).
+        const blocks = allTexts.map((t) => cardBlock(t, field, value)).filter((b): b is string => b !== null);
+        const nameMatch = opts.name ? nameOnCard(blocks, opts.name.first, opts.name.last, field) : null;
         return { ok: true, value, nameMatch };
       }
       if (field === 'aadhaar' && parses.some((p) => p.masked)) {
