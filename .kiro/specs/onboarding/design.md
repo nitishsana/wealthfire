@@ -233,3 +233,203 @@ Then run `npm test`, `npm run typecheck`, `npm run parity`, `npm run build`, and
 ## 9. Feature log
 
 On merge, add to `FEATURES.md` a new `## Onboarding` section (after Platform) with five rows: sign in with mobile or email, contact OTP, profile identity details (name, PAN, Aadhaar with checks), mandatory Aadhaar OTP (demo provider, DigiLocker/Digio slot), Settings Account card with sign out. Each row ends `(PR #n)`.
+
+
+---
+
+# Part B — Documents, number check and manual review (Requirements 7–9)
+
+Change request of 2026-11-06. Decisions taken by Nitish: demo document reader with a partner slot; demo reviewer panel; documents in memory only; numbers are still typed in "Your details" and the documents check them; Google Drive on desktop through Google's own picker.
+
+## B1. Flow and steps
+
+```
+signin → otp → identity → documents → check → aadhaar-otp → done
+                              │           │            │
+                       DocumentReader (v1: DemoDocumentReader; later Digio / HyperVerge OCR)
+```
+
+- `OnboardingStep` becomes `'signin' | 'otp' | 'identity' | 'documents' | 'check' | 'aadhaar-otp' | 'done'`.
+- `identity-saved` now goes to `documents` (not `aadhaar-otp`). The first Aadhaar OTP is sent when the user taps Confirm on Check numbers, for the **final** Aadhaar number.
+- Reload on `documents`, `check` or `aadhaar-otp`: the full Aadhaar and the documents are gone (memory only), so the screen dispatches `back-to-identity` (name and PAN kept). Locks and send history still apply.
+
+## B2. Data model additions (`packages/core/src/types.ts`)
+
+```ts
+export type KycField = 'pan' | 'aadhaar';
+export type KycMatch = 'matched' | 'review';
+export type KycStatus = 'verified' | 'under-review' | 'rejected';
+export type DocReaderId = 'demo' | 'digio' | 'hyperverge';
+
+export interface ReviewRecord {
+  id: string;                    // 'rv_' + time in ms
+  sentAt: string;                // ISO, set when the Aadhaar OTP passes
+  fields: { field: KycField; typedMasked: string; readMasked: string }[]; // masks only, never full Aadhaar
+  decision: { result: 'approved' | 'rejected'; reason: string | null; at: string } | null;
+}
+
+export interface KycState {
+  match: KycMatch | null;        // set on Check numbers → Confirm
+  status: KycStatus | null;      // set when the Aadhaar OTP passes; changed by a review decision
+  reader: DocReaderId | null;
+  rereads: { pan: number; aadhaar: number }; // max 2 each (Req 8.8)
+  review: ReviewRecord | null;
+  documentsAt: string | null;    // time all 3 documents were added (the files themselves are never stored)
+}
+
+export interface OnboardingState { /* ...Part A fields... */ kyc: KycState }
+```
+
+`emptyKyc()` = `{ match: null, status: null, reader: null, rereads: { pan: 0, aadhaar: 0 }, review: null, documentsAt: null }`.
+
+`sanitizeOnboarding` additions: unknown `kyc` → `emptyKyc()`; masks must match `/^[A-Z0-9X* ]{4,14}$/`; rereads clamped to 0–2; `step: 'done'` with `kyc.status === null` is lowered to `identity` (only local previews made before this change are affected).
+
+## B3. Document reader slot (`packages/core/src/docreader.ts`)
+
+```ts
+export type DocKind = 'selfie' | 'aadhaar' | 'pan';
+export type DocMime = 'image/jpeg' | 'image/png' | 'application/pdf';
+
+export interface DocFile {
+  kind: DocKind;
+  name: string;
+  mime: DocMime;
+  size: number;                  // bytes
+  /** Opaque handle the app can read: blob: URL on web, file:// cache URI on phones. Never stored. */
+  uri: string;
+}
+
+export interface ReadOptions {
+  strict: boolean;               // true on a re-read (Req 8.6)
+  /** Demo reader only: the number to compare against. A real reader must never trust it. */
+  expected?: string;
+}
+
+export type ReadResult =
+  | { ok: true; value: string }
+  | { ok: false; reason: 'unreadable' | 'invalid' | 'network'; message: string };
+
+export interface DocumentReader {
+  id: DocReaderId;
+  isDemo: boolean;
+  read(doc: DocFile, field: KycField, opts: ReadOptions): Promise<ReadResult>;
+}
+
+export type DemoReadMode = 'match' | 'misread' | 'different' | 'unreadable';
+export class DemoDocumentReader implements DocumentReader { constructor(public mode: DemoReadMode = 'match') {} }
+export function createDocumentReader(cfg: { reader?: string; apiUrl?: string }): DocumentReader;
+export function validateDocFile(f: Pick<DocFile, 'kind' | 'mime' | 'size'>): string | null;
+```
+
+`validateDocFile`: selfie accepts `image/jpeg`/`image/png`; Aadhaar and PAN also `application/pdf`; max 10 MB. Error text: selfie "Use a JPG or PNG photo under 10 MB.", cards "Use a JPG, PNG or PDF under 10 MB." (Req 7.5).
+
+### Demo reader modes (picked on Upload documents, shown only when `isDemo`)
+
+| Mode | First read | Strict re-read | Shows scenario |
+|---|---|---|---|
+| `match` (default) | returns `expected` | returns `expected` | 1 |
+| `misread` | `expected` with one character changed, still a valid PAN / Verhoeff-valid Aadhaar | returns the original `expected` (the typed number) | 2 |
+| `different` | a fixed other valid number (`AAAPZ9999Z`, `499118665246`; swaps to `234123412346` if typed equals it) | same as first read | 3 |
+| `unreadable` | `{ ok: false, reason: 'unreadable' }` | same | Req 8.2 |
+
+Helper `verhoeffCheckDigit(first11)` is added to `onboarding.ts` so `misread` can produce a valid Aadhaar. The demo label reads: "Demo mode: no document is really read. Pick what the reader should do."
+
+`createDocumentReader` mirrors `createOtpProvider`: `undefined`/`''`/`'demo'` → demo; anything else throws `Document reader "<id>" is not built yet`. A real partner reader later is an `HttpDocumentReader` calling a small backend (`POST /kyc/read`) that uploads the file to the partner over HTTPS and returns only the number; config `VITE_DOC_READER` + `VITE_DOC_READER_URL` on web, `expo.extra.docReader` + `docReaderUrl` on phones.
+
+## B4. Check logic (`packages/core/src/kyc.ts`)
+
+```ts
+export const MAX_REREADS = 2;
+export interface FieldCheck { field: KycField; typed: string; read: string; final: string; matched: boolean; rereads: number; source: 'typed' | 'document' | 'edited' }
+export function compareField(field: KycField, typed: string, read: string): boolean; // normalize then ===
+export function initialChecks(typed: { pan: string; aadhaar: string }, read: { pan: string; aadhaar: string }): FieldCheck[];
+export function takeDocumentNumber(c: FieldCheck): FieldCheck;            // final = read, matched = true, source 'document'
+export function applyReread(c: FieldCheck, final: string, reread: string): FieldCheck; // rereads+1, matched = compareField(final, reread)
+export function canReread(c: FieldCheck): boolean;                       // rereads < MAX_REREADS
+export function checkOutcome(cs: FieldCheck[]): { match: KycMatch; differs: KycField[] };
+export function reviewFields(cs: FieldCheck[]): ReviewRecord['fields'];  // masks: maskPan, maskAadhaar(last4)
+export function isEligibleToInvest(data: AppData): boolean;              // step done && kyc.status === 'verified'
+export function kycStatusLabel(s: KycStatus | null): string;             // 'Verified' | 'Under review' | 'Review rejected' | 'Not started'
+```
+
+`FieldCheck` objects live in screen state only (they hold the full Aadhaar). Only `checkOutcome`, the final PAN, the Aadhaar last 4 and `reviewFields` reach the store.
+
+### New reducer events (`onboardingReducer`)
+
+| Event | From | Result |
+|---|---|---|
+| `identity-saved` | `identity` | → `documents` (changed) |
+| `documents-ready { at, reader }` | `documents` | `kyc.documentsAt`, `kyc.reader`, → `check` |
+| `back-to-documents` | `check` | → `documents` |
+| `reread-used { field }` | `check` | `kyc.rereads[field]` + 1 (capped at 2) |
+| `check-confirmed { match, pan, fields }` | `check` | `identity.pan = pan`, `kyc.match`, pending review fields kept in `kyc.review` with `sentAt: ''`, → `aadhaar-otp` |
+| `back-to-check` | `aadhaar-otp` | → `check` |
+| `aadhaar-verified` | `aadhaar-otp` | → `done`; `kyc.status = match === 'matched' ? 'verified' : 'under-review'`; if review, `review.sentAt = at` |
+| `review-decided { result, reason, at }` | `done` + `under-review` | `approved` → `verified`; `rejected` → `rejected` (reason required, 1–200 chars) |
+| `redo-documents` | `done` + `rejected` | → `identity` (identity kept), `kyc` = `emptyKyc()` except history: previous `review` kept until the new one replaces it |
+
+`identity-saved` from the Part A flow (`aadhaar-otp` directly) is no longer reachable. `done` still requires `aadhaar-verified` with 4 digits **and** `kyc.match !== null`.
+
+## B5. Screens
+
+| Step | Feature id | Content | Primary button |
+|---|---|---|---|
+| Upload documents | `onboard-documents` | 3 slots: "Your selfie", "Aadhaar card", "PAN card"; per-slot buttons (table B6); preview with "Replace"/"Remove"; hints; demo reader mode picker | "Continue" (disabled until 3 valid files) |
+| Reading | (inside `onboard-documents`) | "Reading your documents…" with `role="status"` / `accessibilityLiveRegion` | — |
+| Check your numbers | `onboard-check` | Per field: "You typed", "Read from document", "Match" ✅ / "Doesn't match" ❌, thumbnail; Aadhaar full with Hide; on mismatch "Use number from document", "Edit number", "Upload again" (re-read limit shown as "N re-checks left") | "Confirm" |
+| Aadhaar OTP | `onboard-aadhaar-otp` | unchanged; "Back" → Check numbers | "Verify Aadhaar" |
+| Done | (inside `onboard-aadhaar-otp`) | Verified text (Req 9.2) or Under review text (Req 9.3) | "Go to Home" |
+| Settings → Account | `onboard-account` + `onboard-review` | adds "Account status: Verified / Under review / Review rejected (reason)"; "Redo documents" when rejected | — |
+| Settings → Demo reviewer | `onboard-review` | shown only when `reader.isDemo`; pending review: masked typed vs read per field; "Approve"; "Reject" with a reason field | "Approve" / "Reject" |
+
+Messages (same on web and mobile): "Both numbers match your documents.", "The number you typed doesn't match your PAN card." / "…your Aadhaar card.", "We'll check this by hand.", "We couldn't read your PAN card. Upload a clearer photo or PDF." (and Aadhaar), "Allow camera access, or choose a file instead.", "Face the camera in good light. No cap or sunglasses.", "Fit the whole card in the frame. Avoid glare.".
+
+## B6. Getting the files
+
+| Slot | Web (desktop) | Android / iOS |
+|---|---|---|
+| Selfie | "Use webcam" (`getUserMedia({ video: { facingMode: 'user' } })` → canvas → JPEG blob; hidden if no camera) · "Upload from computer" (`<input type=file accept="image/jpeg,image/png" capture="user">`) | "Take photo" (`ImagePicker.launchCameraAsync({ cameraType: front })`) · "Choose from gallery" (`launchImageLibraryAsync`) |
+| Aadhaar, PAN | "Upload from computer" (`accept="image/jpeg,image/png,application/pdf"`) · "Choose from Google Drive" | "Take photo" (back camera) · "Choose from gallery" · "Choose a file" (`DocumentPicker.getDocumentAsync({ type: ['image/jpeg','image/png','application/pdf'], copyToCacheDirectory: true })`, which lists Google Drive when the Drive app is installed) |
+
+- Phones: add `expo-image-picker` **58.0.10** (pinned, matches Expo 58) to `apps/android` and `apps/ios`, and as a peer dependency of `packages/mobile-ui`. `expo-document-picker` 58.0.4 is already there. Add the `expo-image-picker` config plugin in both `app.json` files with `cameraPermission: "Wealthfire uses the camera for your KYC selfie and ID card photos."` and `photosPermission: "Wealthfire lets you pick your ID card photos from your gallery."`. Image picker options: `quality: 0.8`, `exif: false`, `allowsEditing: false`, `preferredAssetRepresentationMode: Compatible` (so iOS gives JPEG, not HEIC).
+- Phones, cleanup: picked files live in the app cache. `FileSystem.deleteAsync(uri, { idempotent: true })` runs on Remove/Replace, when onboarding completes, on sign-out and on unmount.
+- Web, cleanup: files are `Blob`s with `URL.createObjectURL` previews; `URL.revokeObjectURL` on Remove/Replace/complete/unmount. Webcam stream tracks are stopped when the dialog closes.
+
+### Google Drive picker (web)
+
+- New `apps/web/src/drive.ts`, same pattern as `google.ts`: Google Identity Services token client with scope `https://www.googleapis.com/auth/drive.file` (only files the user picks), loaded `https://apis.google.com/js/api.js` → `gapi.load('picker')`, `DocsView` filtered to `image/jpeg,image/png,application/pdf`, then `GET https://www.googleapis.com/drive/v3/files/{id}?alt=media` with the token → `Blob`. Token in memory only, revoked after the pick.
+- Config: `VITE_GOOGLE_CLIENT_ID` (exists), new `VITE_GOOGLE_API_KEY` and `VITE_GOOGLE_APP_ID` (Google Cloud project number), fed in CI from repo variables `GOOGLE_API_KEY` and `GOOGLE_APP_ID` (one-line change in `.github/workflows/ci-and-pages.yml`, build step env).
+- If the key or app id is missing, the button is disabled with "Google Drive isn't set up yet. Upload from your computer instead."
+- One-time setup Nitish does in Google Cloud: enable Google Picker API and Google Drive API, create an API key restricted to `https://nitishsana.github.io` and `http://127.0.0.1:5180`, add the `drive.file` scope to the existing OAuth consent screen, and set the two repo variables. Until then the button shows the message above; everything else works.
+
+## B7. Security and privacy
+
+- Documents and `FieldCheck` objects (with the full Aadhaar) stay in screen memory only. They are never put in `AppData`, so never in localStorage/AsyncStorage or the backup file. No `console.*`.
+- The demo reader never sends files anywhere. The real reader will send files to the partner via our backend only, over HTTPS; the browser/phone never holds a partner secret.
+- Review records keep masks only. The demo reviewer sees masks only (no documents, since they are not stored).
+- Google Drive: `drive.file` scope only; no listing of the user's Drive; token never stored.
+- Client-side limits as in Part A §7: a deliberate hand edit of storage can fake "Verified" until a server-side KYC check exists. `isEligibleToInvest` must be re-checked server-side by the future investment journey.
+
+## B8. Testing (Vitest, `packages/core/test/kyc.test.ts`, `docreader.test.ts`; extend `onboarding.test.ts`)
+
+| Area | Cases |
+|---|---|
+| `validateDocFile` | selfie PDF rejected; card PDF ok; 10 MB ok, 10 MB + 1 rejected; GIF rejected |
+| Demo reader | each mode × each field; `misread` result is a valid PAN / Verhoeff-valid Aadhaar and differs from expected; strict `misread` returns expected; `different` never equals expected |
+| `verhoeffCheckDigit` | builds `234123412346` from `23412341234` |
+| Check logic | match → matched; mismatch + use document → matched; mismatch + edit + reread equal → matched; still differs → review; third reread blocked |
+| Reducer | full path signin → done (verified); path with review (under-review); `review-decided` approve / reject (reason required); `redo-documents`; wrong-step events ignored; `done` impossible without `kyc.match` |
+| Store | serialized data after a review path has no 12-digit run; old `done` without `kyc` lowered to `identity` |
+| Eligibility | true only for done + verified |
+
+UI checks: parity ids `onboard-documents`, `onboard-check`, `onboard-review`; preview walk-through of all 4 demo modes; `CMD files/01 - Onboarding.cmd` test-value comments updated.
+
+## B9. Build plan (for tasks.md)
+
+Same workflow as Part A: one orchestrator, builders in parallel with separate file ownership, then an independent reviewer, then all checks and the preview.
+
+| Builder | Owns | Starts |
+|---|---|---|
+| A: core | `packages/core/**` | at once |
+| B: web | `apps/web/**`, `.github/workflows/ci-and-pages.yml` (env lines only), `CMD files/01 - Onboarding.cmd` | at once, coding against B2–B4 signatures |
+| C: phones | `packages/mobile-ui/**`, `apps/android/**`, `apps/ios/**` (App.tsx, app.json, package.json, lockfile) | at once, coding against B2–B4 signatures |

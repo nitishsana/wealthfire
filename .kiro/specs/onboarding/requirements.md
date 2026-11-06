@@ -9,13 +9,15 @@ Wealthfire (repo `github.com/nitishsana/wealthfire`, built from `origin/main` at
 3. Enter profile identity details: first name, last name, PAN, Aadhaar number.
 4. Verify Aadhaar with an OTP sent to the Aadhaar-linked mobile.
 
-**Change request (2026-11-06, Nitish) — adds Requirements 7–9:** before the Aadhaar OTP, the user takes three photos (their face, Aadhaar card, PAN card). A **document reader agent** reads the PAN and Aadhaar numbers from the card photos and shows them for the user to confirm or edit. Three outcomes:
+**Change request (2026-11-06, Nitish) — adds Requirements 7–9.** KYC needs three documents, all mandatory: a selfie, the Aadhaar card and the PAN card. They are uploaded **after "Your details"** is complete. A **document reader agent** reads the PAN and Aadhaar numbers from the uploads and compares them with the numbers the user typed. The match is settled **before** the account status is confirmed.
+
+New flow: Sign in → Contact OTP → Your details (typed) → **Upload documents** → **Check numbers** → Aadhaar OTP → Account status.
 
 | # | What happens | Result |
 |---|---|---|
-| 1 | User confirms the numbers read from the photos | Profile **Verified** |
-| 2 | User edits a number → agent re-reads the photo → re-read matches the edit | Profile **Verified** |
-| 3 | User edits a number → agent re-reads the photo → re-read still differs | Sent to **Manual review** |
+| 1 | Numbers read from the documents match the typed numbers; user confirms | Profile **Verified** |
+| 2 | They differ; user corrects a number (or re-uploads) → agent re-reads the document → re-read matches the final number | Profile **Verified** |
+| 3 | They differ; after correction the agent's re-read still differs from the final number | Sent to **Manual review** |
 
 Only a Verified profile will be eligible to invest. Investing itself belongs to the later investment journey and is out of scope here.
 
@@ -101,7 +103,7 @@ Sources: [Zerodha account opening](https://support.zerodha.com/category/account-
 5. Aadhaar SHALL be shown in groups as `XXXX XXXX XXXX`, accept 12 digits, reject a first digit of 0 or 1, and SHALL pass the Verhoeff checksum. WHEN it fails THEN the system SHALL show "Enter a valid 12-digit Aadhaar number."
 6. Aadhaar SHALL be masked after entry (`XXXX XXXX 1234`) with a show/hide toggle.
 7. The screen SHALL include a consent checkbox: "I agree to share my Aadhaar for OTP verification." Continue SHALL stay disabled until it is ticked and all fields are valid.
-8. WHEN Continue is tapped THEN the system SHALL save first name, last name and PAN, keep the full Aadhaar in memory only, and move to Aadhaar OTP.
+8. WHEN Continue is tapped THEN the system SHALL save first name, last name and PAN, keep the full Aadhaar in memory only, and move to Upload documents (Requirement 7). (Changed by the 2026-11-06 change request; it used to move straight to Aadhaar OTP.)
 9. WHEN the Wealthfire Profile page later opens and its name is empty THEN it SHALL be pre-filled with "First Last" from this step.
 
 ### Requirement 4: Verify Aadhaar with OTP
@@ -114,7 +116,7 @@ Sources: [Zerodha account opening](https://support.zerodha.com/category/account-
 2. It SHALL follow the same OTP rules as Requirement 2 (6 digits, 5-minute expiry, 5 tries, 30-second resend, 3 resends per 10 minutes, demo banner).
 3. WHEN the OTP is correct THEN the system SHALL store only the last 4 Aadhaar digits, a "verified" flag and the verified time, SHALL drop the full number from memory, and SHALL mark onboarding complete.
 4. WHEN onboarding completes THEN the system SHALL show a "You're all set" screen with a "Go to Home" button that opens Home.
-5. A "Back" link SHALL return to Profile details with first name, last name and PAN kept; the Aadhaar field SHALL be empty again.
+5. A "Back" link SHALL return to Check numbers (Requirement 8) with the documents and final numbers kept for this session. If the app was reloaded, the full Aadhaar and documents are gone, so it SHALL return to Profile details with first name, last name and PAN kept and the Aadhaar field empty.
 6. This step SHALL be mandatory. The screen SHALL have no skip, "later" or close option, and onboarding SHALL NOT be marked complete until this OTP passes.
 7. The OTP SHALL be requested through the OTP provider's Aadhaar channel, which represents the OTP UIDAI sends to the Aadhaar-linked mobile. It SHALL NOT be sent to the contact verified in Requirement 2, even if the numbers match.
 8. WHEN the Aadhaar has no linked mobile (provider says so) THEN the system SHALL show "Your Aadhaar has no linked mobile. Link one at an Aadhaar centre, then try again." and SHALL keep onboarding incomplete.
@@ -140,55 +142,59 @@ Sources: [Zerodha account opening](https://support.zerodha.com/category/account-
 **Acceptance criteria**
 
 1. All validation and OTP logic SHALL live in `packages/core` with unit tests covering every rule in Requirements 1–5.
-2. New feature ids SHALL be added to `packages/core/src/features.ts`: `onboard-signin`, `onboard-otp`, `onboard-identity`, `onboard-aadhaar-otp`, `onboard-account` (the Settings "Account" section), plus for the change request `onboard-photos` (Req 7), `onboard-confirm` (Req 8) and `onboard-review` (Req 9). Each SHALL be tagged on web (`data-feature`) and mobile (`feature` / `testID`) so `npm run parity` passes.
+2. New feature ids SHALL be added to `packages/core/src/features.ts`: `onboard-signin`, `onboard-otp`, `onboard-identity`, `onboard-aadhaar-otp`, `onboard-account` (the Settings "Account" section), plus for the change request `onboard-documents` (Req 7), `onboard-check` (Req 8) and `onboard-review` (Req 9). Each SHALL be tagged on web (`data-feature`) and mobile (`feature` / `testID`) so `npm run parity` passes.
 3. Screen wording SHALL be identical on web and mobile.
 4. All fields SHALL have visible labels, error text linked to the field for screen readers, and keyboard types (`email`, `phone-pad`, `number-pad`) set on mobile.
 5. `npm test`, `npm run typecheck`, `npm run parity`, `npm run build` and both Expo exports SHALL pass.
 6. When merged, `FEATURES.md` SHALL gain an **Onboarding** section with one row per feature id, ending `(PR #n)`.
 7. The not-advice disclaimer SHALL stay visible on onboarding screens.
 
-### Requirement 7: Capture face, Aadhaar and PAN photos
+### Requirement 7: Upload selfie, Aadhaar and PAN (mandatory KYC documents)
 
-**User story:** As a new user, I want to photograph myself and my ID cards, so that I don't have to type my numbers and the app can check them.
-
-**Acceptance criteria**
-
-1. After the contact OTP (Requirement 2) and name entry, the system SHALL show a "Photos" step with three slots, in order: "Your photo", "Aadhaar card (front)", "PAN card". All three are required.
-2. Each slot SHALL offer "Take photo" (camera) and "Upload" (gallery / file). The face slot SHALL open the front camera by default; card slots the back camera.
-3. WHEN a photo is taken THEN the system SHALL show a preview with "Retake" and "Use photo".
-4. The system SHALL accept JPEG, PNG or HEIC up to 10 MB and SHALL reject other files with "Use a JPG or PNG photo under 10 MB."
-5. WHEN camera permission is denied THEN the system SHALL show "Allow camera access, or upload a photo instead." and keep "Upload" working.
-6. Card slots SHALL show a frame guide and the hint "Fit the whole card in the frame. Avoid glare."
-7. The step SHALL NOT continue until all three photos are accepted.
-
-### Requirement 8: Agent reads and the user confirms the numbers
-
-**User story:** As a new user, I want the app to read my PAN and Aadhaar numbers from the photos and let me confirm or correct them.
+**User story:** As a new user, I want to add my selfie, Aadhaar card and PAN card from my camera, gallery or files, so that my KYC is complete.
 
 **Acceptance criteria**
 
-1. WHEN all three photos are accepted THEN the document reader agent SHALL read the PAN number from the PAN photo and the Aadhaar number from the Aadhaar photo, showing "Reading your cards…" while it works.
-2. WHEN a card cannot be read, or the result fails the PAN / Aadhaar checks from Requirement 3 THEN the system SHALL say which card failed and ask the user to retake it: "We couldn't read your PAN card. Retake the photo."
-3. The system SHALL show both numbers read, next to a thumbnail of each card, with the heading "Are these numbers correct?" The Aadhaar number SHALL show in full on this screen only, with a Hide option.
-4. The user SHALL be able to choose "Yes, these are correct" or "Edit". Edit SHALL open both numbers as fields, with the same validation as Requirement 3.
-5. **Scenario 1** — WHEN the user confirms without edits THEN the identity SHALL be marked **Read and confirmed**, and the flow SHALL go on to the Aadhaar OTP (Requirement 4).
-6. **Scenario 2** — WHEN the user edits a number and saves THEN the agent SHALL re-read that card's photo in a stricter mode (look again at the characters the user changed). WHEN the re-read equals the edited number THEN the identity SHALL be marked **Read and confirmed**, and the flow SHALL go on to the Aadhaar OTP.
-7. **Scenario 3** — WHEN the re-read still differs from the edited number THEN the identity SHALL be marked **Needs manual review**. The system SHALL record which numbers differ (masked), and the flow SHALL still go on to the Aadhaar OTP.
-8. The number the user ends with is the one used for the Aadhaar OTP and saved (PAN in full, Aadhaar last 4 only, Requirement 4.3).
-9. The agent SHALL make at most 2 re-reads per card per onboarding. After that any further mismatch goes to manual review without another re-read.
+1. WHEN "Your details" (Requirement 3) is saved THEN the system SHALL show the "Upload documents" step with three required slots, in order: "Your selfie", "Aadhaar card", "PAN card". There SHALL be no skip.
+2. **Mobile (Android, iOS):** each slot SHALL offer "Take photo" (camera) and "Choose from gallery". The Aadhaar and PAN slots SHALL also offer "Choose a file", which opens the phone's file picker (this includes Google Drive when the Drive app is installed).
+3. **Desktop / web:** each slot SHALL offer "Upload from computer" and "Choose from Google Drive". Where the browser has a camera, the selfie slot SHALL also offer "Use webcam".
+4. The selfie SHALL be a live camera photo or a JPG/PNG image. It SHALL open the front camera by default and show the hint "Face the camera in good light. No cap or sunglasses."
+5. Aadhaar and PAN SHALL accept JPG, PNG or PDF, up to 10 MB each. A PDF SHALL be read from its first page. Other files SHALL be rejected with "Use a JPG, PNG or PDF under 10 MB."
+6. The Aadhaar slot SHALL accept the front side, or the full e-Aadhaar PDF. Card slots SHALL show the hint "Fit the whole card in the frame. Avoid glare."
+7. WHEN a file is added THEN the system SHALL show a preview (image thumbnail, or for a PDF a document icon with its file name and size) with "Replace" and "Remove".
+10. Documents SHALL be kept in memory only for the session (design A5). They SHALL never be written to app storage, the backup file or logs, and SHALL be dropped when onboarding completes, on sign-out and on reload.
+8. WHEN camera permission is denied THEN the system SHALL show "Allow camera access, or choose a file instead." and keep the other options working.
+9. "Continue" SHALL stay disabled until all three documents are added.
 
-### Requirement 9: Verification result and manual review
+### Requirement 8: Agent reads the documents and checks the numbers
 
-**User story:** As a user, I want to know whether my profile is verified or under review.
+**User story:** As a new user, I want the app to read my numbers from the documents and check them against what I typed, so mistakes are caught before my account opens.
 
 **Acceptance criteria**
 
-1. WHEN the Aadhaar OTP passes and the identity is **Read and confirmed** THEN the profile status SHALL be **Verified**, and "You're all set" SHALL say "Your profile is verified. You can start investing once investing opens in Wealthfire."
-2. WHEN the Aadhaar OTP passes and the identity **Needs manual review** THEN the profile status SHALL be **Under review**, and the done screen SHALL say "We're checking your details by hand. This usually takes 1 working day. You can use the planner meanwhile."
-3. In both cases onboarding is complete and the planner (all current tabs) opens. Investing eligibility SHALL be exposed as `isEligibleToInvest(data)`, true only for **Verified**, for the later investment journey to use.
-4. Settings → Account SHALL show the status as "Verified", "Under review" or "Review rejected", with the review reason when rejected.
-5. A review SHALL be decided as "Approve" (status → Verified) or "Reject with reason" (status → Review rejected; the user can redo the Photos step from Settings → Account, "Redo photos").
-6. Review records SHALL hold: masked numbers read, masked numbers entered, which fields differ, time sent. They SHALL never hold the full Aadhaar.
+1. WHEN "Continue" is tapped on Upload documents THEN the document reader agent SHALL read the PAN number from the PAN document and the Aadhaar number from the Aadhaar document, showing "Reading your documents…".
+2. WHEN a document cannot be read, or what is read fails the PAN / Aadhaar checks from Requirement 3 THEN the system SHALL name the document and ask for a clearer one: "We couldn't read your PAN card. Upload a clearer photo or PDF."
+3. The "Check your numbers" screen SHALL show, for PAN and for Aadhaar: the number typed, the number read from the document, and a "Match" or "Doesn't match" label, next to a thumbnail. Aadhaar SHALL show in full on this screen only, with a Hide option.
+4. **Scenario 1** — WHEN both numbers match THEN the screen SHALL show "Both numbers match your documents." with "Confirm". Confirm SHALL mark the identity **Matched** and go to the Aadhaar OTP (Requirement 4).
+5. WHEN a number does not match THEN the screen SHALL say "The number you typed doesn't match your {document}." and offer "Use number from document", "Edit number" and "Upload again".
+6. **Scenario 2** — WHEN the user picks "Use number from document" THEN that number SHALL become the final number and count as matched. WHEN the user edits the number or uploads again THEN the agent SHALL re-read the document (stricter mode, looking again at the differing characters). WHEN the re-read equals the final number THEN that field counts as matched. WHEN all fields match THEN Confirm SHALL mark the identity **Matched**.
+7. **Scenario 3** — WHEN after a re-read a field still differs THEN the screen SHALL say "We'll check this by hand." Confirm SHALL mark the identity **Needs manual review**, record which fields differ, and go to the Aadhaar OTP.
+8. The agent SHALL make at most 2 re-reads per document. After that any remaining mismatch goes to manual review without another re-read.
+9. The final numbers SHALL replace the typed ones in the saved identity (PAN in full; Aadhaar last 4 only, Requirement 4.3), and the Aadhaar OTP SHALL be sent for the final Aadhaar number.
+
+### Requirement 9: Account status and manual review
+
+**User story:** As a user, I want to know whether my account is open and verified, or under review.
+
+**Acceptance criteria**
+
+1. The account status SHALL be confirmed only after both the number check (Requirement 8) and the Aadhaar OTP (Requirement 4) are done.
+2. WHEN the identity is **Matched** and the Aadhaar OTP passes THEN the status SHALL be **Verified**, and the done screen SHALL say "Your account is open and verified. You can start investing once investing opens in Wealthfire."
+3. WHEN the identity **Needs manual review** and the Aadhaar OTP passes THEN the status SHALL be **Under review**, and the done screen SHALL say "Your account is open. We're checking your details by hand, usually within 1 working day. You can use the planner meanwhile."
+4. In both cases onboarding is complete and the planner (all current tabs) opens. Investing eligibility SHALL be exposed as `isEligibleToInvest(data)`, true only for **Verified**, for the later investment journey.
+5. Settings → Account SHALL show the status as "Verified", "Under review" or "Review rejected", with the reason when rejected.
+6. A review SHALL end as "Approve" (status → Verified) or "Reject with reason" (status → Review rejected; the user can redo Upload documents and Check numbers from Settings → Account, "Redo documents").
+7. Review records SHALL hold: masked numbers typed, masked numbers read, which fields differ, time sent. They SHALL never hold the full Aadhaar.
 
 ## Out of scope (this feature)
 
