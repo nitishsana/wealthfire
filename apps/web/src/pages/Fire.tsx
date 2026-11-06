@@ -1,6 +1,7 @@
-import { inr, inrShort } from '@wealthfire/core';
+import { DEFAULT_BARISTA_SHARE, inr, inrShort } from '@wealthfire/core';
 import { useStore } from '../store';
-import { Card, LineChart, Missing, Page, Stat } from '../ui';
+import { Card, LineChart, Missing, NumberField, Page, Stat } from '../ui';
+import { FireTypePicker, FireTypesCompare, FireTypesExplainer } from '../components/FireTypes';
 
 export function FirePage() {
   const { data, analysis: a, update } = useStore();
@@ -8,10 +9,18 @@ export function FirePage() {
   const p = data.profile;
 
   return (
-    <Page feature="fire" title="FIRE plan" intro="How much you need, when you can stop working, and the SIP to get there.">
+    <Page feature="fire" title={`FIRE plan${a.fireType ? ` · ${a.fireType.emoji} ${a.fireType.name}` : ''}`} intro="How much you need, when you can stop working, and the SIP to get there.">
       <Missing missing={a.missing} />
       {f && p && (
         <>
+          <Card title="Your FIRE type">
+            <FireTypePicker />
+            {a.fireType?.worksAfterFire && (
+              <NumberField id="parttime" label="Part-time income after FIRE (per month, today's money)" suffix="₹" step={1000} min={0}
+                value={p.partTimeIncome ?? Math.round(f.monthlyExpenseToday * DEFAULT_BARISTA_SHARE)}
+                onChange={(v) => update((d) => ({ ...d, profile: { ...d.profile!, partTimeIncome: v } }))} />
+            )}
+          </Card>
           <Card title="Pick your retire age">
             <label className="field" htmlFor="age-slider">
               <span>Retire at <strong>{p.targetRetireAge}</strong> (in {f.yearsToFire} years)</span>
@@ -39,7 +48,8 @@ export function FirePage() {
               <table>
                 <tbody>
                   <tr><th scope="row">Monthly spend now</th><td className="num">{inr(f.monthlyExpenseToday)}</td></tr>
-                  <tr><th scope="row">Monthly spend at FIRE</th><td className="num">{inr(f.monthlyExpenseAtFire)}</td></tr>
+                  <tr><th scope="row">Corpus pays / month ({a.fireType?.name})</th><td className="num">{inr(f.targetMonthlySpend)}</td></tr>
+                  <tr><th scope="row">Same, on FIRE day</th><td className="num">{inr(f.monthlyExpenseAtFire)}</td></tr>
                   <tr><th scope="row">Monthly surplus</th><td className="num">{inr(f.monthlySurplus)}</td></tr>
                   <tr><th scope="row">Savings rate</th><td className="num">{f.savingsRatePct.toFixed(0)}%</td></tr>
                   <tr><th scope="row">Inflation</th><td className="num">{data.assumptions.inflation}%</td></tr>
@@ -50,8 +60,10 @@ export function FirePage() {
               <p className="muted small">Change these in <a href="#/settings">Settings</a>.</p>
             </Card>
           </div>
+          <FireTypesCompare />
         </>
       )}
+      <FireTypesExplainer />
     </Page>
   );
 }

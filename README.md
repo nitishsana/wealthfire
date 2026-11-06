@@ -14,6 +14,7 @@ It runs on the web, Android and iPhone, and gives the same answers on all three.
 | Net worth | Assets and liabilities, EMIs, investable corpus |
 | Expenses | Upload or paste a credit card statement (CSV/text). Spends are sorted into categories automatically |
 | FIRE plan | FIRE number, projected corpus, SIP needed (with yearly step-up), earliest FIRE age |
+| FIRE types | Lean (70% of spend), FIRE (100%), Barista (spend minus part-time income), Fat (150%) side by side; Coast FIRE milestone. Pick your goal in Profile, Home or FIRE plan |
 | Portfolio | Mutual fund categories and SIP split based on risk. Equity is capped as FIRE gets closer |
 | Buckets | 3-bucket plan: Spend / Refill / Grow, with move tips that change over time and with the market |
 | Progress | Monthly check-ins compared against the plan (ahead / on plan / behind) |

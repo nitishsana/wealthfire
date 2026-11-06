@@ -1,16 +1,16 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { Profile } from '@wealthfire/core';
+import { DEFAULT_BARISTA_SHARE, FIRE_TYPES, type Profile } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Card, NumberField, Page } from '../ui';
 
 const BLANK: Profile = {
   name: '', age: 30, city: '', monthlyIncome: 0, dependents: 0,
-  targetRetireAge: 45, lifeExpectancy: 85, currentMonthlySip: 0,
+  targetRetireAge: 45, lifeExpectancy: 85, currentMonthlySip: 0, fireType: 'regular',
 };
 
 export function ProfilePage() {
-  const { data, update } = useStore();
+  const { data, analysis, update } = useStore();
   const nav = useNavigate();
   const [p, setP] = useState<Profile>(data.profile ?? BLANK);
   const [useOverride, setUseOverride] = useState(p.monthlyExpenseOverride !== undefined);
@@ -50,6 +50,24 @@ export function ProfilePage() {
             <NumberField id="retire" label="Age you want to retire" value={p.targetRetireAge} onChange={(v) => set('targetRetireAge', v)} min={p.age} max={80} />
             <NumberField id="life" label="Plan money till age" value={p.lifeExpectancy} onChange={(v) => set('lifeExpectancy', v)} min={60} max={100} />
           </div>
+          <fieldset data-feature="firetype-pick" className="fire-pick">
+            <legend>Which FIRE are you aiming for?</legend>
+            <div className="type-cards">
+              {FIRE_TYPES.map((t) => (
+                <label key={t.id} className={`type-card ${(p.fireType ?? 'regular') === t.id ? 'on' : ''}`}>
+                  <input type="radio" name="p-firetype" checked={(p.fireType ?? 'regular') === t.id} onChange={() => set('fireType', t.id)} />
+                  <span className="type-name">{t.emoji} {t.name}</span>
+                  <span className="muted small">{t.tagline}</span>
+                </label>
+              ))}
+            </div>
+            <p className="muted small">Not sure? See <a href="#/fire">Which FIRE fits you</a>. You can change it any time.</p>
+          </fieldset>
+          {p.fireType === 'barista' && (
+            <NumberField id="parttime" label="Part-time income after FIRE (per month)"
+              value={p.partTimeIncome ?? Math.round((p.monthlyExpenseOverride ?? analysis.expenses.monthlyLiving) * DEFAULT_BARISTA_SHARE)}
+              onChange={(v) => set('partTimeIncome', v)} min={0} step={1000} suffix="₹" />
+          )}
           <label className="check">
             <input type="checkbox" checked={useOverride} onChange={(e) => {
               setUseOverride(e.target.checked);

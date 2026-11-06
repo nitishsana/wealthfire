@@ -7,7 +7,7 @@ export function PortfolioPage() {
   const pf = a.portfolio;
 
   return (
-    <Page feature="portfolio" title="Suggested portfolio" intro="Fund types picked from your risk score and how far FIRE is.">
+    <Page feature="portfolio" title="Suggested portfolio" intro={`Fund types picked from your risk score and how far ${a.fireType?.name ?? 'FIRE'} is. The SIP is sized for your ${a.fireType?.name ?? 'FIRE'} goal.`}>
       <Missing missing={a.missing.filter((m) => m !== 'expenses')} />
       {pf && (
         <>

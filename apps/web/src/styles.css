@@ -123,3 +123,14 @@ th { color: var(--muted); font-weight: 500; }
 }
 .setup { margin-top: 12px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; }
 code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
+.fire-pick { margin: 0 0 12px; }
+.type-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.type-card { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 12px; padding: 12px; cursor: pointer; background: var(--panel); }
+.type-card.on { border-color: var(--accent); background: rgba(255,122,24,.12); }
+.type-card input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.type-card:focus-within { outline: 3px solid var(--accent-2); outline-offset: 2px; }
+.type-name { font-weight: 700; color: var(--text); }
+.row-on th, .row-on td { background: rgba(255,122,24,.10); }
+.badge { display: inline-block; margin-left: 8px; font-size: .72rem; padding: 1px 8px; border-radius: 99px; background: var(--accent); color: #1a0f05; font-weight: 700; vertical-align: middle; }
+.explain h3 { margin: 0 0 6px; font-size: 1rem; }
+.explain p { margin: 0 0 6px; }

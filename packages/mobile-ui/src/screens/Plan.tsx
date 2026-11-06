@@ -5,13 +5,14 @@ import { Alert, Switch, Text, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import {
-  BUCKET_NAMES, categorize, DEFAULT_ASSUMPTIONS, demoData, emptyData, EXPENSE_CATEGORIES, inr, inrShort, makeSnapshot,
+  BUCKET_NAMES, categorize, DEFAULT_ASSUMPTIONS, DEFAULT_BARISTA_SHARE, demoData, emptyData, EXPENSE_CATEGORIES, inr, inrShort, makeSnapshot,
   newId, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot, type Assumptions, type BucketState, type ExpenseCategory,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Missing } from './Core';
 import { useNav } from '../nav';
 import { GmailConnect } from './Gmail';
+import { FireTypePicker, FireTypesCompare, FireTypesExplainer } from './FireTypes';
 import { Bar, Btn, Card, Chips, Field, Line, Mix, NumField, s, Screen, Stat, Stats, Tips } from '../ui';
 
 const SAMPLE = `05/10/2026, SWIGGY BANGALORE, 450.00
@@ -102,10 +103,18 @@ export function FireScreen() {
   const p = data.profile;
   const setAge = (n: number) => update((d) => ({ ...d, profile: { ...d.profile!, targetRetireAge: Math.max(d.profile!.age, Math.min(70, n)) } }));
   return (
-    <Screen feature="fire" title="FIRE plan" intro="How much you need, when you can stop working, and the SIP to get there.">
+    <Screen feature="fire" title={`FIRE plan${a.fireType ? ` · ${a.fireType.emoji} ${a.fireType.name}` : ''}`} intro="How much you need, when you can stop working, and the SIP to get there.">
       <Missing missing={a.missing} />
       {f && p ? (
         <>
+          <Card title="Your FIRE type">
+            <FireTypePicker />
+            {a.fireType?.worksAfterFire ? (
+              <NumField label="Part-time income after FIRE (per month, today's money)" suffix="₹"
+                value={p.partTimeIncome ?? Math.round(f.monthlyExpenseToday * DEFAULT_BARISTA_SHARE)}
+                onChange={(v) => update((d) => ({ ...d, profile: { ...d.profile!, partTimeIncome: v } }))} />
+            ) : null}
+          </Card>
           <Card title="Pick your retire age">
             <Text style={s.big}>{p.targetRetireAge} <Text style={s.muted}>in {f.yearsToFire} years</Text></Text>
             <View style={{ flexDirection: 'row', gap: 10 }}>
@@ -127,15 +136,18 @@ export function FireScreen() {
           <Card title="What this means"><Tips items={f.messages} /></Card>
           <Card title="Numbers used">
             <Line left="Monthly spend now" right={inr(f.monthlyExpenseToday)} />
-            <Line left="Monthly spend at FIRE" right={inr(f.monthlyExpenseAtFire)} />
+            <Line left={`Corpus pays / month (${a.fireType?.name})`} right={inr(f.targetMonthlySpend)} />
+            <Line left="Same, on FIRE day" right={inr(f.monthlyExpenseAtFire)} />
             <Line left="Monthly surplus" right={inr(f.monthlySurplus)} />
             <Line left="Savings rate" right={`${f.savingsRatePct.toFixed(0)}%`} />
             <Line left="Inflation" right={`${data.assumptions.inflation}%`} />
             <Line left="Safe withdrawal" right={`${data.assumptions.safeWithdrawalRate}%`} />
             <Line left="Portfolio return" right={`${a.portfolio?.expectedReturn.toFixed(1)}%`} />
           </Card>
+          <FireTypesCompare />
         </>
       ) : null}
+      <FireTypesExplainer />
     </Screen>
   );
 }
@@ -144,7 +156,7 @@ export function PortfolioScreen() {
   const { analysis: a } = useStore();
   const pf = a.portfolio;
   return (
-    <Screen feature="portfolio" title="Suggested portfolio" intro="Fund types picked from your risk score and how far FIRE is.">
+    <Screen feature="portfolio" title="Suggested portfolio" intro={`Fund types picked from your risk score and how far ${a.fireType?.name ?? 'FIRE'} is. The SIP is sized for your ${a.fireType?.name ?? 'FIRE'} goal.`}>
       <Missing missing={a.missing.filter((m) => m !== 'expenses')} />
       {pf ? (
         <>
@@ -177,7 +189,7 @@ export function BucketsScreen() {
   const b = a.buckets;
   const fromHoldings = data.buckets === null;
   return (
-    <Screen feature="buckets" title="Bucket plan" intro="Three pots with three jobs. Tips change as FIRE gets closer and as markets move.">
+    <Screen feature="buckets" title="Bucket plan" intro={`Three pots with three jobs, sized for ${a.fireType?.name ?? 'FIRE'} spending. Tips change as FIRE gets closer and as markets move.`}>
       <Missing missing={a.missing} />
       {b ? (
         <>

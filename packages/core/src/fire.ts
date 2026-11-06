@@ -22,7 +22,11 @@ export interface ProjectionPoint {
 
 export interface FirePlan {
   yearsToFire: number;
+  /** What you spend now each month */
   monthlyExpenseToday: number;
+  /** Monthly spend the corpus must cover after FIRE, today's rupees */
+  targetMonthlySpend: number;
+  /** targetMonthlySpend grown by inflation to FIRE day */
   monthlyExpenseAtFire: number;
   /** Corpus needed on FIRE day, in future rupees */
   fireNumber: number;
@@ -51,6 +55,11 @@ export interface FireInput {
   /** Expected yearly return of the suggested portfolio, % */
   portfolioReturn: number;
   assumptions: Assumptions;
+  /**
+   * Monthly spend (today's rupees) the corpus must pay for after FIRE.
+   * Differs from current spend for Lean / Fat / Barista FIRE. Default: current spend.
+   */
+  targetMonthlySpend?: number;
 }
 
 function targetAt(years: number, monthlyToday: number, a: Assumptions): number {
@@ -64,10 +73,11 @@ function corpusAt(years: number, investable: number, sip: number, r: number, a: 
 export function computeFirePlan(input: FireInput): FirePlan {
   const { profile, monthlyLiving, monthlyEmi, investable, portfolioReturn: r, assumptions: a } = input;
   const monthlyExpenseToday = profile.monthlyExpenseOverride ?? monthlyLiving;
+  const target = Math.max(0, input.targetMonthlySpend ?? monthlyExpenseToday);
   const yearsToFire = Math.max(0, profile.targetRetireAge - profile.age);
-  const monthlyExpenseAtFire = fvLump(monthlyExpenseToday, a.inflation, yearsToFire);
-  const fireNumber = targetAt(yearsToFire, monthlyExpenseToday, a);
-  const fireNumberToday = (monthlyExpenseToday * 12 * 100) / a.safeWithdrawalRate;
+  const monthlyExpenseAtFire = fvLump(target, a.inflation, yearsToFire);
+  const fireNumber = targetAt(yearsToFire, target, a);
+  const fireNumberToday = (target * 12 * 100) / a.safeWithdrawalRate;
   const sip = profile.currentMonthlySip;
   const projectedCorpus = corpusAt(yearsToFire, investable, sip, r, a);
 
@@ -77,7 +87,7 @@ export function computeFirePlan(input: FireInput): FirePlan {
 
   let earliest: number | null = null;
   for (let y = 0; profile.age + y <= 80; y++) {
-    if (corpusAt(y, investable, sip, r, a) >= targetAt(y, monthlyExpenseToday, a)) {
+    if (corpusAt(y, investable, sip, r, a) >= targetAt(y, target, a)) {
       earliest = profile.age + y;
       break;
     }
@@ -86,7 +96,7 @@ export function computeFirePlan(input: FireInput): FirePlan {
   const projection: ProjectionPoint[] = [];
   const horizon = Math.max(yearsToFire, (earliest ?? profile.age) - profile.age) + 2;
   for (let y = 0; y <= Math.min(horizon, 60); y++) {
-    projection.push({ year: y, age: profile.age + y, corpus: Math.round(corpusAt(y, investable, sip, r, a)), target: Math.round(targetAt(y, monthlyExpenseToday, a)) });
+    projection.push({ year: y, age: profile.age + y, corpus: Math.round(corpusAt(y, investable, sip, r, a)), target: Math.round(targetAt(y, target, a)) });
   }
 
   const monthlySurplus = profile.monthlyIncome - monthlyExpenseToday - monthlyEmi;
@@ -107,6 +117,7 @@ export function computeFirePlan(input: FireInput): FirePlan {
   return {
     yearsToFire,
     monthlyExpenseToday,
+    targetMonthlySpend: target,
     monthlyExpenseAtFire,
     fireNumber,
     fireNumberToday,
