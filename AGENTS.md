@@ -26,7 +26,7 @@ Full rule: `.kiro/steering/agent-workflow.md`.
 
 ## Previewing
 
-Double-click `CMD files/Wealthfire Preview.cmd` (the only launcher) and follow `CMD files/Wealthfire Test Cases.csv` (Section, Test Objective, Testing Steps, Expected Result). Scenarios and sections are links inside the test cases. Every feature updates the test cases in the same commit. Rule: `.kiro/steering/preview-launchers.md`.
+Double-click `CMD files/Wealthfire Preview.cmd` (the only launcher) and follow `CMD files/Wealthfire Test Cases.html` (Section, Test Objective, Testing Steps, Expected Result, Status; mirrored in the Kiro artifact `wealthfire-test-cases`). Scenarios and sections are links inside the test cases. Every feature updates the test cases in the same commit. Rule: `.kiro/steering/preview-launchers.md`.
 
 ## Before handing work back
 

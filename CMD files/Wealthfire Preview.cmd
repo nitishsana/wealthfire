@@ -1,7 +1,7 @@
 @echo off
 REM The one Wealthfire preview launcher. Double-click to start the local preview at
 REM http://127.0.0.1:5180 (this computer only) in a fresh Edge InPrivate window.
-REM All test cases, including the demo scenarios, are in "Wealthfire Test Cases.csv" next to this file.
+REM All test cases, including the demo scenarios, are in "Wealthfire Test Cases.html" (opened for you) next to this file.
 REM Close the "Wealthfire preview server" window to stop the preview.
 title Wealthfire preview
 
@@ -24,4 +24,5 @@ if errorlevel 1 (
 )
 
 :open
+start "" "%~dp0Wealthfire Test Cases.html"
 start "" msedge --inprivate "http://127.0.0.1:5180/" || start "" "http://127.0.0.1:5180/"
