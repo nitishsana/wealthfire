@@ -242,3 +242,23 @@ export function createDocumentReader(cfg: { reader?: string; apiUrl?: string; ex
   if (id === 'demo') return new DemoDocumentReader();
   throw new Error(`Document reader "${id}" is not built yet`);
 }
+
+/**
+ * Same as createDocumentReader but never throws: an unknown reader id falls back to the default
+ * on-device reader (with `cfg.extract`; without it every read fails with readerUnavailable).
+ */
+export function createDocumentReaderSafe(cfg: { reader?: string; apiUrl?: string; extract?: TextExtractor }): DocumentReader {
+  try {
+    return createDocumentReader(cfg);
+  } catch {
+    return cfg.extract ? createOnDeviceReader(cfg.extract) : unavailableReader();
+  }
+}
+
+/**
+ * Does this read count toward the hand-check fallback (dispatch `read-failed`)? Every failed read
+ * does, whatever the reason: unreadable, invalid (company PAN, not a card, masked Aadhaar), locked, network.
+ */
+export function countsAsFailedRead(r: ReadResult): boolean {
+  return !r.ok;
+}

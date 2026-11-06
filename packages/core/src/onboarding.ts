@@ -4,7 +4,7 @@ import type {
   AppData, ContactKind, DocReaderId, KycField, KycMatch, OnboardingState, OtpProviderId, ReviewRecord,
 } from './types';
 // Circular imports (store, kyc) are safe: they are only used inside functions.
-import { emptyKyc, emptyOnboarding, isSafeMask, MAX_FAILED_READS, UNREADABLE_MASK } from './store';
+import { emptyKyc, emptyOnboarding, isSafeMask, MAX_FAILED_READS, NOT_READ_MASK, UNREADABLE_MASK } from './store';
 import { canSendForHandCheck, HAND_CHECK_AFTER_FAILS, MAX_REREADS } from './kyc';
 
 // ---------- Validators (return error text, or null when OK) ----------
@@ -214,7 +214,11 @@ export type OnboardingEvent =
   /** A card could not be read (+1), or the reader isn't available in this build (unavailable: set to 2). */
   | { type: 'read-failed'; field: KycField; unavailable?: boolean }
   /** Hand-check fallback: send the documents to the team (only when canSendForHandCheck). */
-  | { type: 'send-for-hand-check'; at: string }
+  /**
+   * `reads`: the last successful read value per card (full numbers, screen state). The reducer
+   * keeps ONLY their masks, and only for a card that is not itself being sent as unreadable.
+   */
+  | { type: 'send-for-hand-check'; at: string; reads?: Partial<Record<KycField, string>> }
   | { type: 'review-decided'; result: 'approved' | 'rejected'; reason: string | null; at: string }
   | { type: 'redo-documents' };
 
@@ -225,6 +229,20 @@ export type OnboardingEvent =
 function reviewId(at: string): string | null {
   const t = Date.parse(at);
   return Number.isFinite(t) ? `rv_${t.toString(36)}` : null;
+}
+
+/** Mask of a read value for a review row; NOT_READ_MASK when missing or not a valid-shaped number. */
+function readMask(field: KycField, v: unknown): string {
+  if (typeof v !== 'string') return NOT_READ_MASK;
+  let m: string | null = null;
+  if (field === 'pan') {
+    const p = normalizePan(v);
+    m = /^[A-Z]{5}\d{4}[A-Z]$/.test(p) ? maskPan(p) : null;
+  } else {
+    const a = normalizeAadhaar(v);
+    m = /^\d{12}$/.test(a) ? maskAadhaar(a.slice(-4)) : null;
+  }
+  return m && isSafeMask(m) ? m : NOT_READ_MASK;
 }
 
 function addSend(list: string[], at: string): string[] {
@@ -346,9 +364,12 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       const id = reviewId(e.at);
       if (!id) return s;
       const typed = { pan: maskPan(s.identity.pan), aadhaar: maskAadhaar(s.aadhaar.last4) };
-      const fields: ReviewRecord['fields'] = (['pan', 'aadhaar'] as const)
-        .filter((f) => s.kyc.failedReads[f] >= HAND_CHECK_AFTER_FAILS)
-        .map((f) => ({ field: f, typedMasked: typed[f], readMasked: UNREADABLE_MASK, handCheck: true as const }));
+      // Both cards are listed: a failed card as 'unreadable' (hand check), the other with the mask
+      // of its last successful read, or 'not read'. Full read values are never stored.
+      const fields: ReviewRecord['fields'] = (['pan', 'aadhaar'] as const).map((f) =>
+        s.kyc.failedReads[f] >= HAND_CHECK_AFTER_FAILS
+          ? { field: f, typedMasked: typed[f], readMasked: UNREADABLE_MASK, handCheck: true as const }
+          : { field: f, typedMasked: typed[f], readMasked: readMask(f, e.reads?.[f]) });
       return {
         ...s,
         step: 'done',

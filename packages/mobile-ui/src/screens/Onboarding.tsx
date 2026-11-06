@@ -2,7 +2,7 @@
 // Aadhaar verification) → upload documents → check numbers → done. Same steps, rules and wording as
 // apps/web/src/pages/Onboarding.tsx. All rules come from @wealthfire/core.
 // Privacy: the full Aadhaar number, documents, FieldChecks and every OTP / request id live in component state only, never in AppData.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   canSend, checkOutcome, DOC_MESSAGES, MAX_REREADS, resendIn, groupAadhaar, maskAadhaar, maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan,
@@ -12,6 +12,7 @@ import {
 import { useStore } from '../store';
 import { useOtpProvider } from '../otp';
 import { useDocReader } from '../reader';
+import { OnboardingBusyCtx, useBlockBackWhile, useOnboardingBackRef, useSignInNotice } from '../shell';
 import { theme } from '../theme';
 import { Btn, Chips, s, Screen } from '../ui';
 import { CheckStep, DocumentsStep, dropDocs, type Docs } from './Documents';
@@ -74,6 +75,7 @@ function OtpStep({ channel, target, sends, lockedUntil, initial, initialError, v
   const [code, setCode] = useState('');
   const [error, setError] = useState(initialError ?? '');
   const [busy, setBusy] = useState(false);
+  useBlockBackWhile(busy); // hardware Back does nothing while a send / verify runs
   const [now, setNow] = useState(Date.now());
   const alive = useRef(true);
 
@@ -158,6 +160,10 @@ function SignInStep({ onSent }: { onSent: (kind: ContactKind, value: string, at:
   const [sendError, setSendError] = useState('');
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
+  // Minor issue 3: "All data deleted." after Delete all data, shown on this screen once (memory only).
+  const signInNotice = useSignInNotice();
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => { const t = signInNotice.take(); if (t) setNotice(t); }, [signInNotice]);
   const alive = useRef(true);
   const target = kind === 'email' ? normalizeEmail(value) : normalizeMobile(value);
   const err = kind === 'email' ? validateEmail(target) : validateMobile(target);
@@ -186,6 +192,7 @@ function SignInStep({ onSent }: { onSent: (kind: ContactKind, value: string, at:
 
   return (
     <Screen feature="onboard-signin" title="Sign in">
+      {notice ? <Text style={[s.text, { marginBottom: 10 }]} accessibilityLiveRegion="polite">{notice}</Text> : null}
       <Text style={[s.muted, { marginBottom: 6 }]}>Sign in with</Text>
       <Chips label="Sign in with" value={kind} onChange={(k) => { setKind(k); setValue(''); setTouched(false); setSendError(''); }}
         options={[{ label: 'Mobile number', value: 'mobile' as const }, { label: 'Email', value: 'email' as const }]} />
@@ -220,6 +227,7 @@ function IdentityStep({ onContinue }: { onContinue: (firstName: string, lastName
   const [hidden, setHidden] = useState(true);
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false); // sending the Aadhaar OTP
+  useBlockBackWhile(busy);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const touch = (k: string) => setTouched((t) => ({ ...t, [k]: true }));
   const alive = useRef(true);
@@ -283,17 +291,25 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   const docsRef = useRef<Docs>({});
   docsRef.current = docs;
   useEffect(() => () => dropDocs(docsRef.current), []);
-  const setDoc = (k: DocKind, d: DocFile | undefined) => setDocs((x) => ({ ...x, [k]: d }));
+  const setDoc = (k: DocKind, d: DocFile | undefined) => {
+    setDocs((x) => ({ ...x, [k]: d }));
+    // A replaced or removed card forgets its remembered read, so a hand check never shows the old file's mask.
+    if (k !== 'selfie') setReads((r) => ({ ...r, [k]: undefined }));
+  };
   // Name from Your details, checked against the name on each card (PAN and Aadhaar reads and re-reads).
   const cardName = ob.identity ? { first: ob.identity.firstName, last: ob.identity.lastName } : undefined;
-  const clearKyc = () => { dropDocs(docsRef.current); setDocs({}); setChecks(null); setPrevChecks(null); setAadhaar(''); };
+  // Last successful read per card (full numbers, memory only), sent with a hand check; the store keeps masks only (minor issue 6).
+  const [reads, setReads] = useState<Partial<Record<KycField, string>>>({});
+  const onReadOk = (field: KycField, value: string) => setReads((r) => ({ ...r, [field]: value }));
+  const clearKyc = () => { dropDocs(docsRef.current); setDocs({}); setChecks(null); setPrevChecks(null); setAadhaar(''); setReads({}); };
   // Bug 2: every failed read is counted; after enough of them (or with the reader unavailable) a hand check is offered.
   const onReadFailed = (field: KycField, unavailable: boolean) =>
     dispatch(unavailable ? { type: 'read-failed', field, unavailable: true } : { type: 'read-failed', field });
   // Sends all three documents for a hand check: Under review, then the done screen (same as web).
   const onHandCheck = (): boolean => {
     if (!docs.selfie || !docs.aadhaar || !docs.pan) return false;
-    const ev: OnboardingEvent = { type: 'send-for-hand-check', at: new Date().toISOString() };
+    // Both cards go to the review: the failed one as unreadable, the other with its last successful read (masked by core).
+    const ev: OnboardingEvent = { type: 'send-for-hand-check', at: new Date().toISOString(), reads };
     if (onboardingReducer(ob, ev).step !== 'done') return false;
     dispatch(ev);
     clearKyc(); // documents, checks and the full Aadhaar are dropped when onboarding completes
@@ -313,6 +329,30 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
     if (lostChecks) dispatch({ type: 'back-to-documents' });
   }, [lostChecks, dispatch]);
 
+  // Minor issue 5: Android hardware Back does what the step's own Back does (Change contact on the contact OTP,
+  // Back to Your details on the Aadhaar OTP, Back to Upload documents on Check numbers). Steps without a Back
+  // (Sign in, Your details, done) return false, so Android closes the app as usual. Upload documents ignores Back
+  // so the documents held in memory are not lost; so does any step while a read, re-read or OTP call is running.
+  const backRef = useOnboardingBackRef();
+  const busyCount = useContext(OnboardingBusyCtx);
+  const hardwareBack = useRef<() => boolean>(() => false);
+  hardwareBack.current = () => {
+    if (busyCount.current > 0) return true;
+    if (ob.step === 'documents') return true;
+    if (ob.step === 'otp') { changeContact(); return true; }
+    if (ob.step === 'aadhaar-otp' && aadhaar) { backToIdentity(); return true; }
+    if (ob.step === 'check' && checks) { backToDocuments(checks); return true; }
+    return false;
+  };
+  useEffect(() => {
+    if (!backRef) return;
+    backRef.current = () => hardwareBack.current();
+    return () => { backRef.current = null; };
+  }, [backRef]);
+  function changeContact() { setPending(null); dispatch({ type: 'change-contact' }); }
+  function backToIdentity() { setPending(null); setPendingError(''); setAadhaar(''); dispatch({ type: 'back-to-identity' }); }
+  function backToDocuments(cs: FieldCheck[]) { setPrevChecks(cs); setChecks(null); dispatch({ type: 'back-to-documents' }); }
+
   if (ob.step === 'signin') {
     return <SignInStep onSent={(kind, value, at, code) => { setPending(code); dispatch({ type: 'otp-sent', channel: 'contact', at, contact: { kind, value } }); }} />;
   }
@@ -324,7 +364,7 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
       <Screen feature="onboard-otp" title={c.kind === 'email' ? 'Verify your email' : 'Verify your mobile number'}>
         <View style={st.row}>
           <Text style={[s.text, { flex: 1 }]}>We sent a code to {masked}.</Text>
-          <Link title="Change" label={c.kind === 'email' ? 'Change email' : 'Change mobile number'} onPress={() => { setPending(null); dispatch({ type: 'change-contact' }); }} />
+          <Link title="Change" label={c.kind === 'email' ? 'Change email' : 'Change mobile number'} onPress={changeContact} />
         </View>
         <OtpStep channel={c.kind === 'email' ? 'email' : 'sms'} target={c.value} sends={ob.sends.contact} lockedUntil={null} initial={pending}
           verifyLabel="Verify" demoText={DEMO_CONTACT}
@@ -354,7 +394,7 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   if (ob.step === 'documents' && ob.aadhaar) {
     return (
       <DocumentsStep docs={docs} setDoc={setDoc} typed={{ pan: ob.identity?.pan ?? '', aadhaar }} name={cardName} verifiedLast4={ob.aadhaar.last4}
-        kyc={ob.kyc} previous={prevChecks} onReadFailed={onReadFailed} onHandCheck={onHandCheck}
+        kyc={ob.kyc} previous={prevChecks} onReadFailed={onReadFailed} onReadOk={onReadOk} onHandCheck={onHandCheck}
         onRead={(cs, full) => {
           setAadhaar(full); // re-typed after a reload / Redo documents: kept for this session only
           // Re-reads already used this session or before a reload still count (Req 8.8), same as web.
@@ -370,9 +410,9 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   if (ob.step === 'check' && checks) {
     return (
       <CheckStep checks={checks} setChecks={setChecks} docs={docs} setDoc={setDoc} name={cardName} confirming={false} error={confirmError}
-        kyc={ob.kyc} onReadFailed={onReadFailed} onHandCheck={onHandCheck}
+        kyc={ob.kyc} onReadFailed={onReadFailed} onReadOk={onReadOk} onHandCheck={onHandCheck}
         onRereadUsed={(field) => dispatch({ type: 'reread-used', field })}
-        onBack={() => { setPrevChecks(checks); setChecks(null); dispatch({ type: 'back-to-documents' }); }}
+        onBack={() => backToDocuments(checks)}
         onConfirm={() => {
           // Confirm finishes onboarding (design C1): no second Aadhaar OTP. Any field still differing goes to manual review.
           const outcome = checkOutcome(checks);
@@ -402,7 +442,7 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
           }}
           onLocked={(until) => dispatch({ type: 'aadhaar-locked', until })} />
         {/* Back to Your details to fix the Aadhaar number; only possible before the OTP passes. */}
-        <Link title="Back" onPress={() => { setPending(null); setPendingError(''); setAadhaar(''); dispatch({ type: 'back-to-identity' }); }} />
+        <Link title="Back" onPress={backToIdentity} />
       </Screen>
     );
   }

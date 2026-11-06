@@ -7,11 +7,12 @@ import { Image, StyleSheet, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import {
-  applyReread, canReread, canSendForHandCheck, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, maskAadhaar, MAX_REREADS, normalizeAadhaar, normalizePan, validateAadhaar,
+  applyReread, canReread, canSendForHandCheck, confirmAadhaarRetype, countsAsFailedRead, DOC_MESSAGES, groupAadhaar, initialChecks, maskAadhaar, MAX_REREADS, normalizeAadhaar, normalizePan, validateAadhaar,
   readBlocked, sameDocument, takeDocumentNumber, validateDocFile, validatePan, type DocFile, type DocKind, type DocMime, type FieldCheck, type KycField,
   type KycState, type ReadResult,
 } from '@wealthfire/core';
 import { useDocReader } from '../reader';
+import { useBlockBackWhile } from '../shell';
 import { theme } from '../theme';
 import { Btn, Card, s, Screen } from '../ui';
 import { Input, Link, Msg, ob } from './onboardUi';
@@ -48,6 +49,8 @@ export const readerDown = (r: Extract<ReadResult, { ok: false }>): boolean =>
   r.reason === 'network' || r.message === DOC_MESSAGES.readerUnavailable;
 /** Counts a failed read in the store (core 'read-failed'). */
 export type OnReadFailed = (field: KycField, unavailable: boolean) => void;
+/** A card read OK: its full number (screen memory only), sent as `reads` with a hand check (minor issue 6). */
+export type OnReadOk = (field: KycField, value: string) => void;
 /** Sends the documents for a hand check (core 'send-for-hand-check'). false: the store refused it. */
 export type OnHandCheck = () => boolean;
 const HAND_CHECK_FAILED = 'Could not send your documents. Try again.';
@@ -75,6 +78,16 @@ function readValueError(f: KycField, v: string): string | null {
   if (f === 'aadhaar') return validateAadhaar(v) === null ? null : cantRead(f);
   if (validatePan(v) === null) return null;
   return PAN_SHAPE.test(v) ? DOC_MESSAGES.companyPan : cantRead(f);
+}
+/**
+ * The reader's result with the number normalized, and a read whose number isn't a valid individual card (e.g. a
+ * company PAN) turned into a failed 'invalid' read with its message, so it counts toward the hand check (minor issue 6).
+ */
+function checkedRead(f: KycField, r: ReadResult): ReadResult {
+  if (!r.ok) return r;
+  const v = f === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value);
+  const bad = readValueError(f, v);
+  return bad ? { ok: false, reason: 'invalid', message: bad } : { ...r, value: v };
 }
 /** Any valid PAN shape, including non-individual ones (4th letter other than P). */
 const PAN_SHAPE = /^[A-Z]{3}[ABCFGHLJPT][A-Z]\d{4}[A-Z]$/;
@@ -225,8 +238,9 @@ export function DocSlot({ kind, doc, onChange, number, error: parentError, remov
 
 // ---------- Upload documents step ----------
 
-export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, previous, onRead, onReadFailed, onHandCheck }: {
+export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, previous, onRead, onReadFailed, onReadOk, onHandCheck }: {
   onReadFailed: OnReadFailed;
+  onReadOk: OnReadOk;
   onHandCheck: OnHandCheck;
   docs: Docs;
   /** Entered name (Your details), checked against the name on each card. */
@@ -246,6 +260,7 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
   // No demo UI on this step (Req 7.2): the demo reader mode comes only from dev config (reader.tsx).
   const reader = useDocReader();
   const [busy, setBusy] = useState(false);
+  useBlockBackWhile(busy); // hardware Back does nothing while reading
   const [error, setError] = useState(''); // general error (network)
   const [errors, setErrors] = useState<Partial<Record<KycField, string>>>({}); // read error under its slot, like web
   // Full Aadhaar gone from memory (reload / Redo documents): ask for it again, no second OTP (design C1).
@@ -267,16 +282,16 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
       // The reader itself failed (same as reason 'network', same as web).
       onReadFailed(field, true); setError(DOC_MESSAGES.couldNotReadDocs); return null;
     }
+    // A read whose number isn't a valid individual card (e.g. a company PAN) is a failed read too (minor issue 6).
+    const res = checkedRead(field, r);
+    if (countsAsFailedRead(res)) onReadFailed(field, !res.ok && readerDown(res)); // Bug 2: counts towards the hand check
     // Reader messages (not a PAN card, masked Aadhaar, reading unavailable, unreadable) go under that document's slot.
-    if (!r.ok) {
-      onReadFailed(field, readerDown(r)); // Bug 2: counts towards the hand check
-      if (r.reason === 'network') setError(r.message); else setErrors((e) => ({ ...e, [field]: readFailMessage(field, r) }));
+    if (!res.ok) {
+      if (res.reason === 'network') setError(res.message); else setErrors((e) => ({ ...e, [field]: readFailMessage(field, res) }));
       return null;
     }
-    const v = field === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value);
-    const bad = readValueError(field, v);
-    if (bad) { setErrors((e) => ({ ...e, [field]: bad })); return null; }
-    return { value: v, nameMatch: r.nameMatch };
+    onReadOk(field, res.value);
+    return { value: res.value, nameMatch: res.nameMatch };
   }
 
   // A field whose re-reads are used up keeps its earlier read, so its file is locked (review bug 7).
@@ -341,9 +356,10 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
 
 // ---------- Check your numbers step ----------
 
-function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, onChange, onDoc, onReadFailed }: {
+function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, onChange, onDoc, onReadFailed, onReadOk }: {
   check: FieldCheck;
   onReadFailed: OnReadFailed;
+  onReadOk: OnReadOk;
   name: CardName | undefined;
   doc: DocFile | undefined;
   /** The other card's file: "Upload again" must not take the same file (sameFile). */
@@ -359,6 +375,7 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
   const [mode, setMode] = useState<'idle' | 'edit' | 'upload'>('idle');
   const [draft, setDraft] = useState(check.final);
   const [busy, setBusy] = useState(false);
+  useBlockBackWhile(busy); // hardware Back does nothing while re-reading
   const [error, setError] = useState('');
   const left = MAX_REREADS - check.rereads;
   const show = (v: string) => (f === 'pan' ? v : hidden ? `XXXX XXXX ${v.slice(-4)}` : groupAadhaar(v));
@@ -376,14 +393,15 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
     setBusy(true); setError('');
     let ok = false;
     try {
-      const r = await reader.read(withDoc, f, { strict: true, expected: check.typed, name });
-      if (!r.ok) { onReadFailed(f, readerDown(r)); setError(readFailMessage(f, r)); return; }
-      const v = f === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value);
-      const bad = readValueError(f, v);
-      if (bad) { setError(bad); return; }
+      const r = checkedRead(f, await reader.read(withDoc, f, { strict: true, expected: check.typed, name }));
+      if (countsAsFailedRead(r)) onReadFailed(f, !r.ok && readerDown(r)); // a company PAN counts too (minor issue 6)
+      if (!r.ok) { setError(readFailMessage(f, r)); return; }
+      const v = r.value;
       ok = true;
       setMode('idle');
+      // New file first (it clears the old file's remembered read), then remember this read.
       if (newDoc) { deleteDoc(doc); onDoc(newDoc); }
+      onReadOk(f, v);
       onChange(applyReread(check, final, v, r.nameMatch), true);
     } catch {
       onReadFailed(f, true); // the reader itself failed (same as web)
@@ -491,11 +509,12 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
   );
 }
 
-export function CheckStep({ checks, setChecks, docs, setDoc, name, kyc, onRereadUsed, onReadFailed, onHandCheck, onConfirm, onBack, confirming, error }: {
+export function CheckStep({ checks, setChecks, docs, setDoc, name, kyc, onRereadUsed, onReadFailed, onReadOk, onHandCheck, onConfirm, onBack, confirming, error }: {
   checks: FieldCheck[];
   /** Stored KYC state, for the hand-check button (Bug 2). */
   kyc: KycState;
   onReadFailed: OnReadFailed;
+  onReadOk: OnReadOk;
   onHandCheck: OnHandCheck;
   /** Entered name, sent with re-reads for the name check. */
   name: CardName | undefined;
@@ -524,7 +543,7 @@ export function CheckStep({ checks, setChecks, docs, setDoc, name, kyc, onReread
       {checks.map((c, i) => (
         <FieldCard key={c.field} check={c} typedField={c.field} doc={docs[FIELD_DOC[c.field]]} hidden={hidden} setHidden={setHidden}
           otherDoc={docs[c.field === 'pan' ? 'aadhaar' : 'pan']} name={name}
-          onDoc={(d) => setDoc(FIELD_DOC[c.field], d)} onReadFailed={onReadFailed}
+          onDoc={(d) => setDoc(FIELD_DOC[c.field], d)} onReadFailed={onReadFailed} onReadOk={onReadOk}
           onChange={(next, reread) => {
             setChecks(checks.map((x, j) => (j === i ? next : x)));
             if (reread) onRereadUsed(c.field);

@@ -7,12 +7,13 @@ import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import {
   BUCKET_NAMES, categorize, DEFAULT_ASSUMPTIONS, DEFAULT_BARISTA_SHARE, demoData, emptyData, EXPENSE_CATEGORIES, inr, inrShort, makeSnapshot,
-  canFinalApprove, kycStatusLabel, maskAadhaar, reviewReasonText, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
+  canFinalApprove, kycStatusLabel, maskAadhaar, reviewRowReasonText, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
   type Assumptions, type BucketState, type ExpenseCategory,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { useDocReader } from '../reader';
 import { clearPickerCache } from '../cacheCleanup';
+import { useSignInNotice } from '../shell';
 import { Missing } from './Core';
 import { useNav } from '../nav';
 import { GmailConnect } from './Gmail';
@@ -375,10 +376,10 @@ function DemoReviewerCard() {
               <Text style={[s.muted, rv.c1]}>Field</Text><Text style={[s.muted, rv.c]}>Typed</Text><Text style={[s.muted, rv.c]}>Read from document</Text>
             </View>
             {pending.fields.map((f) => (
-              <View key={f.field} style={rv.row} accessible accessibilityLabel={`${FIELD_NAME[f.field]}: typed ${f.typedMasked}, read from document ${f.readMasked}. ${reviewReasonText(f)}`}>
+              <View key={f.field} style={rv.row} accessible accessibilityLabel={`${FIELD_NAME[f.field]}: typed ${f.typedMasked}, read from document ${f.readMasked}. ${reviewRowReasonText(f, pending.fields)}`}>
                 <Text style={[s.text, rv.c1]}>{FIELD_NAME[f.field]}</Text><Text style={[s.text, rv.c]}>{f.typedMasked}</Text><Text style={[s.text, rv.c]}>{f.readMasked}</Text>
                 {/* Review bug 11: why this field is under review (numbers differ / name didn't match), same text as web. */}
-                <Text style={[s.small, rv.reason]}>{reviewReasonText(f)}</Text>
+                <Text style={[s.small, rv.reason]}>{reviewRowReasonText(f, pending.fields)}</Text>
               </View>
             ))}
             <View style={{ marginTop: 10 }}>
@@ -396,8 +397,11 @@ function DemoReviewerCard() {
   );
 }
 
+const DATA_DELETED = 'All data deleted.';
+
 export function SettingsScreen() {
   const { data, update, replace } = useStore();
+  const signInNotice = useSignInNotice();
   const [msg, setMsg] = useState('');
   return (
     <Screen feature="demo" title="Settings" intro="Assumptions, demo data and your data.">
@@ -418,9 +422,11 @@ export function SettingsScreen() {
         <Btn danger title="Delete all data" onPress={() => Alert.alert('Delete all data?', 'This cannot be undone.', [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Delete', style: 'destructive', onPress: () => {
+            // Minor issue 3: the gate switches to Sign in at once, so Sign in shows the message (once).
+            signInNotice.set(DATA_DELETED);
             replace(emptyData());
             void clearPickerCache(); // Bug 6: same as Sign out, no picked documents left behind.
-            setMsg('All data deleted.');
+            setMsg(DATA_DELETED);
           } },
         ])} />
       </Card>

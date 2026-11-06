@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import {
-  canFinalApprove, DEFAULT_ASSUMPTIONS, demoData, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewReasonText, serialize,
+  canFinalApprove, DEFAULT_ASSUMPTIONS, demoData, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewRowReasonText, serialize,
   type Assumptions,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { documentReader } from '../docreader';
+import { DATA_DELETED_TEXT, markDataDeleted } from './Onboarding';
 import { Card, NumberField, Page } from '../ui';
 
 const FIELDS: { key: keyof Assumptions; label: string; step: number }[] = [
@@ -81,7 +82,7 @@ export function SettingsPage() {
           <div className="row">
             <button className="btn" onClick={exportJson}>Download backup</button>
             <button className="btn danger" onClick={() => {
-              if (window.confirm('Delete all Wealthfire data in this browser? This cannot be undone.')) { replace(emptyData()); setMsg('All data deleted.'); }
+              if (window.confirm('Delete all Wealthfire data in this browser? This cannot be undone.')) { markDataDeleted(); replace(emptyData()); setMsg(DATA_DELETED_TEXT); }
             }}>Delete all data</button>
           </div>
         </Card>
@@ -129,7 +130,7 @@ function DemoReviewer() {
               <tbody>
                 {/* Review bug 11: the reason column says why each field is under review (numbers differ / name didn't match). */}
                 {pending.fields.map((f) => (
-                  <tr key={f.field}><td>{f.field === 'pan' ? 'PAN' : 'Aadhaar'}</td><td>{f.typedMasked}</td><td>{f.readMasked}</td><td>{reviewReasonText(f)}</td></tr>
+                  <tr key={f.field}><td>{f.field === 'pan' ? 'PAN' : 'Aadhaar'}</td><td>{f.typedMasked}</td><td>{f.readMasked}</td><td>{reviewRowReasonText(f, pending.fields)}</td></tr>
                 ))}
               </tbody>
             </table>

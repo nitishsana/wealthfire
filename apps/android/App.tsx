@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { BackHandler } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { clearPickerCache, WealthfireApp, type TabKey } from '@wealthfire/mobile-ui';
+import { clearPickerCache, WealthfireApp, type OnboardingBackRef, type TabKey } from '@wealthfire/mobile-ui';
 import appJson from './app.json';
 
 // Optional OTP provider config. Not set in v1, so onboarding uses the demo provider.
@@ -24,12 +24,17 @@ const docReader = {
 export default function App() {
   const [tab, setTab] = useState<TabKey>('home');
   const history = useRef<TabKey[]>([]);
+  // Set by onboarding while it is shown (minor issue 5); null outside onboarding.
+  const onboardingBack: OnboardingBackRef = useRef<(() => boolean) | null>(null);
 
   // Bug 2: once per launch, delete documents left in the picker / crop caches.
   useEffect(() => { void clearPickerCache(); }, []);
 
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      // During onboarding: step back one onboarding step, or (e.g. on Sign in) let Android close the app.
+      const onboarding = onboardingBack.current;
+      if (onboarding) return onboarding();
       const prev = history.current.pop();
       if (prev) { setTab(prev); return true; }
       return false; // let Android close the app
@@ -40,7 +45,7 @@ export default function App() {
   return (
     <>
       <StatusBar style="light" />
-      <WealthfireApp platform="android" google={{ androidClientId: appJson.expo.extra.googleAndroidClientId || undefined }} otp={otp} docReader={docReader} tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
+      <WealthfireApp platform="android" google={{ androidClientId: appJson.expo.extra.googleAndroidClientId || undefined }} otp={otp} docReader={docReader} onboardingBack={onboardingBack} tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
     </>
   );
 }

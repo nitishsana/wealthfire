@@ -128,3 +128,12 @@ export function createOtpProvider(cfg: { provider?: string; apiUrl?: string }): 
   if (id === undefined || id === '' || id === 'demo') return new DemoOtpProvider();
   throw new Error(`OTP provider "${id}" is not built yet`);
 }
+
+/** Same as createOtpProvider but never throws: an unknown provider id falls back to the demo provider. */
+export function createOtpProviderSafe(cfg: { provider?: string; apiUrl?: string }): OtpProvider {
+  try {
+    return createOtpProvider(cfg);
+  } catch {
+    return new DemoOtpProvider();
+  }
+}

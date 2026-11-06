@@ -3,6 +3,8 @@
 // checkOutcome, the final PAN, the Aadhaar last 4 and reviewFields reach the store.
 import type { AppData, KycField, KycMatch, KycState, KycStatus, ReviewRecord } from './types';
 import { maskAadhaar, maskPan, normalizeAadhaar, normalizePan } from './onboarding';
+// Circular import (store) is safe: only used inside functions.
+import { NOT_READ_MASK } from './store';
 
 export const MAX_REREADS = 2;
 
@@ -151,11 +153,24 @@ export function reviewFields(cs: FieldCheck[]): ReviewRecord['fields'] {
  */
 export function reviewReasonText(field: ReviewRecord['fields'][number]): string {
   if (field.handCheck === true) return "Couldn't be read";
+  // The other card in a hand-check review with no successful read (send-for-hand-check lists both cards).
+  if (field.readMasked === NOT_READ_MASK) return 'Not read';
   if (field.nameNotChecked === true && field.nameMismatch !== true) {
     return field.typedMasked === field.readMasked ? 'Name not checked' : "Number doesn't match, name not checked";
   }
   if (field.nameMismatch !== true) return "Number doesn't match";
   return field.typedMasked === field.readMasked ? "Name doesn't match" : "Number and name don't match";
+}
+
+/**
+ * reviewReasonText for a row of a whole review. In a hand-check review the card that WAS read
+ * is listed only for context: "Sent with the hand check" (not a number difference).
+ */
+export function reviewRowReasonText(field: ReviewRecord['fields'][number], fields: ReviewRecord['fields']): string {
+  if (field.handCheck !== true && field.readMasked !== NOT_READ_MASK && fields.some((f) => f.handCheck === true)) {
+    return 'Sent with the hand check';
+  }
+  return reviewReasonText(field);
 }
 
 /**
