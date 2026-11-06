@@ -24,6 +24,10 @@ GitHub `main` is the source of truth. Chat history is not.
 
 Full rule: `.kiro/steering/agent-workflow.md`.
 
+## Previewing
+
+Double-click files in `preview/`: `0 - All sections.cmd` for the whole app, or one file per section. Each feature that adds or changes a section updates its `.cmd`. Rule: `.kiro/steering/preview-launchers.md`.
+
 ## Before handing work back
 
 - Run the checks in `project-overview.md`.
