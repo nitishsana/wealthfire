@@ -1,7 +1,11 @@
 // Onboarding rules: validators, masks, OTP limits and the step reducer.
 // Pure functions only; time is always passed in. Never store or log a full Aadhaar or an OTP.
-import type { AppData, ContactKind, OnboardingState, OtpProviderId } from './types';
-import { emptyOnboarding } from './store';
+import type {
+  AppData, ContactKind, DocReaderId, KycField, KycMatch, OnboardingState, OtpProviderId, ReviewRecord,
+} from './types';
+// Circular imports (store, kyc) are safe: they are only used inside functions.
+import { emptyKyc, emptyOnboarding, isSafeMask } from './store';
+import { MAX_REREADS } from './kyc';
 
 // ---------- Validators (return error text, or null when OK) ----------
 
@@ -58,6 +62,16 @@ export function validateAadhaar(s: string): string | null {
   return /^[2-9]\d{11}$/.test(v) && verhoeffValid(v) ? null : 'Enter a valid 12-digit Aadhaar number.';
 }
 
+/**
+ * "Enter your Aadhaar number again" on Upload documents (after a reload or Redo documents).
+ * The number must be valid and end in the OTP-verified last 4. Null when OK.
+ */
+export function confirmAadhaarRetype(full: string, verifiedLast4: string): string | null {
+  const bad = validateAadhaar(full);
+  if (bad) return bad;
+  return normalizeAadhaar(full).slice(-4) === verifiedLast4 ? null : "This doesn't match the Aadhaar you verified.";
+}
+
 const VD = [
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
   [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
@@ -90,6 +104,19 @@ export function verhoeffValid(digits: string): boolean {
     c = VD[c]![VP[i % 8]![Number(rev[i])]!]!;
   }
   return c === 0;
+}
+
+const VINV = [0, 4, 3, 2, 1, 5, 6, 7, 8, 9];
+
+/** Verhoeff check digit for a digit string, e.g. '23412341234' → '6'. Throws on non-digits. */
+export function verhoeffCheckDigit(first11: string): string {
+  if (!/^\d+$/.test(first11)) throw new Error('verhoeffCheckDigit needs digits only');
+  let c = 0;
+  const rev = first11.split('').reverse();
+  for (let i = 0; i < rev.length; i++) {
+    c = VD[c]![VP[(i + 1) % 8]![Number(rev[i])]!]!;
+  }
+  return String(VINV[c]);
 }
 
 // ---------- Display helpers ----------
@@ -161,6 +188,14 @@ export function canSend(sends: string[], now: number, lockedUntil?: string | nul
   return { ok: true };
 }
 
+/** Cooldown button label from a wait in ms, rounded up to whole seconds: 7000 → 'Resend in 0:07'. */
+export function resendIn(ms: number): string {
+  const total = Number.isFinite(ms) ? Math.ceil(Math.max(0, ms) / 1000) : 0;
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return `Resend in ${m}:${String(sec).padStart(2, '0')}`;
+}
+
 // ---------- Step reducer ----------
 
 export type OnboardingEvent =
@@ -171,7 +206,13 @@ export type OnboardingEvent =
   | { type: 'back-to-identity' }
   | { type: 'aadhaar-verified'; last4: string; at: string; provider: OtpProviderId }
   | { type: 'aadhaar-locked'; until: string }
-  | { type: 'sign-out' };
+  | { type: 'sign-out' }
+  | { type: 'documents-ready'; at: string; reader: DocReaderId }
+  | { type: 'back-to-documents' }
+  | { type: 'reread-used'; field: KycField }
+  | { type: 'check-confirmed'; match: KycMatch; pan: string; fields: ReviewRecord['fields']; at: string }
+  | { type: 'review-decided'; result: 'approved' | 'rejected'; reason: string | null; at: string }
+  | { type: 'redo-documents' };
 
 function addSend(list: string[], at: string): string[] {
   const t = Date.parse(at);
@@ -221,14 +262,82 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       };
     }
     case 'back-to-identity':
+      // Only before the Aadhaar OTP passes. From documents / check the Aadhaar is locked.
       if (s.step !== 'aadhaar-otp') return s;
       return { ...s, step: 'identity' };
-    case 'aadhaar-verified':
+    case 'aadhaar-verified': {
       if (s.step !== 'aadhaar-otp' || !/^\d{4}$/.test(e.last4)) return s;
-      return { ...s, step: 'done', aadhaar: { last4: e.last4, verifiedAt: e.at, provider: e.provider }, completedAt: e.at };
+      return { ...s, step: 'documents', aadhaar: { last4: e.last4, verifiedAt: e.at, provider: e.provider } };
+    }
+    case 'documents-ready': {
+      if (s.step !== 'documents' || !s.aadhaar) return s;
+      // A read after Back from Check numbers is a re-read of every field (Bug 1: no bypass via Back).
+      const rereads = s.kyc.returnedFromCheck
+        ? {
+          pan: Math.min(MAX_REREADS, s.kyc.rereads.pan + 1),
+          aadhaar: Math.min(MAX_REREADS, s.kyc.rereads.aadhaar + 1),
+        }
+        : s.kyc.rereads;
+      return { ...s, step: 'check', kyc: { ...s.kyc, documentsAt: e.at, reader: e.reader, rereads, returnedFromCheck: false } };
+    }
+    case 'back-to-documents':
+      if (s.step !== 'check') return s;
+      return { ...s, step: 'documents', kyc: { ...s.kyc, returnedFromCheck: true } };
+    case 'reread-used':
+      if (s.step !== 'check') return s;
+      return {
+        ...s,
+        kyc: { ...s.kyc, rereads: { ...s.kyc.rereads, [e.field]: Math.min(MAX_REREADS, s.kyc.rereads[e.field] + 1) } },
+      };
+    case 'check-confirmed': {
+      if (s.step !== 'check' || !s.identity || !s.aadhaar || validatePan(e.pan)) return s;
+      const t = Date.parse(e.at);
+      if (!Number.isFinite(t)) return s;
+      if (e.match === 'review') {
+        if (e.fields.length === 0 || !e.fields.every((f) => isSafeMask(f.typedMasked) && isSafeMask(f.readMasked))) return s;
+        // The Aadhaar is locked to the OTP-verified number: a review can only show that one as typed.
+        const verified = maskAadhaar(s.aadhaar.last4);
+        if (e.fields.some((f) => f.field === 'aadhaar' && f.typedMasked !== verified)) return s;
+      }
+      return {
+        ...s,
+        step: 'done',
+        completedAt: e.at,
+        identity: { ...s.identity, pan: normalizePan(e.pan) },
+        kyc: {
+          ...s.kyc,
+          match: e.match,
+          status: e.match === 'matched' ? 'verified' : 'under-review',
+          returnedFromCheck: false,
+          // Base 36, not decimal: a 13-digit ms run would break the "no 12-digit run in storage" check.
+          // On 'matched', a decided review from an earlier round stays as history.
+          review: e.match === 'review'
+            ? { id: `rv_${t.toString(36)}`, sentAt: e.at, fields: e.fields.map((f) => ({ ...f })), decision: null }
+            : s.kyc.review?.decision ? s.kyc.review : null,
+        },
+      };
+    }
     case 'aadhaar-locked':
       if (s.step !== 'aadhaar-otp') return s;
       return { ...s, aadhaarLockedUntil: e.until };
+    case 'review-decided': {
+      if (s.step !== 'done' || s.kyc.status !== 'under-review' || !s.kyc.review) return s;
+      const reason = e.reason?.trim() ?? '';
+      if (e.result === 'rejected' && (reason.length < 1 || reason.length > 200)) return s;
+      return {
+        ...s,
+        kyc: {
+          ...s.kyc,
+          status: e.result === 'approved' ? 'verified' : 'rejected',
+          review: { ...s.kyc.review, decision: { result: e.result, reason: e.result === 'rejected' ? reason : null, at: e.at } },
+        },
+      };
+    }
+    case 'redo-documents':
+      if (s.step !== 'done' || s.kyc.status !== 'rejected') return s;
+      // Back to Upload documents; the Aadhaar stays verified (no new OTP).
+      // Previous review stays as history until a new one replaces it.
+      return { ...s, step: 'documents', completedAt: null, kyc: { ...emptyKyc(), review: s.kyc.review } };
     case 'sign-out':
       return emptyOnboarding();
     default:

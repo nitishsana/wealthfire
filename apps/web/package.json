@@ -4,18 +4,23 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node ../../scripts/copy-ocr-assets.mjs",
     "dev": "vite --host 127.0.0.1",
+    "prebuild": "node ../../scripts/copy-ocr-assets.mjs",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@wealthfire/core": "0.1.0",
+    "pdfjs-dist": "6.5.438",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "react-router-dom": "7.18.5"
+    "react-router-dom": "7.18.5",
+    "tesseract.js": "7.0.0"
   },
   "devDependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.2.1",

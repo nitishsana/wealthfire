@@ -262,7 +262,7 @@ export type KycStatus = 'verified' | 'under-review' | 'rejected';
 export type DocReaderId = 'demo' | 'digio' | 'hyperverge';
 
 export interface ReviewRecord {
-  id: string;                    // 'rv_' + time in ms
+  id: string;                    // 'rv_' + time in base 36 (no long digit runs in storage)
   sentAt: string;                // ISO, set when the Aadhaar OTP passes
   fields: { field: KycField; typedMasked: string; readMasked: string }[]; // masks only, never full Aadhaar
   decision: { result: 'approved' | 'rejected'; reason: string | null; at: string } | null;
@@ -323,7 +323,7 @@ export function validateDocFile(f: Pick<DocFile, 'kind' | 'mime' | 'size'>): str
 
 `validateDocFile`: selfie accepts `image/jpeg`/`image/png`; Aadhaar and PAN also `application/pdf`; max 10 MB. Error text: selfie "Use a JPG or PNG photo under 10 MB.", cards "Use a JPG, PNG or PDF under 10 MB." (Req 7.5).
 
-### Demo reader modes (picked on Upload documents, shown only when `isDemo`)
+### Demo reader modes (developer setting only, never shown to users; see "Where the mode is set")
 
 | Mode | First read | Strict re-read | Shows scenario |
 |---|---|---|---|
@@ -332,7 +332,9 @@ export function validateDocFile(f: Pick<DocFile, 'kind' | 'mime' | 'size'>): str
 | `different` | a fixed other valid number (`AAAPZ9999Z`, `499118665246`; swaps to `234123412346` if typed equals it) | same as first read | 3 |
 | `unreadable` | `{ ok: false, reason: 'unreadable' }` | same | Req 8.2 |
 
-Helper `verhoeffCheckDigit(first11)` is added to `onboarding.ts` so `misread` can produce a valid Aadhaar. The demo label reads: "Demo mode: no document is really read. Pick what the reader should do."
+Helper `verhoeffCheckDigit(first11)` is added to `onboarding.ts` so `misread` can produce a valid Aadhaar.
+
+**Where the mode is set (changed 2026-11-06 by Nitish: no demo UI on Upload documents).** Users never see the mode or any "Demo mode" text on this step. Default is `match`. Developers switch it only in local builds: web reads `?reader=match|misread|different|unreadable` when `import.meta.env.DEV` is true (ignored on the live site); phones read `appJson.expo.extra.demoReaderMode` only when `__DEV__` is true. Scenario launchers in `CMD files/` pass the web parameter.
 
 `createDocumentReader` mirrors `createOtpProvider`: `undefined`/`''`/`'demo'` → demo; anything else throws `Document reader "<id>" is not built yet`. A real partner reader later is an `HttpDocumentReader` calling a small backend (`POST /kyc/read`) that uploads the file to the partner over HTTPS and returns only the number; config `VITE_DOC_READER` + `VITE_DOC_READER_URL` on web, `expo.extra.docReader` + `docReaderUrl` on phones.
 
@@ -374,7 +376,7 @@ export function kycStatusLabel(s: KycStatus | null): string;             // 'Ver
 
 | Step | Feature id | Content | Primary button |
 |---|---|---|---|
-| Upload documents | `onboard-documents` | 3 slots: "Your selfie", "Aadhaar card", "PAN card"; per-slot buttons (table B6); preview with "Replace"/"Remove"; hints; demo reader mode picker | "Continue" (disabled until 3 valid files) |
+| Upload documents | `onboard-documents` | 3 slots: "Your selfie", "Aadhaar card", "PAN card"; per-slot buttons (table B6); preview with "Replace"/"Remove"; hints; no demo UI (R7.2) | "Continue" (disabled until 3 valid files) |
 | Reading | (inside `onboard-documents`) | "Reading your documents…" with `role="status"` / `accessibilityLiveRegion` | — |
 | Check your numbers | `onboard-check` | Per field: "You typed", "Read from document", "Match" ✅ / "Doesn't match" ❌, thumbnail; Aadhaar full with Hide; on mismatch "Use number from document", "Edit number", "Upload again" (re-read limit shown as "N re-checks left") | "Confirm" |
 | Aadhaar OTP | `onboard-aadhaar-otp` | unchanged; "Back" → Check numbers | "Verify Aadhaar" |
@@ -391,7 +393,9 @@ Messages (same on web and mobile): "Both numbers match your documents.", "The nu
 | Selfie | "Use webcam" (`getUserMedia({ video: { facingMode: 'user' } })` → canvas → JPEG blob; hidden if no camera) · "Upload from computer" (`<input type=file accept="image/jpeg,image/png" capture="user">`) | "Take photo" (`ImagePicker.launchCameraAsync({ cameraType: front })`) · "Choose from gallery" (`launchImageLibraryAsync`) |
 | Aadhaar, PAN | "Upload from computer" (`accept="image/jpeg,image/png,application/pdf"`) · "Choose from Google Drive" | "Take photo" (back camera) · "Choose from gallery" · "Choose a file" (`DocumentPicker.getDocumentAsync({ type: ['image/jpeg','image/png','application/pdf'], copyToCacheDirectory: true })`, which lists Google Drive when the Drive app is installed) |
 
-- Phones: add `expo-image-picker` **58.0.10** (pinned, matches Expo 58) to `apps/android` and `apps/ios`, and as a peer dependency of `packages/mobile-ui`. `expo-document-picker` 58.0.4 is already there. Add the `expo-image-picker` config plugin in both `app.json` files with `cameraPermission: "Wealthfire uses the camera for your KYC selfie and ID card photos."` and `photosPermission: "Wealthfire lets you pick your ID card photos from your gallery."`. Image picker options: `quality: 0.8`, `exif: false`, `allowsEditing: false`, `preferredAssetRepresentationMode: Compatible` (so iOS gives JPEG, not HEIC).
+- Phones: add `expo-image-picker` **58.0.10** (pinned, matches Expo 58) to `apps/android` and `apps/ios`, and as a peer dependency of `packages/mobile-ui`. `expo-document-picker` 58.0.4 is already there. Add the `expo-image-picker` config plugin in both `app.json` files with `cameraPermission: "Wealthfire uses the camera for your KYC selfie and ID card photos."` and `photosPermission: "Wealthfire lets you pick your ID card photos from your gallery."`. Image picker options: `quality: 0.8`, `exif: false`, `preferredAssetRepresentationMode: Compatible` (so iOS gives JPEG, not HEIC).
+- **Take photo flow (Req 7.11), phones:** call `ImagePicker.requestCameraPermissionsAsync()` first (system prompt). If denied and `canAskAgain` is false, show the 7.8 message with an "Open settings" button (`Linking.openSettings()`). Then `launchCameraAsync({ cameraType: Front, allowsEditing: false, quality: 0.8, exif: false })`; the OS camera screen gives Capture. Back in the app, the same "Retake" / "Crop" / "Use photo" screen as web. "Crop" is an in-app square crop (pan + pinch zoom with `PanResponder`, plus +/- buttons for accessibility), saved with `expo-image-manipulator` `manipulateAsync(uri, [{ crop }], { compress: 0.8, format: SaveFormat.JPEG })`. Adds `expo-image-manipulator` **58.0.16** (exact pin). Temporary files from capture and crop are deleted like other documents.
+- **Take photo flow, web:** "Take photo" shows the one-line reason, then calls `getUserMedia({ video: { facingMode: 'user' } })` (browser prompt). Dialog: live video + "Capture" → still image with "Retake" / "Crop" / "Use photo". "Crop": in-page square crop (drag to move, slider + wheel/pinch to zoom, keyboard arrows and +/- for accessibility), drawn to a canvas and exported with `canvas.toBlob(..., 'image/jpeg', 0.85)`. No new library. Stream tracks are stopped when the dialog closes. If `getUserMedia` is missing or denied, show the 7.8 message.
 - Phones, cleanup: picked files live in the app cache. `FileSystem.deleteAsync(uri, { idempotent: true })` runs on Remove/Replace, when onboarding completes, on sign-out and on unmount.
 - Web, cleanup: files are `Blob`s with `URL.createObjectURL` previews; `URL.revokeObjectURL` on Remove/Replace/complete/unmount. Webcam stream tracks are stopped when the dialog closes.
 
@@ -433,3 +437,82 @@ Same workflow as Part A: one orchestrator, builders in parallel with separate fi
 | A: core | `packages/core/**` | at once |
 | B: web | `apps/web/**`, `.github/workflows/ci-and-pages.yml` (env lines only), `CMD files/01 - Onboarding.cmd` | at once, coding against B2–B4 signatures |
 | C: phones | `packages/mobile-ui/**`, `apps/android/**`, `apps/ios/**` (App.tsx, app.json, package.json, lockfile) | at once, coding against B2–B4 signatures |
+
+
+---
+
+# Part C — Aadhaar verified once, and real on-device document reading (preview fixes, 2026-11-06)
+
+Nitish's preview found: (1) Aadhaar felt verified twice; (2) the camera would not start (fixed in the current wave, see O2c/O3c); (3) wrong PDFs passed as a match, because the demo reader never looks at the file. Decision: **read documents on the device** (option A). Files never leave the device.
+
+## C1. Flow: Aadhaar OTP once, before documents
+
+```
+signin → otp → identity → aadhaar-otp → documents → check → done
+```
+
+| Event | Change |
+|---|---|
+| `identity-saved` | → `aadhaar-otp` (again, as in Part A) |
+| `aadhaar-verified` | stores last 4 + verifiedAt, → `documents` (no longer `done`) |
+| `back-to-identity` | allowed from `aadhaar-otp` only; from `documents`/`check` the Aadhaar is locked |
+| `check-confirmed` | → `done`; sets `kyc.match`, `kyc.status` (`verified` / `under-review`), `completedAt`, review `id` + `sentAt` |
+| `back-to-check` | removed (no step after `check` but `done`) |
+| `redo-documents` | → `documents` (no new OTP) |
+
+- `done` requires `aadhaar` (OTP passed) **and** `kyc.match`.
+- **Aadhaar on Check numbers is locked** to the OTP-verified number: no "Edit number", no "Use number from document" for Aadhaar; only "Upload again" (a re-read). Still differs after re-reads → manual review. PAN keeps all three choices.
+- The full verified Aadhaar stays in screen memory from the OTP step to Check numbers. After a reload (or on Redo documents) it is gone, so Upload documents shows one extra field, "Enter your Aadhaar number again", which must pass Verhoeff and end in the verified last 4 ("This doesn't match the Aadhaar you verified."). No second OTP is ever sent.
+- `sanitizeOnboarding`: steps past `aadhaar-otp` need `aadhaar`; `done` needs `kyc.match` and `kyc.status`.
+
+## C2. On-device reader (`packages/core/src/cardtext.ts` + `docreader.ts`)
+
+Core stays platform-free: it parses text; each platform supplies the text engine.
+
+```ts
+export type TextExtractor = (doc: DocFile, opts: { strict: boolean }) => Promise<string[]>; // one or more OCR passes
+export function createOnDeviceReader(extract: TextExtractor): DocumentReader;        // id 'ondevice', isDemo false
+
+export interface CardParse {
+  looksLikeCard: boolean;      // card keywords found
+  value: string | null;        // best valid number, normalized
+  masked: boolean;             // Aadhaar shown as XXXX XXXX 1234
+}
+export function parsePanText(text: string): CardParse;
+export function parseAadhaarText(text: string): CardParse;
+```
+
+- `DocReaderId` gains `'ondevice'`. `createDocumentReader`: `undefined` / `''` / `'ondevice'` → on-device reader (the new default everywhere); `'demo'` → demo reader (local dev scenario launchers only).
+- **PAN rules:** keywords any of `INCOME TAX DEPARTMENT`, `Permanent Account Number`, `GOVT. OF INDIA`, `आयकर विभाग`. Candidates: 10-char tokens after removing spaces; fix common OCR swaps by position (letters at 1–5 and 10: `0→O, 1→I, 5→S, 8→B, 2→Z`; digits at 6–9: `O→0, I/L→1, S→5, B→8, Z→2`); must pass `validatePan` shape (4th char any valid type is still read, so a company PAN is reported, not silently matched).
+- **Aadhaar rules:** keywords any of `Aadhaar`, `आधार`, `Unique Identification Authority`, `Government of India`, `भारत सरकार`. Candidates: 12 digits as `dddd dddd dddd` or `dddddddddddd`, first digit 2–9, Verhoeff valid; 16-digit VID numbers are ignored; `XXXX XXXX 1234` → `masked: true`.
+- **Results:** no keywords → `{ ok: false, reason: 'invalid', message: 'This doesn't look like a PAN card. Upload your PAN card.' }` (Aadhaar: "…an Aadhaar card. Upload your Aadhaar card."); keywords but no valid number → `unreadable` (existing message); masked Aadhaar → `invalid`, "This Aadhaar is masked. Upload the full Aadhaar or the e-Aadhaar PDF."; several different valid numbers → the most frequent across passes, else `unreadable`.
+- **Strict mode** (re-read): the extractor runs extra passes (2× scale, grey + threshold, and rotated 90°/180°/270° for sideways photos), and the parser takes the majority value.
+- `expected` is never used by the on-device reader.
+
+## C3. Web text engine (`apps/web/src/ocr.ts`)
+
+- `tesseract.js` **7.0.0** (Apache-2.0) and `pdfjs-dist` **6.5.438** (Apache-2.0), exact pins, in `apps/web`.
+- Self-hosted, no CDN: the Tesseract worker, core WASM and `eng` fast language data are copied into `apps/web/public/ocr/` by a small `scripts/copy-ocr-assets.mjs` run on `postinstall`/`prebuild`, and passed as `workerPath` / `corePath` / `langPath`. Loaded lazily on the first read (~5 MB, cached by the browser afterwards).
+- PDF: `pdfjs-dist` renders page 1 at scale 2 to a canvas (worker via `pdfjs-dist/build/pdf.worker.min.mjs?url`); images are drawn to a canvas too. Passes as in C2; one Tesseract worker reused, terminated when onboarding completes.
+- Screen shows "Reading your documents…" with a progress percentage from Tesseract's logger.
+
+## C4. Phone text engine (`packages/mobile-ui/src/ocr.ts`)
+
+- `@react-native-ml-kit/text-recognition` **2.0.0** (MIT) for images; `react-native-pdf-thumbnail` **2.0.0** (MIT) renders PDF page 1 to an image first; `expo-dev-client` **58.0.18**. All exact pins in both app folders, peers in `packages/mobile-ui`.
+- These are native modules, so the phone apps need a **custom development build** (`npx expo run:android` / `run:ios`, or EAS `build:apk`). **Expo Go can no longer run the app.** CI's `expo export` (JS bundle) is unaffected.
+- The modules are loaded with a guarded `require`. If they are missing (e.g. someone opens it in Expo Go), reading fails with "Document reading isn't available in this app build." and the step does **not** pass — it never falls back to a fake match.
+- Strict passes: ML Kit on the original plus `expo-image-manipulator` resized (2×) and rotated copies; temp images deleted after reading.
+
+## C5. Honesty and privacy
+
+- No document ever "matches" without being read. The demo reader exists only behind DEV-only scenario switches.
+- Text and images stay in memory; OCR text is never stored or logged. Only the parsed number reaches the check screen.
+- Accuracy limit: clear, flat, well-lit photos read well; blurry or glared photos may be unreadable and ask for a clearer upload. A KYC partner can replace the on-device reader later through the same slot.
+
+## C6. Tests
+
+Core (`cardtext.test.ts`): sample OCR texts for a PAN card and an Aadhaar card (synthetic, using test numbers `ABCPE1234F`, `234123412346`), OCR swaps fixed (`ABCPE1Z34F` → digits fixed), wrong card (a PAN text given to the Aadhaar parser → not a card), random PDF text → not a card, VID ignored, masked Aadhaar, Verhoeff-failing 12-digit runs rejected, majority across passes. Reducer: new step order, `done` only via `check-confirmed` after `aadhaar-verified`, Aadhaar locked on check, re-type rule after reload. UI: the scenario launchers keep working through `?reader=demo&mode=…`; a new `01 - Onboarding (real reading).cmd` uses the on-device reader.
+
+## C7. Build plan
+
+Chief of Staff starts (sub-agents cannot start their own): **P1 core** (C1 reducer + C2 parser + tests, owns `packages/core/**`) first; then in parallel **P2 web flow** (`apps/web/src/pages/Onboarding.tsx`, `Settings.tsx`, `styles.css`), **P2o web OCR** (`apps/web/src/ocr.ts`, `apps/web/src/docreader.ts`, `apps/web/package.json` + lockfile, `scripts/copy-ocr-assets.mjs`, `apps/web/public/ocr/`, `.gitignore` line for copied assets), **P3 phone flow** (`packages/mobile-ui/src/screens/Onboarding.tsx`, `Documents.tsx`, `onboardUi.tsx`), **P3o phone OCR** (`packages/mobile-ui/src/ocr.ts`, `reader.tsx`, `packages/mobile-ui/package.json`, both app `package.json` + lockfiles + `app.json`); then the independent reviewer and all checks.

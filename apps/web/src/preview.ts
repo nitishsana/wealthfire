@@ -23,6 +23,7 @@ export function previewData(): AppData | null {
     identity: { firstName: 'Demo', lastName: 'User', pan: 'ABCPU1234F' },
     aadhaar: { last4: '2346', verifiedAt: now, provider: 'demo' },
     completedAt: now,
+    kyc: { ...d.onboarding.kyc, match: 'matched', status: 'verified', reader: 'demo', documentsAt: now },
   };
   return d;
 }

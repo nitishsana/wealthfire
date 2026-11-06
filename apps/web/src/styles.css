@@ -155,3 +155,26 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
 .account dd { margin: 0; font-variant-numeric: tabular-nums; }
 .onboard-privacy { display: block; padding: 0 10px 16px; margin: -12px 0 0; }
 .input-wrap input.masked { -webkit-text-security: disc; }
+/* Onboarding Part B: documents and number check */
+.doc-slot h2 { margin-bottom: 4px; }
+.doc-preview { margin: 8px 0; }
+.doc-thumb { display: block; max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--line); object-fit: cover; }
+.doc-thumb.small { max-width: 96px; max-height: 72px; }
+.doc-pdf { display: inline-flex; gap: 8px; align-items: center; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.doc-pdf.small { padding: 4px 8px; font-size: .85rem; }
+.check-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.match { font-weight: 700; margin: 4px 0 8px; }
+.match.good { color: var(--good); }
+.match.bad { color: var(--bad); }
+/* Name on the card vs the entered name (Check numbers). */
+.name-check { margin: 0 0 8px; }
+.name-check.good { color: var(--good); }
+.name-check.warn { color: var(--warn); }
+/* Password for a locked e-Aadhaar / e-PAN PDF, under its slot. */
+.pdf-password { margin-top: 8px; }
+.pdf-password input { flex: 1 1 12rem; min-width: 0; }
+.account-status { margin: 4px 0 8px; }
+.drive-link { margin: 0 0 4px; }
+.link-btn:disabled { color: var(--muted); text-decoration: none; cursor: not-allowed; }
+/* Toggle link with a fixed label: show the pressed state visually too. */
+.link-btn[aria-pressed="true"] { font-weight: 700; text-decoration-thickness: 2px; }

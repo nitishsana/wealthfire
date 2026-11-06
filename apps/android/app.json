@@ -9,6 +9,16 @@
     "platforms": ["android"],
     "experiments": { "tsconfigPaths": false },
     "scheme": "com.nitishsana.wealthfire",
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Wealthfire uses the camera for your KYC selfie and ID card photos.",
+          "photosPermission": "Wealthfire lets you pick your ID card photos from your gallery.",
+          "microphonePermission": false
+        }
+      ]
+    ],
     "extra": {
       "googleAndroidClientId": ""
     },

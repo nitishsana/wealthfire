@@ -1,5 +1,7 @@
 // Storage-agnostic load/save. Web passes localStorage; mobile passes AsyncStorage.
-import type { AppData, OnboardingState, OnboardingStep, OtpProviderId } from './types';
+import type {
+  AppData, DocReaderId, KycField, KycMatch, KycState, KycStatus, OnboardingState, OnboardingStep, OtpProviderId, ReviewRecord,
+} from './types';
 import { DEFAULT_ASSUMPTIONS } from './fire';
 // Circular with onboarding.ts, safe: both sides only call each other inside functions.
 import {
@@ -18,14 +20,65 @@ export function emptyOnboarding(): OnboardingState {
     completedAt: null,
     sends: { contact: [], aadhaar: [] },
     aadhaarLockedUntil: null,
+    kyc: emptyKyc(),
   };
 }
 
-const STEPS: readonly OnboardingStep[] = ['signin', 'otp', 'identity', 'aadhaar-otp', 'done'];
+/** No document check done yet. */
+export function emptyKyc(): KycState {
+  return { match: null, status: null, reader: null, rereads: { pan: 0, aadhaar: 0 }, review: null, documentsAt: null, returnedFromCheck: false };
+}
+
+const STEPS: readonly OnboardingStep[] = ['signin', 'otp', 'identity', 'aadhaar-otp', 'documents', 'check', 'done'];
 const PROVIDERS: readonly OtpProviderId[] = ['demo', 'digilocker', 'digio'];
+const READERS: readonly DocReaderId[] = ['ondevice', 'demo', 'digio', 'hyperverge'];
+const MATCHES: readonly KycMatch[] = ['matched', 'review'];
+const STATUSES: readonly KycStatus[] = ['verified', 'under-review', 'rejected'];
 
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter(isStr) : []);
+const pick = <T extends string>(list: readonly T[], v: unknown): T | null => (list.includes(v as T) ? (v as T) : null);
+const rereadCount = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.min(2, Math.max(0, Math.floor(v))) : 0);
+
+/** A stored mask: masked shape only, and never a run of 5+ digits (so never a full Aadhaar). */
+export function isSafeMask(s: unknown): s is string {
+  return isStr(s) && /^[A-Z0-9X* ]{4,14}$/.test(s) && !/\d{5,}/.test(s);
+}
+
+function sanitizeReview(raw: unknown): ReviewRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (!isStr(r.id) || !isStr(r.sentAt)) return null;
+  const fields = (Array.isArray(r.fields) ? r.fields : [])
+    .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
+    .filter((f) => (f.field === 'pan' || f.field === 'aadhaar') && isSafeMask(f.typedMasked) && isSafeMask(f.readMasked))
+    .map((f) => ({
+      field: f.field as KycField, typedMasked: f.typedMasked as string, readMasked: f.readMasked as string,
+      ...(f.nameMismatch === true ? { nameMismatch: true as const } : {}),
+    }));
+  const d = r.decision as Record<string, unknown> | null | undefined;
+  let decision: ReviewRecord['decision'] = null;
+  if (d && typeof d === 'object' && (d.result === 'approved' || d.result === 'rejected') && isStr(d.at)) {
+    decision = { result: d.result, reason: isStr(d.reason) ? d.reason.slice(0, 200) : null, at: d.at };
+  }
+  return { id: r.id, sentAt: r.sentAt, fields, decision };
+}
+
+function sanitizeKyc(raw: unknown): KycState {
+  const out = emptyKyc();
+  if (!raw || typeof raw !== 'object') return out;
+  const k = raw as Record<string, unknown>;
+  const rr = (k.rereads && typeof k.rereads === 'object' ? k.rereads : {}) as Record<string, unknown>;
+  return {
+    match: pick(MATCHES, k.match),
+    status: pick(STATUSES, k.status),
+    reader: pick(READERS, k.reader),
+    rereads: { pan: rereadCount(rr.pan), aadhaar: rereadCount(rr.aadhaar) },
+    review: sanitizeReview(k.review),
+    documentsAt: isStr(k.documentsAt) ? k.documentsAt : null,
+    returnedFromCheck: k.returnedFromCheck === true,
+  };
+}
 
 /**
  * Clean stored onboarding state. Keeps known keys only, never keeps more than 4 Aadhaar
@@ -68,16 +121,27 @@ export function sanitizeOnboarding(raw: unknown): OnboardingState {
   if (s && typeof s === 'object') out.sends = { contact: strList(s.contact), aadhaar: strList(s.aadhaar) };
   out.aadhaarLockedUntil = isStr(r.aadhaarLockedUntil) ? r.aadhaarLockedUntil : null;
 
-  // Furthest step the stored data supports.
+  out.kyc = sanitizeKyc(r.kyc);
+
+  // A reload never leaves a field blocked without an earlier read on screen (the reads were in
+  // memory only). Re-read counts are kept; Back within one session still counts.
+  out.kyc.returnedFromCheck = false;
+
+  // Furthest step the stored data supports. Steps past aadhaar-otp need the Aadhaar OTP;
+  // done needs kyc.match and kyc.status.
   const verified = !!out.contact?.verifiedAt;
   const maxStep: OnboardingStep =
     !out.contact ? 'signin'
     : !verified ? 'otp'
     : !out.identity ? 'identity'
     : !out.aadhaar ? 'aadhaar-otp'
+    : !out.kyc.match || !out.kyc.status ? 'check'
     : 'done';
-  const want = STEPS.includes(r.step as OnboardingStep) ? (r.step as OnboardingStep) : 'signin';
+  let want = STEPS.includes(r.step as OnboardingStep) ? (r.step as OnboardingStep) : 'signin';
+  // Check numbers shows reads held in memory only, so after a reload it opens on Upload documents.
+  if (want === 'check') want = 'documents';
   out.step = STEPS.indexOf(want) <= STEPS.indexOf(maxStep) ? want : maxStep;
+  if (out.step === 'check') out.step = 'documents';
   out.completedAt = out.step === 'done' && isStr(r.completedAt) ? r.completedAt : null;
   if (out.step === 'done' && !out.completedAt) out.completedAt = out.aadhaar?.verifiedAt ?? null;
   return out;

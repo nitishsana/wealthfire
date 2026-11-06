@@ -32,7 +32,7 @@ const NAV = [
 export function App() {
   const { data } = useStore();
   const navigate = useNavigate();
-  // Keeps the onboarding page up for the "You're all set" screen after the Aadhaar OTP passes.
+  // Keeps the onboarding page up for the "You're all set" screen after Confirm on Check numbers.
   const [finishing, setFinishing] = useState(false);
   if (data.onboarding.step !== 'done' || finishing) {
     return <OnboardingPage onCompleting={() => setFinishing(true)} onFinish={() => { setFinishing(false); navigate('/'); }} />;

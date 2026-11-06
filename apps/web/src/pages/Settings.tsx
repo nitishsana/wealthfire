@@ -1,6 +1,10 @@
 import { useState } from 'react';
-import { DEFAULT_ASSUMPTIONS, demoData, emptyData, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, serialize, type Assumptions } from '@wealthfire/core';
+import {
+  DEFAULT_ASSUMPTIONS, demoData, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, serialize,
+  type Assumptions,
+} from '@wealthfire/core';
 import { useStore } from '../store';
+import { documentReader } from '../docreader';
 import { Card, NumberField, Page } from '../ui';
 
 const FIELDS: { key: keyof Assumptions; label: string; step: number }[] = [
@@ -41,10 +45,22 @@ export function SettingsPage() {
               {ob.aadhaar ? <>{maskAadhaar(ob.aadhaar.last4)} <span className="badge">Verified</span></> : '—'}
             </dd>
           </dl>
+          <div data-feature="onboard-review" className="account-status">
+            {/* Live region on the text only, not on the block holding the button (Bug 10). */}
+            <p role="status">
+              Account status: <strong>{kycStatusLabel(ob.kyc.status)}</strong>
+              {ob.kyc.status === 'rejected' && ob.kyc.review?.decision?.reason ? <> ({ob.kyc.review.decision.reason})</> : null}
+            </p>
+            {ob.kyc.status === 'rejected' && (
+              <button className="btn primary" onClick={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'redo-documents' }) }))}>Redo documents</button>
+            )}
+          </div>
           <p className="muted small">Signing out keeps your financial data in this browser.</p>
           <button className="btn" onClick={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'sign-out' }) }))}>Sign out</button>
         </Card>
       </div>
+      {/* G2: dev builds only; the production bundle drops the Demo reviewer entirely. */}
+      {import.meta.env.DEV && documentReader.isDemo && <DemoReviewer />}
       <Card title="Assumptions (% per year)">
         <div className="form-grid">
           {FIELDS.map((f) => (
@@ -71,5 +87,54 @@ export function SettingsPage() {
       </div>
       {msg && <p role="status">{msg}</p>}
     </Page>
+  );
+}
+
+/** Demo stand-in for the hand check (Req 9.6). Shows masks only; documents are never stored. */
+function DemoReviewer() {
+  const { data, update } = useStore();
+  const [reason, setReason] = useState('');
+  const [touched, setTouched] = useState(false);
+  const kyc = data.onboarding.kyc;
+  // Only an under-review account has a pending review; a decided review stays as history only.
+  const pending = kyc.status === 'under-review' ? kyc.review : null;
+  const r = reason.trim();
+  const reasonErr = r.length < 1 || r.length > 200 ? 'Enter a reason (1–200 characters).' : null;
+  const decide = (result: 'approved' | 'rejected') => {
+    update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'review-decided', result, reason: result === 'rejected' ? r : null, at: new Date().toISOString() }) }));
+    setReason(''); setTouched(false);
+  };
+
+  return (
+    <div>
+      <Card title="Demo reviewer">
+        <p className="muted small">Demo mode: this stands in for the Wealthfire team's hand check.</p>
+        {!pending ? (
+          <p>No review waiting.</p>
+        ) : (
+          <>
+            {pending.sentAt ? <p className="muted small">Sent {new Date(pending.sentAt).toLocaleString('en-IN')}</p> : null}
+            <table>
+              <thead><tr><th scope="col">Field</th><th scope="col">Typed</th><th scope="col">Read from document</th></tr></thead>
+              <tbody>
+                {pending.fields.map((f) => (
+                  <tr key={f.field}><td>{f.field === 'pan' ? 'PAN' : 'Aadhaar'}</td><td>{f.typedMasked}</td><td>{f.readMasked}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            <label className="field" htmlFor="rv-reason">
+              <span>Reason (needed to reject)</span>
+              <input id="rv-reason" value={reason} maxLength={200} onChange={(e) => setReason(e.target.value)} onBlur={() => setTouched(true)}
+                aria-invalid={touched && reasonErr ? true : undefined} aria-describedby={touched && reasonErr ? 'rv-reason-err' : undefined} />
+            </label>
+            {touched && reasonErr && <p id="rv-reason-err" className="error" role="status">{reasonErr}</p>}
+            <div className="row">
+              <button className="btn primary" onClick={() => decide('approved')}>Approve</button>
+              <button className="btn danger" disabled={!!reasonErr} onClick={() => decide('rejected')}>Reject</button>
+            </div>
+          </>
+        )}
+      </Card>
+    </div>
   );
 }

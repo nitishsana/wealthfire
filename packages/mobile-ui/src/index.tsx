@@ -9,11 +9,14 @@ import { BucketsScreen, ConnectScreen, ExpensesScreen, FireScreen, PortfolioScre
 import { GoogleCtx, type GoogleConfig } from './screens/Gmail';
 import { OnboardingScreen } from './screens/Onboarding';
 import { OtpProviderScope, type OtpConfig } from './otp';
+import { DocReaderScope, type DocReaderConfig } from './reader';
 
 export type { GoogleConfig } from './screens/Gmail';
 export type { OtpConfig } from './otp';
+export type { DocReaderConfig } from './reader';
 
 export { TABS, type TabKey } from './nav';
+export { clearPickerCache } from './cacheCleanup';
 export { theme } from './theme';
 
 const SCREENS: Record<TabKey, ComponentType> = {
@@ -33,6 +36,8 @@ export interface WealthfireAppProps {
   google?: GoogleConfig;
   /** OTP provider for onboarding (from app.json extra.otpProvider / otpApiUrl). Empty → demo provider. */
   otp?: OtpConfig;
+  /** Document reader for onboarding KYC (from app.json extra.docReader / docReaderUrl). Empty → on-device reader (ML Kit); 'demo' only in dev builds. */
+  docReader?: DocReaderConfig;
 }
 
 function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: TabKey; setTab: (t: TabKey) => void }) {
@@ -87,7 +92,7 @@ function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: Tab
 }
 
 /** The full Wealthfire app. apps/android and apps/ios each render this with their platform. */
-export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {}, otp = {} }: WealthfireAppProps) {
+export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {}, otp = {}, docReader = {} }: WealthfireAppProps) {
   const [ownTab, setOwnTab] = useState<TabKey>(initialTab);
   const tab = ctlTab ?? ownTab;
   const setTab = (t: TabKey) => { (ctlSetTab ?? setOwnTab)(t); onTabChange?.(t); };
@@ -95,9 +100,11 @@ export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab:
     <SafeAreaProvider>
       <GoogleCtx.Provider value={google}>
         <OtpProviderScope config={otp}>
-          <DataProvider>
-            <Body platform={platform} tab={tab} setTab={setTab} />
-          </DataProvider>
+          <DocReaderScope config={docReader}>
+            <DataProvider>
+              <Body platform={platform} tab={tab} setTab={setTab} />
+            </DataProvider>
+          </DocReaderScope>
         </OtpProviderScope>
       </GoogleCtx.Provider>
     </SafeAreaProvider>

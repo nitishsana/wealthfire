@@ -110,9 +110,40 @@ export interface Snapshot {
   monthlySip: number;
 }
 
-export type OnboardingStep = 'signin' | 'otp' | 'identity' | 'aadhaar-otp' | 'done';
+export type OnboardingStep = 'signin' | 'otp' | 'identity' | 'aadhaar-otp' | 'documents' | 'check' | 'done';
 export type ContactKind = 'email' | 'mobile';
 export type OtpProviderId = 'demo' | 'digilocker' | 'digio';
+
+export type KycField = 'pan' | 'aadhaar';
+export type KycMatch = 'matched' | 'review';
+export type KycStatus = 'verified' | 'under-review' | 'rejected';
+export type DocReaderId = 'ondevice' | 'demo' | 'digio' | 'hyperverge';
+
+/** A manual review of numbers that did not match their documents. Masks only, never a full Aadhaar. */
+export interface ReviewRecord {
+  /** 'rv_' + time in ms, base 36 (no long digit runs in storage) */
+  id: string;
+  /** ISO, set on Check numbers → Confirm */
+  sentAt: string;
+  /** `nameMismatch`: the name on that card didn't match the name the user entered. */
+  fields: { field: KycField; typedMasked: string; readMasked: string; nameMismatch?: true }[];
+  decision: { result: 'approved' | 'rejected'; reason: string | null; at: string } | null;
+}
+
+export interface KycState {
+  /** set on Check numbers → Confirm */
+  match: KycMatch | null;
+  /** set on Check numbers → Confirm; changed by a review decision */
+  status: KycStatus | null;
+  reader: DocReaderId | null;
+  /** max 2 each */
+  rereads: { pan: number; aadhaar: number };
+  review: ReviewRecord | null;
+  /** time all 3 documents were added (the files themselves are never stored) */
+  documentsAt: string | null;
+  /** true after Back from Check numbers; the next read of the documents counts as a re-read. Cleared on reload. */
+  returnedFromCheck: boolean;
+}
 
 /** Saved onboarding progress. OTP codes and the full Aadhaar number are never part of it. */
 export interface OnboardingState {
@@ -127,6 +158,8 @@ export interface OnboardingState {
   sends: { contact: string[]; aadhaar: string[] };
   /** Aadhaar step lockout. Persisted so a restart does not bypass it. */
   aadhaarLockedUntil: string | null;
+  /** Document check and review state (Part B). */
+  kyc: KycState;
 }
 
 /** Everything a user owns in the app. Stored on device only in v1. */

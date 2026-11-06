@@ -23,6 +23,9 @@ export const FEATURES = [
   { id: 'onboard-identity', name: 'Onboarding: your details (name, PAN, Aadhaar)' },
   { id: 'onboard-aadhaar-otp', name: 'Onboarding: mandatory Aadhaar OTP and "You\'re all set"' },
   { id: 'onboard-account', name: 'Onboarding: Settings Account card with sign out' },
+  { id: 'onboard-documents', name: 'Onboarding: upload selfie, Aadhaar card and PAN card' },
+  { id: 'onboard-check', name: 'Onboarding: check typed numbers against the documents' },
+  { id: 'onboard-review', name: 'Onboarding: account status and manual review (approve / reject, redo documents)' },
 ] as const;
 
 export type FeatureId = (typeof FEATURES)[number]['id'];

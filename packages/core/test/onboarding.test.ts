@@ -3,7 +3,8 @@ import {
   OTP_RULES, canSend, demoData, deserialize, emptyData, emptyOnboarding, groupAadhaar, maskAadhaar, maskEmail,
   maskMobile, maskPan, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer,
   panSurnameWarning, prefillProfileName, pruneSends, resumeStep, serialize, validateAadhaar, validateEmail,
-  validateMobile, validateName, validatePan, verhoeffValid, type OnboardingEvent, type OnboardingState,
+  validateMobile, validateName, validatePan, verhoeffValid, verhoeffCheckDigit, emptyKyc, isEligibleToInvest,
+  sanitizeOnboarding, readBlocked, readsLeft, resendIn, confirmAadhaarRetype, type OnboardingEvent, type OnboardingState,
 } from '../src';
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -136,6 +137,19 @@ describe('OTP rules', () => {
   });
 });
 
+
+/** Signed in, contact verified, details saved: state is on 'aadhaar-otp'. */
+function toAadhaarOtp(): OnboardingState {
+  let s = onboardingReducer(emptyOnboarding(), { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } });
+  s = onboardingReducer(s, { type: 'contact-verified', at: iso(T0) });
+  return onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
+}
+
+/** Aadhaar OTP passed: state is on 'documents'. */
+function toDocuments(): OnboardingState {
+  return onboardingReducer(toAadhaarOtp(), { type: 'aadhaar-verified', last4: '2346', at: iso(T0 + 5_000), provider: 'demo' });
+}
+
 function runHappyPath(): OnboardingState {
   const events: OnboardingEvent[] = [
     { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '+91 98765 43210' } },
@@ -143,8 +157,19 @@ function runHappyPath(): OnboardingState {
     { type: 'identity-saved', firstName: ' Nitish ', lastName: 'Sana', pan: 'abcps1234f' },
     { type: 'otp-sent', channel: 'aadhaar', at: iso(T0 + 20_000) },
     { type: 'aadhaar-verified', last4: '2346', at: iso(T0 + 30_000), provider: 'demo' },
+    { type: 'documents-ready', at: iso(T0 + 35_000), reader: 'ondevice' },
+    { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at: iso(T0 + 40_000) },
   ];
   return events.reduce(onboardingReducer, emptyOnboarding());
+}
+
+const PAN_REVIEW = [{ field: 'pan' as const, typedMasked: 'ABCPS****F', readMasked: 'AAAPZ****Z' }];
+
+/** Done and under review for the PAN (one re-read used). */
+function toReviewDone(at = iso(T0 + 50_000)): OnboardingState {
+  let s = onboardingReducer(toDocuments(), { type: 'documents-ready', at: iso(T0 + 6_000), reader: 'demo' });
+  s = onboardingReducer(s, { type: 'reread-used', field: 'pan' });
+  return onboardingReducer(s, { type: 'check-confirmed', match: 'review', pan: 'ABCPS1234F', fields: PAN_REVIEW, at });
 }
 
 describe('reducer', () => {
@@ -165,12 +190,12 @@ describe('reducer', () => {
     expect(done.identity).toEqual({ firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
     expect(done.contact?.value).toBe('9876543210');
     expect(done.aadhaar).toEqual({ last4: '2346', verifiedAt: iso(T0 + 30_000), provider: 'demo' });
-    expect(done.completedAt).toBe(iso(T0 + 30_000));
+    expect(done.completedAt).toBe(iso(T0 + 40_000));
     expect(done.sends.aadhaar).toEqual([iso(T0 + 20_000)]);
     expect(resumeStep(done)).toBe('done');
   });
 
-  it('change contact and back to identity', () => {
+  it('change contact and back to identity (from aadhaar-otp only)', () => {
     let s = onboardingReducer(emptyOnboarding(), { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } });
     s = onboardingReducer(s, { type: 'change-contact' });
     expect(s.step).toBe('signin');
@@ -208,16 +233,18 @@ describe('reducer', () => {
     ] as OnboardingEvent[]) expect(onboardingReducer(s, e)).toBe(s);
   });
 
-  it('done only via aadhaar-verified with 4 digits', () => {
-    let s = onboardingReducer(emptyOnboarding(), { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } });
-    s = onboardingReducer(s, { type: 'contact-verified', at: iso(T0) });
-    s = onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
+  it('aadhaar-verified needs 4 digits and goes to documents, not done', () => {
+    const s = toAadhaarOtp();
     expect(onboardingReducer(s, { type: 'aadhaar-verified', last4: '234123412346', at: iso(T0), provider: 'demo' })).toBe(s);
     expect(onboardingReducer(s, { type: 'aadhaar-verified', last4: '12a4', at: iso(T0), provider: 'demo' })).toBe(s);
     const locked = onboardingReducer(s, { type: 'aadhaar-locked', until: iso(T0 + OTP_RULES.aadhaarLockMs) });
     expect(locked.aadhaarLockedUntil).toBe(iso(T0 + OTP_RULES.aadhaarLockMs));
     expect(locked.step).toBe('aadhaar-otp');
-    expect(onboardingReducer(s, { type: 'aadhaar-verified', last4: '2346', at: iso(T0), provider: 'demo' }).step).toBe('done');
+    const docs = onboardingReducer(s, { type: 'aadhaar-verified', last4: '2346', at: iso(T0), provider: 'demo' });
+    expect(docs.step).toBe('documents');
+    expect(docs.aadhaar).toEqual({ last4: '2346', verifiedAt: iso(T0), provider: 'demo' });
+    expect(docs.completedAt).toBeNull();
+    expect(docs.kyc.status).toBeNull();
   });
 
   it('sign-out resets onboarding only', () => {
@@ -307,5 +334,369 @@ describe('store', () => {
   it('serialized data after a full happy path never contains a 12-digit run', () => {
     const json = serialize({ ...demoData(new Date(T0)), onboarding: runHappyPath() });
     expect(json).not.toMatch(/\d{12}/);
+  });
+});
+
+describe('Part B: verhoeffCheckDigit', () => {
+  it('builds 234123412346 from 23412341234', () => {
+    expect('23412341234' + verhoeffCheckDigit('23412341234')).toBe('234123412346');
+    expect(verhoeffCheckDigit('23412341234')).toBe('6');
+  });
+  it('always makes a Verhoeff-valid number', () => {
+    for (const p of ['49911866524', '98765432101', '20000000000', '55555555555']) {
+      expect(verhoeffValid(p + verhoeffCheckDigit(p))).toBe(true);
+    }
+    expect(() => verhoeffCheckDigit('12a')).toThrow();
+  });
+});
+
+describe('Part C: reducer order (Aadhaar OTP once, before documents)', () => {
+  const at = iso(T0 + 50_000);
+
+  it('identity → aadhaar-otp → documents → check → done', () => {
+    let s = toAadhaarOtp();
+    expect(s.step).toBe('aadhaar-otp');
+    s = onboardingReducer(s, { type: 'aadhaar-verified', last4: '2346', at, provider: 'demo' });
+    expect(s.step).toBe('documents');
+    expect(s.kyc).toEqual(emptyKyc());
+    s = onboardingReducer(s, { type: 'documents-ready', at, reader: 'ondevice' });
+    expect(s.step).toBe('check');
+    expect(s.kyc).toMatchObject({ documentsAt: at, reader: 'ondevice' });
+    s = onboardingReducer(s, { type: 'back-to-documents' });
+    expect(s.step).toBe('documents');
+  });
+
+  it('full path signin → done (verified)', () => {
+    const done = runHappyPath();
+    expect(done.step).toBe('done');
+    expect(done.kyc).toMatchObject({ match: 'matched', status: 'verified', review: null, reader: 'ondevice' });
+    expect(isEligibleToInvest({ ...emptyData(), onboarding: done })).toBe(true);
+  });
+
+  it('check-confirmed saves the final PAN and finishes', () => {
+    let s = onboardingReducer(toDocuments(), { type: 'documents-ready', at, reader: 'demo' });
+    s = onboardingReducer(s, { type: 'check-confirmed', match: 'matched', pan: 'abcpz1234f', fields: [], at });
+    expect(s.step).toBe('done');
+    expect(s.completedAt).toBe(at);
+    expect(s.identity?.pan).toBe('ABCPZ1234F');
+    expect(s.identity?.firstName).toBe('Nitish');
+  });
+
+  it('path with review → under-review, id (base 36) and sentAt set on Confirm', () => {
+    const done = toReviewDone(at);
+    expect(done.step).toBe('done');
+    expect(done.completedAt).toBe(at);
+    expect(done.kyc.match).toBe('review');
+    expect(done.kyc.status).toBe('under-review');
+    expect(done.kyc.rereads).toEqual({ pan: 1, aadhaar: 0 });
+    expect(done.kyc.review).toEqual({ id: `rv_${(T0 + 50_000).toString(36)}`, sentAt: at, decision: null, fields: PAN_REVIEW });
+    expect(isEligibleToInvest({ ...emptyData(), onboarding: done })).toBe(false);
+  });
+
+  it('done only via check-confirmed after aadhaar-verified', () => {
+    // Hand-built: on check without a verified Aadhaar.
+    const check = onboardingReducer(toDocuments(), { type: 'documents-ready', at, reader: 'demo' });
+    const noAadhaar: OnboardingState = { ...check, aadhaar: null };
+    expect(onboardingReducer(noAadhaar, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at })).toBe(noAadhaar);
+    // documents-ready also needs the Aadhaar OTP.
+    const docsNoAadhaar: OnboardingState = { ...toDocuments(), aadhaar: null };
+    expect(onboardingReducer(docsNoAadhaar, { type: 'documents-ready', at, reader: 'demo' })).toBe(docsNoAadhaar);
+    // aadhaar-verified never finishes onboarding.
+    expect(onboardingReducer(toAadhaarOtp(), { type: 'aadhaar-verified', last4: '2346', at, provider: 'demo' }).step).toBe('documents');
+    // bad time is ignored
+    expect(onboardingReducer(check, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at: 'nope' })).toBe(check);
+  });
+
+  it('Aadhaar is locked on check: no back-to-identity; review must show the verified Aadhaar as typed', () => {
+    const docs = toDocuments();
+    const check = onboardingReducer(docs, { type: 'documents-ready', at, reader: 'demo' });
+    expect(onboardingReducer(docs, { type: 'back-to-identity' })).toBe(docs);
+    expect(onboardingReducer(check, { type: 'back-to-identity' })).toBe(check);
+    const other = { type: 'check-confirmed', match: 'review', pan: 'ABCPS1234F', at,
+      fields: [{ field: 'aadhaar', typedMasked: 'XXXX XXXX 5246', readMasked: 'XXXX XXXX 5246' }] } as OnboardingEvent;
+    expect(onboardingReducer(check, other)).toBe(check);
+    const ok = onboardingReducer(check, {
+      type: 'check-confirmed', match: 'review', pan: 'ABCPS1234F', at,
+      fields: [{ field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'XXXX XXXX 5246' }],
+    });
+    expect(ok.kyc.status).toBe('under-review');
+    expect(ok.aadhaar?.last4).toBe('2346');
+  });
+
+  it('review-decided approve → verified', () => {
+    const done = toReviewDone(at);
+    const ok = onboardingReducer(done, { type: 'review-decided', result: 'approved', reason: 'ignored', at });
+    expect(ok.kyc.status).toBe('verified');
+    expect(ok.kyc.review?.decision).toEqual({ result: 'approved', reason: null, at });
+    expect(onboardingReducer(ok, { type: 'review-decided', result: 'rejected', reason: 'x', at })).toBe(ok);
+  });
+
+  it('review-decided reject needs a 1–200 char reason', () => {
+    const done = toReviewDone(at);
+    expect(onboardingReducer(done, { type: 'review-decided', result: 'rejected', reason: null, at })).toBe(done);
+    expect(onboardingReducer(done, { type: 'review-decided', result: 'rejected', reason: '   ', at })).toBe(done);
+    expect(onboardingReducer(done, { type: 'review-decided', result: 'rejected', reason: 'x'.repeat(201), at })).toBe(done);
+    const no = onboardingReducer(done, { type: 'review-decided', result: 'rejected', reason: ' PAN photo is blurred ', at });
+    expect(no.kyc.status).toBe('rejected');
+    expect(no.kyc.review?.decision).toEqual({ result: 'rejected', reason: 'PAN photo is blurred', at });
+  });
+
+  it('redo-documents → documents, Aadhaar kept (no new OTP), kyc reset but review history kept', () => {
+    const done = toReviewDone(at);
+    const no = onboardingReducer(done, { type: 'review-decided', result: 'rejected', reason: 'Blurred', at });
+    const redo = onboardingReducer(no, { type: 'redo-documents' });
+    expect(redo.step).toBe('documents');
+    expect(redo.identity).toEqual(no.identity);
+    expect(redo.aadhaar).toEqual(no.aadhaar);
+    expect(redo.sends).toEqual(no.sends);
+    expect(redo.completedAt).toBeNull();
+    expect(redo.kyc).toEqual({ ...emptyKyc(), review: no.kyc.review });
+    expect(onboardingReducer(done, { type: 'redo-documents' })).toBe(done);
+    // a new review replaces the old one
+    let s = onboardingReducer(redo, { type: 'documents-ready', at, reader: 'demo' });
+    s = onboardingReducer(s, {
+      type: 'check-confirmed', match: 'review', pan: 'ABCPS1234F', at: iso(T0 + 90_000),
+      fields: [{ field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'XXXX XXXX 5246' }],
+    });
+    expect(s.kyc.review?.fields[0]?.field).toBe('aadhaar');
+    expect(s.kyc.review?.decision).toBeNull();
+    expect(s.kyc.review?.id).toBe(`rv_${(T0 + 90_000).toString(36)}`);
+  });
+
+  it('reread-used is capped at 2', () => {
+    let s = onboardingReducer(toDocuments(), { type: 'documents-ready', at, reader: 'demo' });
+    for (let i = 0; i < 4; i++) s = onboardingReducer(s, { type: 'reread-used', field: 'aadhaar' });
+    expect(s.kyc.rereads).toEqual({ pan: 0, aadhaar: 2 });
+  });
+
+  it('back-to-check no longer exists; wrong-step events are ignored', () => {
+    const docs = toDocuments();
+    const check = onboardingReducer(docs, { type: 'documents-ready', at, reader: 'demo' });
+    const cases: [OnboardingState, OnboardingEvent][] = [
+      [toAadhaarOtp(), { type: 'documents-ready', at, reader: 'demo' }],
+      [docs, { type: 'back-to-documents' }],
+      [docs, { type: 'reread-used', field: 'pan' }],
+      [docs, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at }],
+      [docs, { type: 'aadhaar-verified', last4: '2346', at, provider: 'demo' }],
+      [docs, { type: 'review-decided', result: 'approved', reason: null, at }],
+      [docs, { type: 'redo-documents' }],
+      [check, { type: 'back-to-check' } as unknown as OnboardingEvent],
+      [check, { type: 'documents-ready', at, reader: 'demo' }],
+      [check, { type: 'check-confirmed', match: 'matched', pan: 'ABCCS1234F', fields: [], at }],
+      [check, { type: 'check-confirmed', match: 'review', pan: 'ABCPS1234F', fields: [], at }],
+      [check, {
+        type: 'check-confirmed', match: 'review', pan: 'ABCPS1234F', at,
+        fields: [{ field: 'aadhaar', typedMasked: '234123412346', readMasked: 'XXXX XXXX 1234' }],
+      }],
+      [runHappyPath(), { type: 'review-decided', result: 'approved', reason: null, at }],
+      [runHappyPath(), { type: 'redo-documents' }],
+      [runHappyPath(), { type: 'back-to-identity' }],
+      [emptyOnboarding(), { type: 'documents-ready', at, reader: 'demo' }],
+    ];
+    for (const [s, e] of cases) expect(onboardingReducer(s, e)).toBe(s);
+  });
+
+  it('sign-out clears kyc too', () => {
+    expect(onboardingReducer(runHappyPath(), { type: 'sign-out' }).kyc).toEqual(emptyKyc());
+  });
+});
+
+describe('Part C: confirmAadhaarRetype', () => {
+  it('ok when valid and ends in the verified last 4', () => {
+    expect(confirmAadhaarRetype('2341 2341 2346', '2346')).toBeNull();
+    expect(confirmAadhaarRetype('234123412346', '2346')).toBeNull();
+  });
+  it('invalid number', () => {
+    for (const v of ['', '23412341234', '234123412347', '134123412346']) {
+      expect(confirmAadhaarRetype(v, '2346')).toBe('Enter a valid 12-digit Aadhaar number.');
+    }
+  });
+  it('valid but a different Aadhaar', () => {
+    expect(confirmAadhaarRetype('499118665246', '2346')).toBe("This doesn't match the Aadhaar you verified.");
+    expect(confirmAadhaarRetype('234123412346', '5246')).toBe("This doesn't match the Aadhaar you verified.");
+  });
+});
+
+describe('Part C: store', () => {
+  const reviewRejected = () =>
+    onboardingReducer(toReviewDone(iso(T0)), { type: 'review-decided', result: 'rejected', reason: 'Blurred', at: iso(T0) });
+
+  it('serialized data after a review path has no 12-digit run', () => {
+    const json = serialize({ ...demoData(new Date(T0)), onboarding: reviewRejected() });
+    expect(json).not.toMatch(/\d{12}/);
+    expect(deserialize(json).onboarding).toEqual(reviewRejected());
+  });
+
+  it('old done without kyc is lowered to documents (Aadhaar already verified)', () => {
+    const { kyc: _drop, ...old } = runHappyPath();
+    const back = deserialize(JSON.stringify({ ...emptyData(), onboarding: old })).onboarding;
+    expect(back.step).toBe('documents');
+    expect(back.kyc).toEqual(emptyKyc());
+    expect(back.completedAt).toBeNull();
+    expect(back.aadhaar?.last4).toBe('2346');
+  });
+
+  it('done needs kyc.match and kyc.status', () => {
+    const done = runHappyPath();
+    expect(sanitizeOnboarding({ ...done, kyc: { ...done.kyc, status: null } }).step).toBe('documents');
+    expect(sanitizeOnboarding({ ...done, kyc: { ...done.kyc, match: null } }).step).toBe('documents');
+    expect(sanitizeOnboarding(done).step).toBe('done');
+  });
+
+  it('steps past aadhaar-otp need the Aadhaar OTP', () => {
+    for (const step of ['documents', 'check', 'done']) {
+      expect(sanitizeOnboarding({ ...runHappyPath(), step, aadhaar: null }).step).toBe('aadhaar-otp');
+    }
+    expect(sanitizeOnboarding(toAadhaarOtp()).step).toBe('aadhaar-otp');
+    expect(sanitizeOnboarding(toDocuments()).step).toBe('documents');
+  });
+
+  it('a stored check opens on documents after reload (reads were in memory only)', () => {
+    const check = onboardingReducer(toDocuments(), { type: 'documents-ready', at: iso(T0), reader: 'demo' });
+    expect(sanitizeOnboarding(check).step).toBe('documents');
+    expect(sanitizeOnboarding(check).kyc.documentsAt).toBe(iso(T0));
+  });
+
+  it('unknown kyc → empty; rereads clamped; bad masks dropped; ondevice reader kept', () => {
+    expect(sanitizeOnboarding({ ...runHappyPath(), kyc: 'x' }).kyc).toEqual(emptyKyc());
+    expect(sanitizeOnboarding(runHappyPath()).kyc.reader).toBe('ondevice');
+    const k = sanitizeOnboarding({
+      ...reviewRejected(),
+      kyc: {
+        ...reviewRejected().kyc,
+        match: 'maybe', status: 'gold', reader: 'ocr', rereads: { pan: 7, aadhaar: -3 }, extra: 1,
+        review: {
+          ...reviewRejected().kyc.review,
+          fields: [
+            { field: 'aadhaar', typedMasked: '234123412346', readMasked: 'XXXX XXXX 1234' },
+            { field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'xxxx' },
+            { field: 'name', typedMasked: 'ABCPS****F', readMasked: 'ABCPS****F' },
+            { field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'AAAPZ****Z' },
+          ],
+        },
+      },
+    }).kyc;
+    expect(k.match).toBeNull();
+    expect(k.status).toBeNull();
+    expect(k.reader).toBeNull();
+    expect(k.rereads).toEqual({ pan: 2, aadhaar: 0 });
+    expect(k.review?.fields).toEqual(PAN_REVIEW);
+    expect(Object.keys(k).sort()).toEqual(Object.keys(emptyKyc()).sort());
+  });
+
+  it('review nameMismatch survives a reload only as true', () => {
+    const withFields = (fields: unknown[]) => sanitizeOnboarding({
+      ...reviewRejected(),
+      kyc: { ...reviewRejected().kyc, review: { ...reviewRejected().kyc.review, fields } },
+    }).kyc.review?.fields;
+    expect(withFields([{ ...PAN_REVIEW[0], nameMismatch: true }])).toEqual([{ ...PAN_REVIEW[0], nameMismatch: true }]);
+    expect(withFields([{ ...PAN_REVIEW[0], nameMismatch: 'yes' }])).toEqual(PAN_REVIEW);
+  });
+});
+
+describe('Bug 3: matched Confirm keeps only decided review history', () => {
+  const at = iso(T0 + 60_000);
+  it('a decided (rejected) review stays as history after a matched redo', () => {
+    const no = onboardingReducer(toReviewDone(at), { type: 'review-decided', result: 'rejected', reason: 'Blurred', at });
+    let s = onboardingReducer(no, { type: 'redo-documents' });
+    s = onboardingReducer(s, { type: 'documents-ready', at, reader: 'demo' });
+    s = onboardingReducer(s, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at });
+    expect(s.kyc.status).toBe('verified');
+    expect(s.kyc.review).toEqual(no.kyc.review);
+    expect(s.kyc.review?.decision?.result).toBe('rejected');
+  });
+
+  it('a hand-built pending review is cleared by a matched Confirm', () => {
+    const check = onboardingReducer(toDocuments(), { type: 'documents-ready', at, reader: 'demo' });
+    const s: OnboardingState = { ...check, kyc: { ...check.kyc, review: { id: 'rv_x', sentAt: at, fields: PAN_REVIEW, decision: null } } };
+    const done = onboardingReducer(s, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at });
+    expect(done.kyc).toMatchObject({ status: 'verified', review: null });
+  });
+});
+
+describe('Bug 1: reads after Back count as re-reads', () => {
+  const at = iso(T0 + 70_000);
+  const toCheck = () => onboardingReducer(toDocuments(), { type: 'documents-ready', at, reader: 'demo' });
+  const backAndContinue = (s: OnboardingState) =>
+    onboardingReducer(onboardingReducer(s, { type: 'back-to-documents' }), { type: 'documents-ready', at, reader: 'demo' });
+
+  it('first read is free; back-to-documents sets the flag', () => {
+    const check = toCheck();
+    expect(check.kyc.rereads).toEqual({ pan: 0, aadhaar: 0 });
+    expect(check.kyc.returnedFromCheck).toBe(false);
+    const docs = onboardingReducer(check, { type: 'back-to-documents' });
+    expect(docs.kyc.returnedFromCheck).toBe(true);
+  });
+
+  it('documents-ready after Back counts one re-read per field, capped, and clears the flag', () => {
+    let s = backAndContinue(toCheck());
+    expect(s.kyc.rereads).toEqual({ pan: 1, aadhaar: 1 });
+    expect(s.kyc.returnedFromCheck).toBe(false);
+    s = backAndContinue(s);
+    expect(s.kyc.rereads).toEqual({ pan: 2, aadhaar: 2 });
+    s = backAndContinue(s);
+    expect(s.kyc.rereads).toEqual({ pan: 2, aadhaar: 2 });
+  });
+
+  it('check-confirmed clears the flag', () => {
+    const check = toCheck();
+    const s: OnboardingState = { ...check, kyc: { ...check.kyc, returnedFromCheck: true } };
+    const next = onboardingReducer(s, { type: 'check-confirmed', match: 'matched', pan: 'ABCPS1234F', fields: [], at });
+    expect(next.kyc.returnedFromCheck).toBe(false);
+  });
+
+  it('readsLeft and readBlocked', () => {
+    let s = toCheck();
+    s = onboardingReducer(s, { type: 'reread-used', field: 'pan' });
+    s = onboardingReducer(s, { type: 'reread-used', field: 'pan' });
+    expect(readsLeft(s.kyc, 'pan')).toBe(0);
+    expect(readsLeft(s.kyc, 'aadhaar')).toBe(2);
+    expect(readBlocked(s.kyc, 'pan')).toBe(false);
+    const docs = onboardingReducer(s, { type: 'back-to-documents' });
+    expect(readBlocked(docs.kyc, 'pan')).toBe(true);
+    expect(readBlocked(docs.kyc, 'aadhaar')).toBe(false);
+    const again = onboardingReducer(docs, { type: 'documents-ready', at, reader: 'demo' });
+    expect(again.kyc.rereads).toEqual({ pan: 2, aadhaar: 1 });
+    expect(readsLeft(again.kyc, 'aadhaar')).toBe(1);
+  });
+
+  it('reload clears the flag but keeps the counts (nothing blocked without an earlier read)', () => {
+    let s = toCheck();
+    s = onboardingReducer(s, { type: 'reread-used', field: 'pan' });
+    s = onboardingReducer(s, { type: 'reread-used', field: 'pan' });
+    const docs = onboardingReducer(s, { type: 'back-to-documents' });
+    expect(readBlocked(docs.kyc, 'pan')).toBe(true);
+    const back = deserialize(serialize({ ...emptyData(), onboarding: docs })).onboarding;
+    expect(back.step).toBe('documents');
+    expect(back.kyc.returnedFromCheck).toBe(false);
+    expect(back.kyc.rereads).toEqual({ pan: 2, aadhaar: 0 });
+    expect(readBlocked(back.kyc, 'pan')).toBe(false);
+    expect(readsLeft(back.kyc, 'pan')).toBe(0);
+    // The read after reload is not counted.
+    const after = onboardingReducer(back, { type: 'documents-ready', at, reader: 'demo' });
+    expect(after.kyc.rereads).toEqual({ pan: 2, aadhaar: 0 });
+  });
+
+  it('sanitize: flag is always false after load', () => {
+    const base = backAndContinue(toCheck());
+    for (const v of [true, 'true', 1, null, undefined, {}]) {
+      expect(sanitizeOnboarding({ ...base, kyc: { ...base.kyc, returnedFromCheck: v } }).kyc.returnedFromCheck).toBe(false);
+    }
+    const { returnedFromCheck: _drop, ...old } = base.kyc;
+    expect(sanitizeOnboarding({ ...base, kyc: old }).kyc.returnedFromCheck).toBe(false);
+    expect(emptyKyc().returnedFromCheck).toBe(false);
+  });
+});
+
+describe('resendIn', () => {
+  it('formats M:SS, rounding up', () => {
+    expect(resendIn(7_000)).toBe('Resend in 0:07');
+    expect(resendIn(6_001)).toBe('Resend in 0:07');
+    expect(resendIn(30_000)).toBe('Resend in 0:30');
+    expect(resendIn(OTP_RULES.windowMs)).toBe('Resend in 10:00');
+    expect(resendIn(61_500)).toBe('Resend in 1:02');
+    expect(resendIn(0)).toBe('Resend in 0:00');
+    expect(resendIn(-5)).toBe('Resend in 0:00');
+    expect(resendIn(Number.NaN)).toBe('Resend in 0:00');
   });
 });

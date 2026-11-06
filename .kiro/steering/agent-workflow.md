@@ -32,6 +32,7 @@ Chief of Staff (master orchestrator, the main session; only voice to Nitish)
 - **Section leads** (one per app section that has approved work: Onboarding, Home, Profile, Risk, Net worth, Expenses, FIRE plan, Portfolio, Buckets, Progress, Connect, Settings, plus new sections) plan their section's work, create and run their own sub-agents, and report one result to the Chief of Staff. A lead's sub-agent may lead its own group in turn.
 - **Platform lead** owns files shared by many sections (`packages/core/src/types.ts`, `store.ts`, `features.ts`, `index.ts`, CI, `CMD files/_start-server.cmd`, steering). Section leads ask it for shared changes instead of editing those files themselves.
 - Leads are started only for sections with approved work; an idle section gets no agent.
+- **Kiro Crew limit (checked 2026-11-06):** sub-agents cannot start their own sub-agents. So a lead plans its group (agents, owned files, waves, interfaces) and returns the plan; the Chief of Staff starts those agents exactly as planned and passes their results back. The hierarchy, ownership and reporting lines stay the same.
 
 ## 1b. Every build approval goes to the Chief of Staff first
 
