@@ -134,3 +134,24 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
 .badge { display: inline-block; margin-left: 8px; font-size: .72rem; padding: 1px 8px; border-radius: 99px; background: var(--accent); color: #1a0f05; font-weight: 700; vertical-align: middle; }
 .explain h3 { margin: 0 0 6px; font-size: 1rem; }
 .explain p { margin: 0 0 6px; }
+
+/* Onboarding (full screen, no nav) */
+.onboard { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px 32px; }
+.onboard-brand { padding: 8px 10px 20px; }
+.onboard-main { width: 100%; max-width: 560px; }
+.onboard-main h1:focus { outline: none; }
+.onboard-main h1:focus-visible { outline: 3px solid var(--accent-2); outline-offset: 2px; }
+.ob-field { margin: 14px 0 4px; }
+.input-wrap.has-prefix .prefix { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.input-wrap.has-prefix input { padding-left: 46px; }
+.input-wrap.has-toggle input { padding-right: 64px; }
+.input-wrap .toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 3px 8px; font: inherit; font-size: .8rem; cursor: pointer; }
+.otp-input { letter-spacing: .4em; font-variant-numeric: tabular-nums; max-width: 220px; }
+.demo-banner { border: 1px dashed var(--accent); background: var(--panel-2); border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; color: var(--text); font-size: .9rem; }
+.field-warn { color: var(--warn); }
+.link-btn { background: none; border: none; color: var(--accent-2); text-decoration: underline; cursor: pointer; font: inherit; padding: 0; }
+.account { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 8px; }
+.account dt { color: var(--muted); }
+.account dd { margin: 0; font-variant-numeric: tabular-nums; }
+.onboard-privacy { display: block; padding: 0 10px 16px; margin: -12px 0 0; }
+.input-wrap input.masked { -webkit-text-security: disc; }

@@ -1,5 +1,5 @@
 import type { AppData, Expense } from './types';
-import { emptyData } from './store';
+import { emptyData, emptyOnboarding } from './store';
 import { categorize } from './expenses';
 
 /** A sample user so every platform can show the full app in one tap. */
@@ -15,6 +15,8 @@ export function demoData(today = new Date()): AppData {
     lifeExpectancy: 85,
     currentMonthlySip: 50000,
   };
+  // Demo data never signs anyone in; screens keep the current onboarding when loading it.
+  d.onboarding = emptyOnboarding();
   d.riskAnswers = { horizon: 4, drop: 2, income_stability: 3, emergency: 2, experience: 3, goal: 3 };
   d.assets = [
     { id: 'a1', name: 'Equity mutual funds', type: 'equity_mf', value: 1850000, source: 'demo' },

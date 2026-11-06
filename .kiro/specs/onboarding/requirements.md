@@ -9,6 +9,16 @@ Wealthfire (repo `github.com/nitishsana/wealthfire`, built from `origin/main` at
 3. Enter profile identity details: first name, last name, PAN, Aadhaar number.
 4. Verify Aadhaar with an OTP sent to the Aadhaar-linked mobile.
 
+**Change request (2026-11-06, Nitish) — adds Requirements 7–9:** before the Aadhaar OTP, the user takes three photos (their face, Aadhaar card, PAN card). A **document reader agent** reads the PAN and Aadhaar numbers from the card photos and shows them for the user to confirm or edit. Three outcomes:
+
+| # | What happens | Result |
+|---|---|---|
+| 1 | User confirms the numbers read from the photos | Profile **Verified** |
+| 2 | User edits a number → agent re-reads the photo → re-read matches the edit | Profile **Verified** |
+| 3 | User edits a number → agent re-reads the photo → re-read still differs | Sent to **Manual review** |
+
+Only a Verified profile will be eligible to invest. Investing itself belongs to the later investment journey and is out of scope here.
+
 All of it ships on web, Android and iOS with the same wording, and is logged under a new **Onboarding** category in `FEATURES.md`.
 
 ### Constraints taken from the repo
@@ -130,14 +140,60 @@ Sources: [Zerodha account opening](https://support.zerodha.com/category/account-
 **Acceptance criteria**
 
 1. All validation and OTP logic SHALL live in `packages/core` with unit tests covering every rule in Requirements 1–5.
-2. New feature ids SHALL be added to `packages/core/src/features.ts`: `onboard-signin`, `onboard-otp`, `onboard-identity`, `onboard-aadhaar-otp`, `onboard-account` (the Settings "Account" section). Each SHALL be tagged on web (`data-feature`) and mobile (`feature` / `testID`) so `npm run parity` passes.
+2. New feature ids SHALL be added to `packages/core/src/features.ts`: `onboard-signin`, `onboard-otp`, `onboard-identity`, `onboard-aadhaar-otp`, `onboard-account` (the Settings "Account" section), plus for the change request `onboard-photos` (Req 7), `onboard-confirm` (Req 8) and `onboard-review` (Req 9). Each SHALL be tagged on web (`data-feature`) and mobile (`feature` / `testID`) so `npm run parity` passes.
 3. Screen wording SHALL be identical on web and mobile.
 4. All fields SHALL have visible labels, error text linked to the field for screen readers, and keyboard types (`email`, `phone-pad`, `number-pad`) set on mobile.
 5. `npm test`, `npm run typecheck`, `npm run parity`, `npm run build` and both Expo exports SHALL pass.
 6. When merged, `FEATURES.md` SHALL gain an **Onboarding** section with one row per feature id, ending `(PR #n)`.
 7. The not-advice disclaimer SHALL stay visible on onboarding screens.
 
+### Requirement 7: Capture face, Aadhaar and PAN photos
+
+**User story:** As a new user, I want to photograph myself and my ID cards, so that I don't have to type my numbers and the app can check them.
+
+**Acceptance criteria**
+
+1. After the contact OTP (Requirement 2) and name entry, the system SHALL show a "Photos" step with three slots, in order: "Your photo", "Aadhaar card (front)", "PAN card". All three are required.
+2. Each slot SHALL offer "Take photo" (camera) and "Upload" (gallery / file). The face slot SHALL open the front camera by default; card slots the back camera.
+3. WHEN a photo is taken THEN the system SHALL show a preview with "Retake" and "Use photo".
+4. The system SHALL accept JPEG, PNG or HEIC up to 10 MB and SHALL reject other files with "Use a JPG or PNG photo under 10 MB."
+5. WHEN camera permission is denied THEN the system SHALL show "Allow camera access, or upload a photo instead." and keep "Upload" working.
+6. Card slots SHALL show a frame guide and the hint "Fit the whole card in the frame. Avoid glare."
+7. The step SHALL NOT continue until all three photos are accepted.
+
+### Requirement 8: Agent reads and the user confirms the numbers
+
+**User story:** As a new user, I want the app to read my PAN and Aadhaar numbers from the photos and let me confirm or correct them.
+
+**Acceptance criteria**
+
+1. WHEN all three photos are accepted THEN the document reader agent SHALL read the PAN number from the PAN photo and the Aadhaar number from the Aadhaar photo, showing "Reading your cards…" while it works.
+2. WHEN a card cannot be read, or the result fails the PAN / Aadhaar checks from Requirement 3 THEN the system SHALL say which card failed and ask the user to retake it: "We couldn't read your PAN card. Retake the photo."
+3. The system SHALL show both numbers read, next to a thumbnail of each card, with the heading "Are these numbers correct?" The Aadhaar number SHALL show in full on this screen only, with a Hide option.
+4. The user SHALL be able to choose "Yes, these are correct" or "Edit". Edit SHALL open both numbers as fields, with the same validation as Requirement 3.
+5. **Scenario 1** — WHEN the user confirms without edits THEN the identity SHALL be marked **Read and confirmed**, and the flow SHALL go on to the Aadhaar OTP (Requirement 4).
+6. **Scenario 2** — WHEN the user edits a number and saves THEN the agent SHALL re-read that card's photo in a stricter mode (look again at the characters the user changed). WHEN the re-read equals the edited number THEN the identity SHALL be marked **Read and confirmed**, and the flow SHALL go on to the Aadhaar OTP.
+7. **Scenario 3** — WHEN the re-read still differs from the edited number THEN the identity SHALL be marked **Needs manual review**. The system SHALL record which numbers differ (masked), and the flow SHALL still go on to the Aadhaar OTP.
+8. The number the user ends with is the one used for the Aadhaar OTP and saved (PAN in full, Aadhaar last 4 only, Requirement 4.3).
+9. The agent SHALL make at most 2 re-reads per card per onboarding. After that any further mismatch goes to manual review without another re-read.
+
+### Requirement 9: Verification result and manual review
+
+**User story:** As a user, I want to know whether my profile is verified or under review.
+
+**Acceptance criteria**
+
+1. WHEN the Aadhaar OTP passes and the identity is **Read and confirmed** THEN the profile status SHALL be **Verified**, and "You're all set" SHALL say "Your profile is verified. You can start investing once investing opens in Wealthfire."
+2. WHEN the Aadhaar OTP passes and the identity **Needs manual review** THEN the profile status SHALL be **Under review**, and the done screen SHALL say "We're checking your details by hand. This usually takes 1 working day. You can use the planner meanwhile."
+3. In both cases onboarding is complete and the planner (all current tabs) opens. Investing eligibility SHALL be exposed as `isEligibleToInvest(data)`, true only for **Verified**, for the later investment journey to use.
+4. Settings → Account SHALL show the status as "Verified", "Under review" or "Review rejected", with the review reason when rejected.
+5. A review SHALL be decided as "Approve" (status → Verified) or "Reject with reason" (status → Review rejected; the user can redo the Photos step from Settings → Account, "Redo photos").
+6. Review records SHALL hold: masked numbers read, masked numbers entered, which fields differ, time sent. They SHALL never hold the full Aadhaar.
+
 ## Out of scope (this feature)
+
+- Face match between the selfie and the Aadhaar photo, and liveness checks.
+- The investment journey itself (orders, SIP set-up, mandates).
 
 - Real SMS, email or UIDAI OTP delivery and any server or paid provider (only the provider interface is built).
 - PAN verification against the Income Tax database, PAN–Aadhaar link check, and CKYC/KRA lookups.

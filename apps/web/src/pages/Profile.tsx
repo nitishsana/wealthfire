@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { DEFAULT_BARISTA_SHARE, FIRE_TYPES, type Profile } from '@wealthfire/core';
+import { DEFAULT_BARISTA_SHARE, FIRE_TYPES, prefillProfileName, type Profile } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Card, NumberField, Page } from '../ui';
 
@@ -12,7 +12,11 @@ const BLANK: Profile = {
 export function ProfilePage() {
   const { data, analysis, update } = useStore();
   const nav = useNavigate();
-  const [p, setP] = useState<Profile>(data.profile ?? BLANK);
+  // Req 3.9: an empty name starts as "First Last" from onboarding.
+  const [p, setP] = useState<Profile>(() => {
+    const base = data.profile ?? BLANK;
+    return base.name.trim() ? base : { ...base, name: prefillProfileName(data) || base.name };
+  });
   const [useOverride, setUseOverride] = useState(p.monthlyExpenseOverride !== undefined);
   const [error, setError] = useState('');
   const set = <K extends keyof Profile>(k: K, v: Profile[K]) => setP((x) => ({ ...x, [k]: v }));

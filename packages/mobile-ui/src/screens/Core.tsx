@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { Alert, Switch, Text, View } from 'react-native';
 import {
-  ASSET_TYPE_LABELS, computeRiskScore, DEFAULT_BARISTA_SHARE, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, RISK_QUESTIONS,
+  ASSET_TYPE_LABELS, computeRiskScore, DEFAULT_BARISTA_SHARE, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, prefillProfileName, RISK_QUESTIONS,
   type AssetType, type LiabilityType, type Profile,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -81,7 +81,11 @@ const BLANK: Profile = { name: '', age: 30, city: '', monthlyIncome: 0, dependen
 export function ProfileScreen() {
   const { data, analysis, update } = useStore();
   const go = useNav();
-  const [p, setP] = useState<Profile>(data.profile ?? BLANK);
+  // Empty name → start with "First Last" from onboarding (Req 3.9).
+  const [p, setP] = useState<Profile>(() => {
+    const base = data.profile ?? BLANK;
+    return base.name.trim() ? base : { ...base, name: prefillProfileName(data) || '' };
+  });
   const [useOverride, setUseOverride] = useState(p.monthlyExpenseOverride !== undefined);
   const [error, setError] = useState('');
   const set = <K extends keyof Profile>(k: K, v: Profile[K]) => setP((x) => ({ ...x, [k]: v }));

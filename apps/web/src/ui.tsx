@@ -12,6 +12,16 @@ export function Page({ feature, title, intro, children }: { feature: string; tit
   );
 }
 
+/** Not-advice disclaimer shown under every page, including onboarding. */
+export function Disclaimer() {
+  return (
+    <footer className="disclaimer">
+      Wealthfire gives educational estimates, not investment advice. Mutual fund investments are subject to market risks.
+      Talk to a SEBI-registered adviser before you invest.
+    </footer>
+  );
+}
+
 export function Card({ title, children, className }: { title?: string; children: ReactNode; className?: string }) {
   return (
     <div className={`card ${className ?? ''}`}>

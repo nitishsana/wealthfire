@@ -6,6 +6,13 @@ import { StatusBar } from 'expo-status-bar';
 import { WealthfireApp, type TabKey } from '@wealthfire/mobile-ui';
 import appJson from './app.json';
 
+// Optional OTP provider config. Not set in v1, so onboarding uses the demo provider.
+const extra: Record<string, unknown> = appJson.expo.extra;
+const otp = {
+  provider: typeof extra.otpProvider === 'string' && extra.otpProvider ? extra.otpProvider : undefined,
+  apiUrl: typeof extra.otpApiUrl === 'string' && extra.otpApiUrl ? extra.otpApiUrl : undefined,
+};
+
 export default function App() {
   const [tab, setTab] = useState<TabKey>('home');
   const history = useRef<TabKey[]>([]);
@@ -22,7 +29,7 @@ export default function App() {
   return (
     <>
       <StatusBar style="light" />
-      <WealthfireApp platform="android" google={{ androidClientId: appJson.expo.extra.googleAndroidClientId || undefined }} tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
+      <WealthfireApp platform="android" google={{ androidClientId: appJson.expo.extra.googleAndroidClientId || undefined }} otp={otp} tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
     </>
   );
 }

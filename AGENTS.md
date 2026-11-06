@@ -16,6 +16,7 @@ GitHub `main` is the source of truth. Chat history is not.
 
 ## How to build a feature
 
+0. Any question in any task: raise it and get Nitish's answer before building that part. No silent assumptions.
 1. Design first: spec (requirements, design, tasks), approved by Nitish.
 2. One orchestrator agent splits the approved tasks across parallel builder agents and reports to Nitish as one voice.
 3. A separate reviewer agent checks the work against the approved plan.

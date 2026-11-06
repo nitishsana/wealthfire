@@ -6,7 +6,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import {
   BUCKET_NAMES, categorize, DEFAULT_ASSUMPTIONS, DEFAULT_BARISTA_SHARE, demoData, emptyData, EXPENSE_CATEGORIES, inr, inrShort, makeSnapshot,
-  newId, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot, type Assumptions, type BucketState, type ExpenseCategory,
+  maskAadhaar, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
+  type Assumptions, type BucketState, type ExpenseCategory,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Missing } from './Core';
@@ -292,11 +293,30 @@ const FIELDS: { key: keyof Assumptions; label: string }[] = [
   { key: 'cashReturn', label: 'Cash return' }, { key: 'safeWithdrawalRate', label: 'Safe withdrawal rate' }, { key: 'sipStepUp', label: 'SIP step-up each year' },
 ];
 
+/** Settings → Account (Req 5.6): masked contact, PAN and Aadhaar, and Sign out (keeps financial data). */
+function AccountCard() {
+  const { data, update } = useStore();
+  const ob = data.onboarding;
+  const contact = ob.contact ? (ob.contact.kind === 'email' ? maskEmail(ob.contact.value) : maskMobile(ob.contact.value)) : '—';
+  return (
+    <View testID="feature-onboard-account">
+      <Card title="Account">
+        <Line left={ob.contact?.kind === 'email' ? 'Email' : 'Mobile number'} right={contact} />
+        <Line left="PAN" right={ob.identity ? maskPan(ob.identity.pan) : '—'} />
+        <Line left="Aadhaar" right={ob.aadhaar ? maskAadhaar(ob.aadhaar.last4) : '—'} sub={ob.aadhaar ? 'Verified' : undefined} />
+        <Text style={[s.small, { marginTop: 8 }]}>Signing out keeps your financial data on this phone.</Text>
+        <Btn title="Sign out" onPress={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'sign-out' }) }))} />
+      </Card>
+    </View>
+  );
+}
+
 export function SettingsScreen() {
   const { data, update, replace } = useStore();
   const [msg, setMsg] = useState('');
   return (
     <Screen feature="demo" title="Settings" intro="Assumptions, demo data and your data.">
+      <AccountCard />
       <Card title="Assumptions (% per year)">
         {FIELDS.map((f) => (
           <NumField key={f.key} label={f.label} suffix="%" value={data.assumptions[f.key]} onChange={(v) => update((d) => ({ ...d, assumptions: { ...d.assumptions, [f.key]: v } }))} />
@@ -305,7 +325,7 @@ export function SettingsScreen() {
       </Card>
       <Card title="Demo">
         <Text style={s.text}>Fill the app with a sample user to look around.</Text>
-        <Btn primary title="Load demo data" onPress={() => { replace(demoData()); setMsg('Demo data loaded.'); }} />
+        <Btn primary title="Load demo data" onPress={() => { replace({ ...demoData(), onboarding: data.onboarding }); setMsg('Demo data loaded.'); }} />
       </Card>
       <Card title="Your data">
         <Text style={s.muted}>Stored only on this phone.</Text>

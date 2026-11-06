@@ -110,6 +110,25 @@ export interface Snapshot {
   monthlySip: number;
 }
 
+export type OnboardingStep = 'signin' | 'otp' | 'identity' | 'aadhaar-otp' | 'done';
+export type ContactKind = 'email' | 'mobile';
+export type OtpProviderId = 'demo' | 'digilocker' | 'digio';
+
+/** Saved onboarding progress. OTP codes and the full Aadhaar number are never part of it. */
+export interface OnboardingState {
+  step: OnboardingStep;
+  /** value: lower-cased email or 10 digits */
+  contact: { kind: ContactKind; value: string; verifiedAt: string | null } | null;
+  identity: { firstName: string; lastName: string; pan: string } | null;
+  /** Only the last 4 digits are ever stored. */
+  aadhaar: { last4: string; verifiedAt: string; provider: OtpProviderId } | null;
+  completedAt: string | null;
+  /** Send times (ISO) per channel in the last 10 minutes, for the resend limit. */
+  sends: { contact: string[]; aadhaar: string[] };
+  /** Aadhaar step lockout. Persisted so a restart does not bypass it. */
+  aadhaarLockedUntil: string | null;
+}
+
 /** Everything a user owns in the app. Stored on device only in v1. */
 export interface AppData {
   version: 1;
@@ -123,4 +142,6 @@ export interface AppData {
   snapshots: Snapshot[];
   /** Last successful Gmail sync, ISO date-time. The token itself is never stored. */
   gmailLastSync: string | null;
+  /** Sign-in and identity check progress. */
+  onboarding: OnboardingState;
 }

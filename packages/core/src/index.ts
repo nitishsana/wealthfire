@@ -14,3 +14,5 @@ export * from './demo';
 export * from './features';
 export * from './gmail';
 export * from './fireTypes';
+export * from './onboarding';
+export * from './otp';

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { DEFAULT_ASSUMPTIONS, demoData, emptyData, serialize, type Assumptions } from '@wealthfire/core';
+import { DEFAULT_ASSUMPTIONS, demoData, emptyData, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, serialize, type Assumptions } from '@wealthfire/core';
 import { useStore } from '../store';
 import { Card, NumberField, Page } from '../ui';
 
@@ -24,8 +24,27 @@ export function SettingsPage() {
     URL.revokeObjectURL(url);
   }
 
+  const ob = data.onboarding;
+  const contact = ob.contact ? (ob.contact.kind === 'email' ? maskEmail(ob.contact.value) : maskMobile(ob.contact.value)) : '—';
+
   return (
     <Page feature="demo" title="Settings" intro="Assumptions, demo data and backup.">
+      <div data-feature="onboard-account">
+        <Card title="Account">
+          <dl className="account">
+            <dt>{ob.contact?.kind === 'email' ? 'Email' : 'Mobile number'}</dt>
+            <dd>{contact}</dd>
+            <dt>PAN</dt>
+            <dd>{ob.identity ? maskPan(ob.identity.pan) : '—'}</dd>
+            <dt>Aadhaar</dt>
+            <dd>
+              {ob.aadhaar ? <>{maskAadhaar(ob.aadhaar.last4)} <span className="badge">Verified</span></> : '—'}
+            </dd>
+          </dl>
+          <p className="muted small">Signing out keeps your financial data in this browser.</p>
+          <button className="btn" onClick={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'sign-out' }) }))}>Sign out</button>
+        </Card>
+      </div>
       <Card title="Assumptions (% per year)">
         <div className="form-grid">
           {FIELDS.map((f) => (
@@ -38,7 +57,7 @@ export function SettingsPage() {
       <div className="grid two">
         <Card title="Demo">
           <p>Fill the app with a sample user to look around.</p>
-          <button className="btn primary" onClick={() => { replace(demoData()); setMsg('Demo data loaded.'); }}>Load demo data</button>
+          <button className="btn primary" onClick={() => { replace({ ...demoData(), onboarding: data.onboarding }); setMsg('Demo data loaded.'); }}>Load demo data</button>
         </Card>
         <Card title="Your data">
           <p className="muted">Stored only in this browser. Clearing browser data deletes it.</p>

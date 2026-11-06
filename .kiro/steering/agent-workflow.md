@@ -6,6 +6,13 @@ inclusion: always
 
 Use as many agents as the work allows, running in parallel. Every feature follows this order.
 
+## 0. Ask, don't guess (applies to every task and every agent)
+
+- If anything in a task is unclear, missing or open to more than one reading, raise the question and get Nitish's answer before building that part.
+- Ask in chat, 1–3 questions at a time, each with a recommended answer.
+- Builders and reviewers send their questions to the orchestrator, who collects them and asks Nitish in one message.
+- Never fill a gap with a silent assumption. If work must continue meanwhile, build only the parts the question does not touch, and list the open question in the report.
+
 ## 1. Design first
 
 - Write the spec (requirements, design, tasks) and get Nitish's approval before any code.

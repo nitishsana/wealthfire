@@ -1,4 +1,5 @@
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { useState } from 'react';
+import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { Dashboard } from './pages/Dashboard';
 import { ProfilePage } from './pages/Profile';
 import { RiskPage } from './pages/Risk';
@@ -10,6 +11,9 @@ import { BucketsPage } from './pages/Buckets';
 import { ProgressPage } from './pages/Progress';
 import { ConnectPage } from './pages/Connect';
 import { SettingsPage } from './pages/Settings';
+import { OnboardingPage } from './pages/Onboarding';
+import { useStore } from './store';
+import { Disclaimer } from './ui';
 
 const NAV = [
   { to: '/', label: 'Home', icon: '🏠' },
@@ -26,6 +30,13 @@ const NAV = [
 ];
 
 export function App() {
+  const { data } = useStore();
+  const navigate = useNavigate();
+  // Keeps the onboarding page up for the "You're all set" screen after the Aadhaar OTP passes.
+  const [finishing, setFinishing] = useState(false);
+  if (data.onboarding.step !== 'done' || finishing) {
+    return <OnboardingPage onCompleting={() => setFinishing(true)} onFinish={() => { setFinishing(false); navigate('/'); }} />;
+  }
   return (
     <div className="shell">
       <a className="skip" href="#main">Skip to content</a>
@@ -58,10 +69,7 @@ export function App() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-        <footer className="disclaimer">
-          Wealthfire gives educational estimates, not investment advice. Mutual fund investments are subject to market risks.
-          Talk to a SEBI-registered adviser before you invest.
-        </footer>
+        <Disclaimer />
       </main>
     </div>
   );
