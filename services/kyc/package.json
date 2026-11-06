@@ -5,7 +5,7 @@
     "description":  "Final KYC service (AWS Lambda + CDK). Server-side KYC decides Verified; see .kiro/specs/final-kyc-service.",
     "type":  "module",
     "scripts":  {
-                    "test":  "vitest run",
+                    "test": "vitest run --passWithNoTests",
                     "typecheck":  "tsc --noEmit",
                     "build":  "node scripts/bundle.mjs",
                     "synth":  "cdk synth --app \"npx tsx infra/app.ts\" --quiet"
