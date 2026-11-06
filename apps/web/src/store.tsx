@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { analyze, deserialize, serialize, STORAGE_KEY, type Analysis, type AppData } from '@wealthfire/core';
+import { previewData } from './preview';
 
 interface Store {
   data: AppData;
@@ -12,7 +13,7 @@ const Ctx = createContext<Store | null>(null);
 
 /** Data lives only in this browser (localStorage). Nothing is sent to a server. */
 export function DataProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<AppData>(() => deserialize(localStorage.getItem(STORAGE_KEY)));
+  const [data, setData] = useState<AppData>(() => previewData() ?? deserialize(localStorage.getItem(STORAGE_KEY)));
 
   useEffect(() => {
     // Skip identical writes so a change received from another tab is not written straight back.
