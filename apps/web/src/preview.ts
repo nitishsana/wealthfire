@@ -1,4 +1,4 @@
-// Local preview switch, used by the preview/*.cmd launchers.
+// Local preview switch, used by the launchers in "CMD files/".
 // Opening the Vite dev server with ?preview=demo in an EMPTY browser (the launchers use an
 // Edge InPrivate window) loads the demo user with onboarding already finished, so a single
 // section can be checked without signing in first.

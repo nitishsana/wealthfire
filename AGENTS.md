@@ -26,7 +26,7 @@ Full rule: `.kiro/steering/agent-workflow.md`.
 
 ## Previewing
 
-Double-click files in `preview/`: `00 - All sections.cmd` for the whole app, `01 - Onboarding.cmd`, or one `NN - <Section>.cmd` per section (these skip sign-in with demo data, local preview only). Each feature that adds or changes a section updates its `.cmd`. Rule: `.kiro/steering/preview-launchers.md`.
+Double-click files in `CMD files/`: `00 - All sections.cmd` for the whole app, `01 - Onboarding.cmd`, or one `NN - <Section>.cmd` per section (these skip sign-in with demo data, local preview only). Each feature that adds or changes a section updates its `.cmd`. Rule: `.kiro/steering/preview-launchers.md`.
 
 ## Before handing work back
 
