@@ -18,9 +18,24 @@ Use as many agents as the work allows, running in parallel. Every feature follow
 - Write the spec (requirements, design, tasks) and get Nitish's approval before any code.
 - The approved `tasks.md` is the execution plan. Agents build only what it lists.
 
-## 1a. Every build approval goes to the orchestrator first
+## 1a. Chief of Staff and section leads
 
-- When Nitish approves a build (a spec, a change request or a fix batch), hand it to the **orchestrator** before any builder starts.
+```
+Chief of Staff (master orchestrator, the main session; only voice to Nitish)
+├── Platform lead   — shared files: packages/core types/store/features, CI, CMD files, steering
+├── Onboarding lead ── its own sub-agents (e.g. core logic, web screens, phone screens, camera/crop)
+├── Home lead, Profile lead, Expenses lead, FIRE plan lead, … (one per FEATURES.md section, only when that section has work)
+└── Reviewer(s)     — independent, report straight to the Chief of Staff
+```
+
+- **Chief of Staff** is the master orchestrator. Every build approval goes to it first. It decides which section leads to start and what each owns, and gives Nitish the single combined report. It does not write feature code.
+- **Section leads** (one per app section that has approved work: Onboarding, Home, Profile, Risk, Net worth, Expenses, FIRE plan, Portfolio, Buckets, Progress, Connect, Settings, plus new sections) plan their section's work, create and run their own sub-agents, and report one result to the Chief of Staff. A lead's sub-agent may lead its own group in turn.
+- **Platform lead** owns files shared by many sections (`packages/core/src/types.ts`, `store.ts`, `features.ts`, `index.ts`, CI, `CMD files/_start-server.cmd`, steering). Section leads ask it for shared changes instead of editing those files themselves.
+- Leads are started only for sections with approved work; an idle section gets no agent.
+
+## 1b. Every build approval goes to the Chief of Staff first
+
+- When Nitish approves a build (a spec, a change request or a fix batch), hand it to the **Chief of Staff** (orchestrator) before any builder starts.
 - The orchestrator decides how many sub-agents are needed and how they are grouped. There is no fixed limit on the number of sub-agents or on the depth of the hierarchy.
 - A sub-agent may itself be an **orchestrator** for a group below it (for example: a "web" lead that splits into screens, styles and tests). Each lead owns its group's split, file ownership and checks, and reports one combined result upward.
 - Every level follows the same rules: no two agents edit the same file, dependent work waits for what it needs, questions go up the chain to Nitish (step 0), and nothing is pushed or merged without his yes.
