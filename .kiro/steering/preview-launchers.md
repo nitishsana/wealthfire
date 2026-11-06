@@ -18,3 +18,5 @@ When a feature adds or changes a section:
 2. Use paths relative to the file (`%~dp0`), never absolute paths, so it works from any clone.
 3. Put test values (sample inputs, demo codes) as `REM` comments at the top of the file.
 4. Mention the files to double-click when asking Nitish to preview.
+5. In git, launchers live only in the separate `preview/` folder, never in the repo root or `apps/`.
+6. Nitish opens them from his project folder `C:\Users\sananiti\OneDrive - amazon.com\Desktop\1_Projects\My Personal Mirror\WealthFire`. Keep one same-named shortcut `.cmd` there per launcher. Each shortcut only `call`s the repo file in `preview/`, so the logic lives in git. Add, rename or remove shortcuts whenever `preview/` changes. The shortcuts are local and are not committed.
