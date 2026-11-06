@@ -18,6 +18,15 @@ Use as many agents as the work allows, running in parallel. Every feature follow
 - Write the spec (requirements, design, tasks) and get Nitish's approval before any code.
 - The approved `tasks.md` is the execution plan. Agents build only what it lists.
 
+## 1a. Every build approval goes to the orchestrator first
+
+- When Nitish approves a build (a spec, a change request or a fix batch), hand it to the **orchestrator** before any builder starts.
+- The orchestrator decides how many sub-agents are needed and how they are grouped. There is no fixed limit on the number of sub-agents or on the depth of the hierarchy.
+- A sub-agent may itself be an **orchestrator** for a group below it (for example: a "web" lead that splits into screens, styles and tests). Each lead owns its group's split, file ownership and checks, and reports one combined result upward.
+- Every level follows the same rules: no two agents edit the same file, dependent work waits for what it needs, questions go up the chain to Nitish (step 0), and nothing is pushed or merged without his yes.
+- The top orchestrator alone reports to Nitish.
+- Capacity is a ceiling, not a target: split only where the parts can really run in parallel.
+
 ## 2. One orchestrator, many builders
 
 - One **orchestrator** agent owns the plan. It does not write feature code.

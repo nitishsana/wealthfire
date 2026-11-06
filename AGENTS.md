@@ -18,7 +18,7 @@ GitHub `main` is the source of truth. Chat history is not.
 
 0. Any question in any task: raise it and get Nitish's answer before building that part. No silent assumptions.
 1. Design first: spec (requirements, design, tasks), approved by Nitish.
-2. One orchestrator agent splits the approved tasks across parallel builder agents and reports to Nitish as one voice.
+2. Every build approval goes to the orchestrator first. It decides how many sub-agents to create and how to group them; there is no limit on count or depth, and a sub-agent can lead its own group. Agents split the approved tasks in parallel, and only the top orchestrator reports to Nitish.
 3. A separate reviewer agent checks the work against the approved plan.
 4. When a merge starts, check the whole flow for bugs and list each one (must fix / should fix / minor) before merging.
 
