@@ -10,6 +10,7 @@ export function Screen({ feature, title, intro, children }: { feature: string; t
       {children}
       <Text style={s.disclaimer}>
         Wealthfire gives educational estimates, not investment advice. Mutual fund investments are subject to market risks.
+        Talk to a SEBI-registered adviser before you invest.
       </Text>
     </ScrollView>
   );

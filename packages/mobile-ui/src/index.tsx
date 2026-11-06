@@ -1,4 +1,4 @@
-import { useState, type ComponentType } from 'react';
+import { useEffect, useState, type ComponentType } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { DataProvider, useStore } from './store';
@@ -7,10 +7,16 @@ import { theme } from './theme';
 import { HomeScreen, NetWorthScreen, ProfileScreen, RiskScreen } from './screens/Core';
 import { BucketsScreen, ConnectScreen, ExpensesScreen, FireScreen, PortfolioScreen, ProgressScreen, SettingsScreen } from './screens/Plan';
 import { GoogleCtx, type GoogleConfig } from './screens/Gmail';
+import { OnboardingScreen } from './screens/Onboarding';
+import { OtpProviderScope, type OtpConfig } from './otp';
+import { DocReaderScope, type DocReaderConfig } from './reader';
 
 export type { GoogleConfig } from './screens/Gmail';
+export type { OtpConfig } from './otp';
+export type { DocReaderConfig } from './reader';
 
 export { TABS, type TabKey } from './nav';
+export { clearPickerCache } from './cacheCleanup';
 export { theme } from './theme';
 
 const SCREENS: Record<TabKey, ComponentType> = {
@@ -28,11 +34,37 @@ export interface WealthfireAppProps {
   setTab?: (t: TabKey) => void;
   /** Google OAuth client ids for Gmail sign-in (from the app's app.json extra). */
   google?: GoogleConfig;
+  /** OTP provider for onboarding (from app.json extra.otpProvider / otpApiUrl). Empty → demo provider. */
+  otp?: OtpConfig;
+  /** Document reader for onboarding KYC (from app.json extra.docReader / docReaderUrl). Empty → on-device reader (ML Kit); 'demo' only in dev builds. */
+  docReader?: DocReaderConfig;
 }
 
 function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: TabKey; setTab: (t: TabKey) => void }) {
-  const { loaded } = useStore();
+  const { loaded, data } = useStore();
   const ScreenComp = SCREENS[tab];
+  const needsOnboarding = data.onboarding.step !== 'done';
+  // Stays true after the last step so the "You're all set" screen shows until "Go to Home".
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  useEffect(() => { if (loaded && needsOnboarding) setOnboardingOpen(true); }, [loaded, needsOnboarding]);
+  // Before data loads: header + spinner only, so the tab bar never flashes ahead of onboarding.
+  if (!loaded || needsOnboarding || onboardingOpen) {
+    return (
+      <NavCtx.Provider value={setTab}>
+        <SafeAreaView style={st.root} edges={['top', 'left', 'right', 'bottom']}>
+          <View style={st.header}>
+            <Text style={st.brand}>🔥 Wealthfire</Text>
+            <Text style={st.lock}>🔒 Data stays on this phone</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            {loaded
+              ? <OnboardingScreen onFinish={() => { setOnboardingOpen(false); setTab('home'); }} />
+              : <ActivityIndicator color={theme.accent} style={{ marginTop: 40 }} />}
+          </View>
+        </SafeAreaView>
+      </NavCtx.Provider>
+    );
+  }
   return (
     <NavCtx.Provider value={setTab}>
       <SafeAreaView style={st.root} edges={['top', 'left', 'right', 'bottom']}>
@@ -40,7 +72,7 @@ function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: Tab
           <Text style={st.brand}>🔥 Wealthfire</Text>
           <Text style={st.lock}>🔒 Data stays on this phone</Text>
         </View>
-        <View style={{ flex: 1 }}>{loaded ? <ScreenComp key={tab} /> : <ActivityIndicator color={theme.accent} style={{ marginTop: 40 }} />}</View>
+        <View style={{ flex: 1 }}><ScreenComp key={tab} /></View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={[st.tabs, platform === 'ios' && st.tabsIos]} contentContainerStyle={{ paddingHorizontal: 6 }}
           accessibilityRole="tablist">
           {TABS.map((t) => {
@@ -60,16 +92,20 @@ function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: Tab
 }
 
 /** The full Wealthfire app. apps/android and apps/ios each render this with their platform. */
-export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {} }: WealthfireAppProps) {
+export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {}, otp = {}, docReader = {} }: WealthfireAppProps) {
   const [ownTab, setOwnTab] = useState<TabKey>(initialTab);
   const tab = ctlTab ?? ownTab;
   const setTab = (t: TabKey) => { (ctlSetTab ?? setOwnTab)(t); onTabChange?.(t); };
   return (
     <SafeAreaProvider>
       <GoogleCtx.Provider value={google}>
-        <DataProvider>
-          <Body platform={platform} tab={tab} setTab={setTab} />
-        </DataProvider>
+        <OtpProviderScope config={otp}>
+          <DocReaderScope config={docReader}>
+            <DataProvider>
+              <Body platform={platform} tab={tab} setTab={setTab} />
+            </DataProvider>
+          </DocReaderScope>
+        </OtpProviderScope>
       </GoogleCtx.Provider>
     </SafeAreaProvider>
   );

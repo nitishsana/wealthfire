@@ -1,0 +1,53 @@
+/* Take photo dialog (Req 7.11). Theme colours come from the CSS variables in styles.css. */
+.tp-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius, 14px);
+  padding: 20px;
+}
+.tp-dialog::backdrop { background: rgba(0, 0, 0, 0.7); }
+.tp-dialog h2 { margin: 0 0 8px; }
+.tp-status { margin: 0 0 10px; }
+
+.tp-video,
+.tp-still {
+  display: block;
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+.tp-video[hidden] { display: none; }
+/* Mirror the live preview only, like a mirror; the captured photo is saved unmirrored. */
+.tp-video { transform: scaleX(-1); }
+
+.tp-frame {
+  position: relative;
+  width: min(280px, 100%);
+  aspect-ratio: 1 / 1;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  background: var(--bg);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.tp-frame:active { cursor: grabbing; }
+.tp-frame:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.tp-crop-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.tp-zoom { display: flex; align-items: center; gap: 10px; margin: 8px 0 0; }
+.tp-zoom input { flex: 1; accent-color: var(--accent); }

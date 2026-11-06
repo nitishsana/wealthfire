@@ -4,7 +4,7 @@ Only features that are merged into `main` are listed here.
 Each row is: Date (merge date, IST) · Category (app section) · Feature description.
 Features apply to web, Android and iOS unless the row says otherwise.
 
-Last updated: 2026-11-06 (PR #4)
+Last updated: 2026-11-06 (PR #7)
 
 ## Platform (all apps)
 
@@ -16,6 +16,19 @@ Last updated: 2026-11-06 (PR #4)
 | 2026-11-06 | Platform | Parity check fails CI if any platform is missing a feature or colors differ (PR #1) |
 | 2026-11-06 | Platform | All data stays on the device (browser storage / phone storage); no server (PR #1) |
 | 2026-11-06 | Platform | Not-advice disclaimer on every page (PR #1) |
+
+## Onboarding
+
+| Date | Category | Feature Description |
+|---|---|---|
+| 2026-11-06 | Onboarding | Sign in with mobile number (+91) or email; onboarding is required on first launch and existing data is kept (PR #7) |
+| 2026-11-06 | Onboarding | Contact OTP: 6-digit code, 5-minute expiry, 5 tries, 30-second resend, send limits; demo OTP provider with a slot for a real one (PR #7) |
+| 2026-11-06 | Onboarding | Your details: first name, last name, PAN (individual only) and Aadhaar (check digit) with consent (PR #7) |
+| 2026-11-06 | Onboarding | Mandatory Aadhaar OTP, done once; only the last 4 Aadhaar digits are ever stored (PR #7) |
+| 2026-11-06 | Onboarding | Upload documents: selfie (Take photo with camera permission and square crop, or upload), Aadhaar and PAN (JPG/PNG/PDF, Google Drive on web, PDF password on web) (PR #7) |
+| 2026-11-06 | Onboarding | On-device document reading (Tesseract.js + pdf.js on web, ML Kit on phones); wrong, masked or multi-card documents rejected (PR #7) |
+| 2026-11-06 | Onboarding | Check numbers and names against the documents; re-check limit; hand-check fallback; result Pre-verified or Under review, Verified only after final KYC (PR #7) |
+| 2026-11-06 | Onboarding | Settings Account card: masked contact, PAN and Aadhaar, account status, Sign out, Redo documents (PR #7) |
 
 ## Home
 

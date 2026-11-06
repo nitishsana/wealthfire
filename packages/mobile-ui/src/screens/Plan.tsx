@@ -1,14 +1,18 @@
 // Expenses, FIRE, Portfolio, Buckets, Progress, Connect, Settings.
 // Same features and wording as apps/web/src/pages.
 import { useState } from 'react';
-import { Alert, Switch, Text, View } from 'react-native';
+import { Alert, Switch, Text, TextInput, View } from 'react-native';
+import { theme } from '../theme';
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import {
   BUCKET_NAMES, categorize, DEFAULT_ASSUMPTIONS, DEFAULT_BARISTA_SHARE, demoData, emptyData, EXPENSE_CATEGORIES, inr, inrShort, makeSnapshot,
-  newId, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot, type Assumptions, type BucketState, type ExpenseCategory,
+  canFinalApprove, kycStatusLabel, maskAadhaar, reviewReasonText, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
+  type Assumptions, type BucketState, type ExpenseCategory,
 } from '@wealthfire/core';
 import { useStore } from '../store';
+import { useDocReader } from '../reader';
+import { clearPickerCache } from '../cacheCleanup';
 import { Missing } from './Core';
 import { useNav } from '../nav';
 import { GmailConnect } from './Gmail';
@@ -292,11 +296,113 @@ const FIELDS: { key: keyof Assumptions; label: string }[] = [
   { key: 'cashReturn', label: 'Cash return' }, { key: 'safeWithdrawalRate', label: 'Safe withdrawal rate' }, { key: 'sipStepUp', label: 'SIP step-up each year' },
 ];
 
+/** Settings → Account (Req 5.6): masked contact, PAN and Aadhaar, and Sign out (keeps financial data). */
+function AccountCard() {
+  const { data, update } = useStore();
+  const ob = data.onboarding;
+  const contact = ob.contact ? (ob.contact.kind === 'email' ? maskEmail(ob.contact.value) : maskMobile(ob.contact.value)) : '—';
+  return (
+    <View testID="feature-onboard-account">
+      <Card title="Account">
+        <Line left={ob.contact?.kind === 'email' ? 'Email' : 'Mobile number'} right={contact} />
+        <Line left="PAN" right={ob.identity ? maskPan(ob.identity.pan) : '—'} />
+        <Line left="Aadhaar" right={ob.aadhaar ? maskAadhaar(ob.aadhaar.last4) : '—'} sub={ob.aadhaar ? 'OTP verified' : undefined} />
+        {/* Account status (Req 9.5, 9.6) */}
+        <View testID="feature-onboard-review">
+          <Text style={[s.text, { marginTop: 10 }]} accessibilityLiveRegion="polite">
+            Account status: <Text style={{ fontWeight: '800' }}>{kycStatusLabel(ob.kyc.status)}</Text>
+            {ob.kyc.status === 'rejected' && ob.kyc.review?.decision?.reason ? ` (${ob.kyc.review.decision.reason})` : ''}
+          </Text>
+          {ob.kyc.status === 'rejected' ? (
+            <Btn primary title="Redo documents" onPress={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'redo-documents' }) }))} />
+          ) : null}
+        </View>
+        <Text style={[s.small, { marginTop: 8 }]}>Signing out keeps your financial data on this phone.</Text>
+        <Btn title="Sign out" onPress={() => {
+          update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'sign-out' }) }));
+          void clearPickerCache(); // Bug 2: no picked documents left behind after sign-out.
+        }} />
+      </Card>
+    </View>
+  );
+}
+
+const FIELD_NAME = { pan: 'PAN', aadhaar: 'Aadhaar' } as const;
+const rv = {
+  row: { flexDirection: 'row', flexWrap: 'wrap', paddingVertical: 8, borderBottomColor: theme.line, borderBottomWidth: 1 },
+  c1: { width: 72 },
+  c: { flex: 1 },
+  reason: { width: '100%', marginTop: 4 },
+} as const;
+
+/** Settings → Demo reviewer (design B5): dev builds with the demo reader only (G2). Shows masks only, never documents or full Aadhaar. */
+function DemoReviewerCard() {
+  const reader = useDocReader();
+  const { data, update } = useStore();
+  const [reason, setReason] = useState('');
+  const [touched, setTouched] = useState(false);
+  if (!__DEV__ || !reader.isDemo) return null;
+  const kyc = data.onboarding.kyc;
+  // Same as web: shown only while a final KYC approval can be given (pre-verified or under review), hidden once verified.
+  if (!canFinalApprove(kyc)) return null;
+  // Pre-verified: the device checks passed, so only the final KYC approval is simulated (no Reject, no earlier review).
+  const pre = kyc.status === 'pre-verified';
+  const pending = kyc.status === 'under-review' ? kyc.review : null;
+  const trimmed = reason.trim();
+  const reasonErr = trimmed.length < 1 || trimmed.length > 200 ? 'Enter a reason (1–200 characters).' : null;
+  const decide = (result: 'approved' | 'rejected') => {
+    update((d) => ({
+      ...d,
+      onboarding: onboardingReducer(d.onboarding, { type: 'review-decided', result, reason: result === 'rejected' ? trimmed : null, at: new Date().toISOString() }),
+    }));
+    setReason(''); setTouched(false);
+  };
+  return (
+    <View>
+      <Card title="Demo reviewer">
+        <Text style={[s.small, { marginBottom: 8 }]}>Demo mode: this stands in for the Wealthfire team's hand check.</Text>
+        {pre ? (
+          <>
+            <Text style={s.text}>The documents matched on this device. Final KYC is pending.</Text>
+            <Btn primary title="Approve final KYC (demo)" onPress={() => decide('approved')} />
+          </>
+        ) : !pending ? (
+          <Text style={s.text}>No review waiting.</Text>
+        ) : (
+          <>
+            {pending.sentAt ? <Text style={s.small}>Sent {new Date(pending.sentAt).toLocaleString('en-IN')}</Text> : null}
+            <View style={rv.row} accessibilityRole="header">
+              <Text style={[s.muted, rv.c1]}>Field</Text><Text style={[s.muted, rv.c]}>Typed</Text><Text style={[s.muted, rv.c]}>Read from document</Text>
+            </View>
+            {pending.fields.map((f) => (
+              <View key={f.field} style={rv.row} accessible accessibilityLabel={`${FIELD_NAME[f.field]}: typed ${f.typedMasked}, read from document ${f.readMasked}. ${reviewReasonText(f)}`}>
+                <Text style={[s.text, rv.c1]}>{FIELD_NAME[f.field]}</Text><Text style={[s.text, rv.c]}>{f.typedMasked}</Text><Text style={[s.text, rv.c]}>{f.readMasked}</Text>
+                {/* Review bug 11: why this field is under review (numbers differ / name didn't match), same text as web. */}
+                <Text style={[s.small, rv.reason]}>{reviewReasonText(f)}</Text>
+              </View>
+            ))}
+            <View style={{ marginTop: 10 }}>
+              <Text style={s.muted}>Reason (needed to reject)</Text>
+              <TextInput accessibilityLabel="Reason (needed to reject)" accessibilityHint={touched && reasonErr ? reasonErr : undefined}
+                style={s.input} value={reason} maxLength={200} onChangeText={setReason} onBlur={() => setTouched(true)} placeholderTextColor={theme.muted} />
+              {touched && reasonErr ? <Text style={{ color: theme.bad, fontSize: 13, marginTop: 4 }} accessibilityLiveRegion="polite">{reasonErr}</Text> : null}
+            </View>
+            <Btn primary title="Approve final KYC (demo)" onPress={() => decide('approved')} />
+            <Btn danger title="Reject" disabled={!!reasonErr} onPress={() => decide('rejected')} />
+          </>
+        )}
+      </Card>
+    </View>
+  );
+}
+
 export function SettingsScreen() {
   const { data, update, replace } = useStore();
   const [msg, setMsg] = useState('');
   return (
     <Screen feature="demo" title="Settings" intro="Assumptions, demo data and your data.">
+      <AccountCard />
+      <DemoReviewerCard />
       <Card title="Assumptions (% per year)">
         {FIELDS.map((f) => (
           <NumField key={f.key} label={f.label} suffix="%" value={data.assumptions[f.key]} onChange={(v) => update((d) => ({ ...d, assumptions: { ...d.assumptions, [f.key]: v } }))} />
@@ -305,13 +411,17 @@ export function SettingsScreen() {
       </Card>
       <Card title="Demo">
         <Text style={s.text}>Fill the app with a sample user to look around.</Text>
-        <Btn primary title="Load demo data" onPress={() => { replace(demoData()); setMsg('Demo data loaded.'); }} />
+        <Btn primary title="Load demo data" onPress={() => { replace({ ...demoData(), onboarding: data.onboarding }); setMsg('Demo data loaded.'); }} />
       </Card>
       <Card title="Your data">
         <Text style={s.muted}>Stored only on this phone.</Text>
         <Btn danger title="Delete all data" onPress={() => Alert.alert('Delete all data?', 'This cannot be undone.', [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Delete', style: 'destructive', onPress: () => { replace(emptyData()); setMsg('All data deleted.'); } },
+          { text: 'Delete', style: 'destructive', onPress: () => {
+            replace(emptyData());
+            void clearPickerCache(); // Bug 6: same as Sign out, no picked documents left behind.
+            setMsg('All data deleted.');
+          } },
         ])} />
       </Card>
       {msg ? <Text style={s.text} accessibilityLiveRegion="polite">{msg}</Text> : null}

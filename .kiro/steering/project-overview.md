@@ -43,3 +43,8 @@ cd apps/ios && npx tsc --noEmit && npx expo export --platform ios
 - Data stays on the device only. No server.
 - Gmail uses read-only scope; the token is kept in memory only. Client IDs: web via repo variable `GOOGLE_WEB_CLIENT_ID`, phones via `expo.extra` in each `app.json`.
 - Educational estimates only, not investment advice. Keep the disclaimer.
+- Onboarding gates the app: sign in → contact OTP → Your details → Aadhaar OTP (once) → Upload documents → Check numbers + names → status. OTPs go through `OtpProvider` (v1 demo); documents through `DocumentReader` (default on-device: Tesseract.js + pdf.js on web, ML Kit + PDF thumbnail on phones; demo reader only in DEV via `?reader=demo&mode=…`).
+- The full Aadhaar, documents and OCR text are never stored, logged or put in the backup; only the Aadhaar last 4 is kept.
+- Device checks can only give **Pre-verified** (or Under review). **Verified** and `isEligibleToInvest` come only from a final KYC approval (future server-side partner such as Digio + KRA/CKYC, or a human). The Demo reviewer that simulates it renders only in DEV / `__DEV__`.
+- Phone apps use native modules, so they need a development build (`npm run android` / `npm run ios`, or EAS `build:apk`); Expo Go opens the app but cannot read documents. CI's `expo export` is JS-only and unaffected.
+- Web OCR assets are self-hosted: `scripts/copy-ocr-assets.mjs` runs on `prebuild`/`predev` and copies them into `apps/web/public/ocr/` (git-ignored). No CDN.

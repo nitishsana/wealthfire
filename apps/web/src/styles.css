@@ -134,3 +134,47 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
 .badge { display: inline-block; margin-left: 8px; font-size: .72rem; padding: 1px 8px; border-radius: 99px; background: var(--accent); color: #1a0f05; font-weight: 700; vertical-align: middle; }
 .explain h3 { margin: 0 0 6px; font-size: 1rem; }
 .explain p { margin: 0 0 6px; }
+
+/* Onboarding (full screen, no nav) */
+.onboard { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px 32px; }
+.onboard-brand { padding: 8px 10px 20px; }
+.onboard-main { width: 100%; max-width: 560px; }
+.onboard-main h1:focus { outline: none; }
+.onboard-main h1:focus-visible { outline: 3px solid var(--accent-2); outline-offset: 2px; }
+.ob-field { margin: 14px 0 4px; }
+.input-wrap.has-prefix .prefix { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.input-wrap.has-prefix input { padding-left: 46px; }
+.input-wrap.has-toggle input { padding-right: 64px; }
+.input-wrap .toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 3px 8px; font: inherit; font-size: .8rem; cursor: pointer; }
+.otp-input { letter-spacing: .4em; font-variant-numeric: tabular-nums; max-width: 220px; }
+.demo-banner { border: 1px dashed var(--accent); background: var(--panel-2); border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; color: var(--text); font-size: .9rem; }
+.field-warn { color: var(--warn); }
+.link-btn { background: none; border: none; color: var(--accent-2); text-decoration: underline; cursor: pointer; font: inherit; padding: 0; }
+.account { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 8px; }
+.account dt { color: var(--muted); }
+.account dd { margin: 0; font-variant-numeric: tabular-nums; }
+.onboard-privacy { display: block; padding: 0 10px 16px; margin: -12px 0 0; }
+.input-wrap input.masked { -webkit-text-security: disc; }
+/* Onboarding Part B: documents and number check */
+.doc-slot h2 { margin-bottom: 4px; }
+.doc-preview { margin: 8px 0; }
+.doc-thumb { display: block; max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--line); object-fit: cover; }
+.doc-thumb.small { max-width: 96px; max-height: 72px; }
+.doc-pdf { display: inline-flex; gap: 8px; align-items: center; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.doc-pdf.small { padding: 4px 8px; font-size: .85rem; }
+.check-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.match { font-weight: 700; margin: 4px 0 8px; }
+.match.good { color: var(--good); }
+.match.bad { color: var(--bad); }
+/* Name on the card vs the entered name (Check numbers). */
+.name-check { margin: 0 0 8px; }
+.name-check.good { color: var(--good); }
+.name-check.warn { color: var(--warn); }
+/* Password for a locked e-Aadhaar / e-PAN PDF, under its slot. */
+.pdf-password { margin-top: 8px; }
+.pdf-password input { flex: 1 1 12rem; min-width: 0; }
+.account-status { margin: 4px 0 8px; }
+.drive-link { margin: 0 0 4px; }
+.link-btn:disabled { color: var(--muted); text-decoration: none; cursor: not-allowed; }
+/* Toggle link with a fixed label: show the pressed state visually too. */
+.link-btn[aria-pressed="true"] { font-weight: 700; text-decoration-thickness: 2px; }

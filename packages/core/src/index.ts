@@ -14,3 +14,8 @@ export * from './demo';
 export * from './features';
 export * from './gmail';
 export * from './fireTypes';
+export * from './onboarding';
+export * from './otp';
+export * from './docreader';
+export * from './cardtext';
+export * from './kyc';

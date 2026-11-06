@@ -10,11 +10,16 @@
     "expo-document-picker": "*",
     "expo-application": "*",
     "expo-auth-session": "*",
+    "@react-native-ml-kit/text-recognition": "*",
     "expo-crypto": "*",
+    "expo-dev-client": "*",
     "expo-file-system": "*",
+    "expo-image-manipulator": "*",
+    "expo-image-picker": "*",
     "expo-web-browser": "*",
     "react": "*",
     "react-native": "*",
+    "react-native-pdf-thumbnail": "*",
     "react-native-safe-area-context": "*"
   }
 }
