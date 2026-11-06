@@ -4,7 +4,7 @@
 // AppData keeps the final PAN, Aadhaar last 4 and masked review fields.
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
-  applyReread, canReread, canSend, canSendForHandCheck, checkOutcome, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
+  applyReread, canReread, canSend, canSendForHandCheck, checkOutcome, countsAsFailedRead, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
   maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer, panSurnameWarning,
   readBlocked, readsLeft, resendIn, reviewFields, sameDocument, takeDocumentNumber, validateAadhaar, validateEmail, validateMobile, validateName, validatePan,
   type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OnboardingEvent,
@@ -38,6 +38,19 @@ export const MOVED_ON_IN_OTHER_TAB = 'Your onboarding moved on in another tab. C
 export const RETYPE_FOR_NEW_OTP = 'Enter your Aadhaar number again to get a new OTP.';
 /** Same text as phones (mobile-ui Documents HAND_CHECK_FAILED). */
 export const HAND_CHECK_FAILED = 'Could not send your documents. Try again.';
+/** Shown once on Sign in right after Settings → "Delete all data" (the gate switches to Sign in at once). */
+export const DATA_DELETED_TEXT = 'All data deleted.';
+const DATA_DELETED_KEY = 'wealthfire.dataDeleted';
+/** Settings calls this just before deleting, so Sign in can say the data was deleted. */
+export function markDataDeleted() {
+  try { window.sessionStorage.setItem(DATA_DELETED_KEY, '1'); } catch { /* storage blocked: no message */ }
+}
+function dataDeletedFlag(): boolean {
+  try { return window.sessionStorage.getItem(DATA_DELETED_KEY) === '1'; } catch { return false; }
+}
+function clearDataDeletedFlag() {
+  try { window.sessionStorage.removeItem(DATA_DELETED_KEY); } catch { /* storage blocked */ }
+}
 const couldNotRead = DOC_MESSAGES.unreadable;
 
 /** Shared match label ("✅ Match") with the emoji hidden from screen readers. */
@@ -53,6 +66,8 @@ function MatchLabel({ matched }: { matched: boolean }) {
 type ReadOutcome = { value: string; nameMatch: boolean | null } | { error: string; locked?: boolean; failed?: { unavailable: boolean } };
 /** Sends 'read-failed' for one card (review bug 2). */
 type ReadFailed = (field: KycField, unavailable: boolean) => void;
+/** Notes the full number of a successful read (memory only), sent with a hand check (minor 6); null forgets it. */
+type ReadOk = (field: KycField, value: string | null) => void;
 /** The name entered in "Your details", checked against the name on each card. */
 type PersonName = { first: string; last: string };
 type ReadValue = { value: string; nameMatch: boolean | null };
@@ -70,18 +85,20 @@ async function readNumber(doc: DocFile, field: KycField, strict: boolean, expect
     const r = await documentReader.read(doc, field, {
       strict, expected, ...(name ? { name } : {}), ...(password ? { password } : {}),
     });
+    // Minor 6: core decides which reads count toward the hand check (every failed read, company PAN included).
     if (!r.ok && r.reason === 'locked') {
-      // Counts as a failed read too (same as phones).
-      return { error: r.message || (password ? DOC_MESSAGES.wrongPdfPassword : DOC_MESSAGES.pdfLocked), locked: true, failed: { unavailable: false } };
+      return { error: r.message || (password ? DOC_MESSAGES.wrongPdfPassword : DOC_MESSAGES.pdfLocked), locked: true,
+        ...(countsAsFailedRead(r) ? { failed: { unavailable: false } } : {}) };
     }
     // notPan / notAadhaar / maskedAadhaar / companyPan / readerUnavailable / unreadable / file / network messages come from the reader.
     if (!r.ok) {
       const unavailable = r.reason === 'network' || (r.reason === 'unreadable' && r.message === DOC_MESSAGES.readerUnavailable);
-      return { error: r.message || couldNotRead(field), failed: { unavailable } };
+      return { error: r.message || couldNotRead(field), ...(countsAsFailedRead(r) ? { failed: { unavailable } } : {}) };
     }
-    if (field === 'pan' && isCompanyPan(r.value)) return { error: DOC_MESSAGES.companyPan };
+    // A number the reader returned but that is not a usable personal card number is a failed read too.
+    if (field === 'pan' && isCompanyPan(r.value)) return { error: DOC_MESSAGES.companyPan, failed: { unavailable: false } };
     const bad = field === 'pan' ? validatePan(r.value) : validateAadhaar(r.value);
-    if (bad) return { error: couldNotRead(field) };
+    if (bad) return { error: couldNotRead(field), failed: { unavailable: false } };
     return { value: field === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value), nameMatch: r.nameMatch ?? null };
   } catch {
     // The reader itself failed (same message as reason 'network').
@@ -148,6 +165,19 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
   // Documents (blob: URLs) and number checks: memory only, dropped on done and on unmount.
   const [docs, setDocs] = useState<Docs>(NO_DOCS);
   const [checks, setChecks] = useState<FieldCheck[] | null>(null);
+  // Minor 2: the whole Check numbers result per card when Back was pressed (like phones' `previous`), so a card
+  // with no re-checks left keeps the PAN chosen via "Use number from document" or "Edit number".
+  const [previous, setPrevious] = useState<FieldCheck[] | null>(null);
+  // Minor 6: full number of the last successful read per card (memory only), sent with a hand check; the reducer stores masks only.
+  const lastReads = useRef<Partial<Record<KycField, string>>>({});
+  const noteRead: ReadOk = (field, value) => {
+    const next = { ...lastReads.current };
+    if (value === null) delete next[field]; else next[field] = value;
+    lastReads.current = next;
+  };
+  // Minor 3: one-time "All data deleted." after Settings → Delete all data (flag cleared once shown).
+  const [dataDeleted] = useState(dataDeletedFlag);
+  useEffect(() => { if (dataDeleted) clearDataDeletedFlag(); }, [dataDeleted]);
   const [firstSend, setFirstSend] = useState<OtpRequest | undefined>(undefined);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const mounted = useRef(false);
@@ -164,7 +194,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
   };
   const dropSessionData = () => {
     for (const k of DOC_KINDS) { const d = docsRef.current[k]; if (d) URL.revokeObjectURL(d.uri); }
-    setDocs(NO_DOCS); setChecks(null); setAadhaar(''); setFirstSend(undefined);
+    setDocs(NO_DOCS); setChecks(null); setPrevious(null); setAadhaar(''); setFirstSend(undefined);
+    lastReads.current = {};
   };
 
   // Revoke every blob URL when the page goes away (done, sign-out, reload).
@@ -200,7 +231,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
   // Review bug 2: after repeated failed reads (or no reader at all) the documents can go to a hand check.
   const handCheck = canSendForHandCheck(ob.kyc)
     ? () => {
-      const ev: OnboardingEvent = { type: 'send-for-hand-check', at: new Date().toISOString() };
+      // Minor 6: the review lists every card; a card read earlier shows its masked read, not just the failed one.
+      const ev: OnboardingEvent = { type: 'send-for-hand-check', at: new Date().toISOString(), reads: { ...lastReads.current } };
       // Refused (e.g. no identity or verified Aadhaar yet): HandCheck shows HAND_CHECK_FAILED.
       if (onboardingReducer(ob, ev).step !== 'done') return false;
       onCompleting();
@@ -214,8 +246,9 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
   // Name check: the name from "Your details" is compared with the name on each card.
   const personName: PersonName | undefined = ob.identity ? { first: ob.identity.firstName, last: ob.identity.lastName } : undefined;
   /** Earlier read of `field` in this session (number + name result), if any. */
+  const priorCheck = (field: KycField): FieldCheck | undefined => (previous ?? checks)?.find((x) => x.field === field);
   const priorRead = (field: KycField): ReadValue | null => {
-    const c = checks?.find((x) => x.field === field);
+    const c = priorCheck(field);
     return c ? { value: c.read, nameMatch: c.nameMatch } : null;
   };
 
@@ -224,6 +257,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
     body = (
       <section data-feature="onboard-signin" aria-label="Sign in">
         {heading('Sign in')}
+        {dataDeleted && <p className="muted" role="status">{DATA_DELETED_TEXT}</p>}
         <SignIn onSent={(kind, value, r) => {
           setFirstSend(r);
           dispatch({ type: 'otp-sent', channel: 'contact', at: r.at, contact: { kind, value } });
@@ -260,6 +294,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
           const r = await requestOtp(otpProvider, 'aadhaar', digits, ob.sends.aadhaar, ob.aadhaarLockedUntil);
           setAadhaar(digits);
           setChecks(null);
+          setPrevious(null);
+          lastReads.current = {};
           setFirstSend(r);
           // Local view over a stored Aadhaar OTP step: the user's Continue moves the stored step back first.
           if (lostOtp) dispatch({ type: 'back-to-identity' });
@@ -297,7 +333,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         {lostCheck && <p className="muted" role="status">{MOVED_ON_IN_OTHER_TAB}</p>}
         <p className="intro">{DOC_MESSAGES.uploadIntro}</p>
         <Documents docs={docs} setDoc={setDoc} pan={ob.identity?.pan ?? ''} aadhaar={aadhaar} verifiedLast4={ob.aadhaar?.last4 ?? ''}
-          name={personName} onReadFailed={readFailed} handCheck={handCheck}
+          name={personName} onReadFailed={readFailed} onReadOk={noteRead} handCheck={handCheck}
           // Bug 1: after Back from Check numbers, a field with no re-reads left is not read again;
           // its earlier read result (kept in `checks`) is used instead.
           blocked={{ pan: readBlocked(ob.kyc, 'pan'), aadhaar: readBlocked(ob.kyc, 'aadhaar') }}
@@ -310,9 +346,13 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
             const counted = already ? ob.kyc.rereads : onboardingReducer(ob, ev).kyc.rereads;
             const cs = initialChecks({ pan: ob.identity?.pan ?? '', aadhaar: verified }, { pan: pan.value, aadhaar: aad.value },
               { pan: pan.nameMatch, aadhaar: aad.nameMatch })
+              // Minor 2: a card with no re-checks left keeps its whole earlier check (the PAN chosen via
+              // "Use number from document" / "Edit number" included), not a fresh one built from the typed PAN.
+              .map((c) => (readBlocked(ob.kyc, c.field) ? priorCheck(c.field) : undefined) ?? c)
               .map((c) => ({ ...c, rereads: Math.min(MAX_REREADS, Math.max(c.rereads, counted[c.field])) }));
             setAadhaar(verified);
             setChecks(cs);
+            setPrevious(null);
             if (!already) dispatch(ev);
           }} />
       </section>
@@ -321,10 +361,10 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
     body = (
       <section data-feature="onboard-check" aria-label="Check your numbers">
         {heading('Check your numbers')}
-        <CheckNumbers checks={checks} docs={docs} personName={personName} setDoc={setDoc} onReadFailed={readFailed} handCheck={handCheck}
+        <CheckNumbers checks={checks} docs={docs} personName={personName} setDoc={setDoc} onReadFailed={readFailed} onReadOk={noteRead} handCheck={handCheck}
           left={{ pan: readsLeft(ob.kyc, 'pan'), aadhaar: readsLeft(ob.kyc, 'aadhaar') }}
           onChange={(cs, reread) => { setChecks(cs); if (reread) dispatch({ type: 'reread-used', field: reread }); }}
-          onBack={() => dispatch({ type: 'back-to-documents' })}
+          onBack={() => { setPrevious(checks); dispatch({ type: 'back-to-documents' }); }}
           onConfirm={() => {
             const out = checkOutcome(checks);
             const pan = checks.find((c) => c.field === 'pan')?.final ?? ob.identity?.pan ?? '';
@@ -370,9 +410,10 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
   );
 }
 
-function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, prior, onRead, onReadFailed, handCheck }: {
+function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, prior, onRead, onReadFailed, onReadOk, handCheck }: {
   docs: Docs;
   onReadFailed: ReadFailed;
+  onReadOk: ReadOk;
   /** "Send for hand check", when canSendForHandCheck allows it. */
   handCheck: (() => boolean) | undefined;
   setDoc: (k: DocKind, d: DocFile | null) => void;
@@ -423,7 +464,7 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
     const nextLocked = { ...locked };
     fields.forEach((f, i) => {
       const o = outs[i]!;
-      if ('value' in o) { nextResults[f] = o; nextErrors[f] = undefined; nextLocked[f] = false; }
+      if ('value' in o) { nextResults[f] = o; nextErrors[f] = undefined; nextLocked[f] = false; onReadOk(f, o.value); }
       else {
         delete nextResults[f]; nextErrors[f] = o.error; nextLocked[f] = !!o.locked;
         if (o.failed) onReadFailed(f, o.failed.unavailable);
@@ -452,6 +493,8 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
       setErrors((e) => ({ ...e, [k]: undefined }));
       setLocked((l) => ({ ...l, [k]: false }));
       setResults((r) => { const n = { ...r }; delete n[k]; return n; });
+      // The remembered read belonged to the old document: forget it when the card is replaced or removed.
+      onReadOk(k, null);
     }
     setDoc(k, d);
   }
@@ -500,9 +543,10 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
   );
 }
 
-function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack, onConfirm, onReadFailed, handCheck }: {
+function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack, onConfirm, onReadFailed, onReadOk, handCheck }: {
   checks: FieldCheck[];
   onReadFailed: ReadFailed;
+  onReadOk: ReadOk;
   /** "Send for hand check", when canSendForHandCheck allows it. */
   handCheck: (() => boolean) | undefined;
   personName: PersonName | undefined;
@@ -528,7 +572,7 @@ function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack
       <p className="intro" role="status">{intro}</p>
       {checks.map((c) => (
         <FieldRow key={c.field} check={c} doc={docs[c.field]} otherDoc={docs[c.field === 'pan' ? 'aadhaar' : 'pan']} personName={personName} storedLeft={left[c.field]}
-          setDoc={(d) => setDoc(c.field, d)} onReadFailed={onReadFailed}
+          setDoc={(d) => setDoc(c.field, d)} onReadFailed={onReadFailed} onReadOk={onReadOk}
           onChange={(next, reread) => onChange(checks.map((x) => (x.field === c.field ? next : x)), reread ? c.field : undefined)} />
       ))}
       <div className="row">
@@ -542,9 +586,10 @@ function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack
   );
 }
 
-function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onChange, onReadFailed }: {
+function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onChange, onReadFailed, onReadOk }: {
   check: FieldCheck;
   onReadFailed: ReadFailed;
+  onReadOk: ReadOk;
   /** Name from "Your details", checked again on every re-read. */
   personName: PersonName | undefined;
   doc: DocFile | null;
@@ -603,6 +648,7 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
       return r.locked ? 'locked' : 'failed';
     }
     setPdfLocked(false);
+    onReadOk(c.field, r.value);
     onChange(applyReread(c, final, r.value, r.nameMatch), true);
     return 'ok';
   }

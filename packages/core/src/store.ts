@@ -59,6 +59,8 @@ export const MAX_FAILED_READS = 9;
 /** A stored mask: masked shape only, and never a run of 5+ digits (so never a full Aadhaar). */
 /** readMasked of a hand-check review row: the card couldn't be read. */
 export const UNREADABLE_MASK = 'unreadable';
+/** readMasked of the other card in a hand-check review when it has no successful read yet. */
+export const NOT_READ_MASK = 'not read';
 
 export function isSafeMask(s: unknown): s is string {
   return isStr(s) && /^[A-Z0-9X* ]{4,14}$/.test(s) && !/\d{5,}/.test(s);
@@ -71,7 +73,7 @@ function sanitizeReview(raw: unknown): ReviewRecord | null {
   const fields = (Array.isArray(r.fields) ? r.fields : [])
     .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
     .filter((f) => (f.field === 'pan' || f.field === 'aadhaar') && isSafeMask(f.typedMasked) &&
-      (f.handCheck === true ? f.readMasked === UNREADABLE_MASK : isSafeMask(f.readMasked)))
+      (f.handCheck === true ? f.readMasked === UNREADABLE_MASK : isSafeMask(f.readMasked) || f.readMasked === NOT_READ_MASK))
     .map((f) => ({
       field: f.field as KycField, typedMasked: f.typedMasked as string, readMasked: f.readMasked as string,
       ...(f.nameMismatch === true ? { nameMismatch: true as const } : {}),

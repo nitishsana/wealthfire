@@ -5,7 +5,7 @@
 // The demo reader is used ONLY in a dev build (__DEV__) whose app.json extra sets docReader 'demo';
 // its mode comes from extra.demoReaderMode and is never shown in the UI.
 import { createContext, useContext, useState, type ReactNode } from 'react';
-import { createDocumentReader, DemoDocumentReader, type DemoReadMode, type DocumentReader } from '@wealthfire/core';
+import { createDocumentReaderSafe, DemoDocumentReader, type DemoReadMode, type DocumentReader } from '@wealthfire/core';
 import { extractText, ocrAvailable } from './ocr';
 
 export interface DocReaderConfig {
@@ -25,14 +25,9 @@ function makeReader(config: DocReaderConfig): DocumentReader {
   const reader = config.reader === 'demo' && !__DEV__ ? undefined : config.reader;
   const extract = ocrAvailable() ? extractText : undefined;
   // The on-device reader (or, without the native engine, the one that fails with readerUnavailable).
-  const onDevice = () => createDocumentReader({ reader: undefined, extract });
-  let r: DocumentReader;
-  try {
-    r = createDocumentReader({ reader, apiUrl: config.apiUrl, extract });
-  } catch {
-    // Bug 11: an unknown docReader id in app.json must not crash the app at launch.
-    r = onDevice();
-  }
+  const onDevice = () => createDocumentReaderSafe({ reader: undefined, extract });
+  // Bug 11: the Safe factory never throws, so an unknown docReader id in app.json falls back to the on-device reader.
+  let r: DocumentReader = createDocumentReaderSafe({ reader, apiUrl: config.apiUrl, extract });
   // Never the demo reader outside a dev build, whatever the config says.
   if (r.isDemo && !__DEV__) r = onDevice();
   if (r instanceof DemoDocumentReader) r.mode = isDemoMode(config.demoMode) ? config.demoMode : 'match';

@@ -88,7 +88,10 @@ describe('bug 2: hand-check fallback', () => {
     expect(d.kyc.status).toBe('under-review');
     expect(d.kyc.review).toEqual({
       id: `rv_${(T0 + 60_000).toString(36)}`, sentAt: at, decision: null,
-      fields: [{ field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'unreadable', handCheck: true }],
+      fields: [
+        { field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'unreadable', handCheck: true },
+        { field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'not read' },
+      ],
     });
     // both cards
     const both = onboardingReducer(onboardingReducer(s, { type: 'read-failed', field: 'aadhaar' }), { type: 'send-for-hand-check', at });
@@ -107,7 +110,10 @@ describe('bug 2: hand-check fallback', () => {
     expect(d.kyc.status).toBe('under-review');
     expect(d.kyc.match).toBe('review');
     expect(d.kyc.documentsAt).toBe(at);
-    expect(d.kyc.review!.fields).toEqual([{ field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'unreadable', handCheck: true }]);
+    expect(d.kyc.review!.fields).toEqual([
+      { field: 'pan', typedMasked: 'ABCPS****F', readMasked: 'not read' },
+      { field: 'aadhaar', typedMasked: 'XXXX XXXX 2346', readMasked: 'unreadable', handCheck: true },
+    ]);
   });
   it('send-for-hand-check needs failed reads and a valid time; keeps an earlier documentsAt', () => {
     const at = iso(T0 + 60_000);

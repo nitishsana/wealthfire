@@ -2,7 +2,7 @@
 // Default: the on-device reader. The card is read in this browser (Tesseract + pdf.js, ./ocr.ts)
 // and only the parsed number is used; files and text never leave the device.
 // A partner reader (Digio / HyperVerge) needs a backend; set VITE_DOC_READER + VITE_DOC_READER_URL then.
-import { createDocumentReader, DemoDocumentReader, type DemoReadMode, type DocumentReader } from '@wealthfire/core';
+import { createDocumentReaderSafe, DemoDocumentReader, type DemoReadMode, type DocumentReader } from '@wealthfire/core';
 import { extractText, onOcrProgress, terminateOcr } from './ocr';
 
 /** Reading progress 0..1 of the document being read now (on-device reader only); returns unsubscribe. */
@@ -34,7 +34,8 @@ function configuredReader(): string | undefined {
 
 export const documentReader: DocumentReader =
   devDemoReader() ??
-  createDocumentReader({
+  // An unknown VITE_DOC_READER value falls back to the on-device reader instead of blanking the page.
+  createDocumentReaderSafe({
     reader: configuredReader(),
     apiUrl: import.meta.env.VITE_DOC_READER_URL,
     extract: extractText,

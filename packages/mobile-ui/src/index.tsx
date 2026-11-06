@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType } from 'react';
+import { useEffect, useRef, useState, type ComponentType } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { DataProvider, useStore } from './store';
@@ -10,8 +10,10 @@ import { GoogleCtx, type GoogleConfig } from './screens/Gmail';
 import { OnboardingScreen } from './screens/Onboarding';
 import { OtpProviderScope, type OtpConfig } from './otp';
 import { DocReaderScope, type DocReaderConfig } from './reader';
+import { OnboardingBackCtx, SignInNoticeCtx, type OnboardingBackRef, type SignInNotice } from './shell';
 
 export type { GoogleConfig } from './screens/Gmail';
+export type { OnboardingBackRef } from './shell';
 export type { OtpConfig } from './otp';
 export type { DocReaderConfig } from './reader';
 
@@ -38,6 +40,11 @@ export interface WealthfireAppProps {
   otp?: OtpConfig;
   /** Document reader for onboarding KYC (from app.json extra.docReader / docReaderUrl). Empty → on-device reader (ML Kit); 'demo' only in dev builds. */
   docReader?: DocReaderConfig;
+  /**
+   * Android: set while onboarding is shown to a handler that steps back one onboarding step (true) or lets
+   * Android close the app (false). null outside onboarding, so the shell's tab history applies.
+   */
+  onboardingBack?: OnboardingBackRef;
 }
 
 function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: TabKey; setTab: (t: TabKey) => void }) {
@@ -92,17 +99,27 @@ function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: Tab
 }
 
 /** The full Wealthfire app. apps/android and apps/ios each render this with their platform. */
-export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {}, otp = {}, docReader = {} }: WealthfireAppProps) {
+export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {}, otp = {}, docReader = {}, onboardingBack }: WealthfireAppProps) {
   const [ownTab, setOwnTab] = useState<TabKey>(initialTab);
   const tab = ctlTab ?? ownTab;
   const setTab = (t: TabKey) => { (ctlSetTab ?? setOwnTab)(t); onTabChange?.(t); };
+  // Minor issue 3: memory-only notice for the next Sign in screen (e.g. "All data deleted.").
+  const notice = useRef<string | null>(null);
+  const [signInNotice] = useState<SignInNotice>(() => ({
+    set: (text) => { notice.current = text; },
+    take: () => { const t = notice.current; notice.current = null; return t; },
+  }));
   return (
     <SafeAreaProvider>
       <GoogleCtx.Provider value={google}>
         <OtpProviderScope config={otp}>
           <DocReaderScope config={docReader}>
             <DataProvider>
-              <Body platform={platform} tab={tab} setTab={setTab} />
+              <OnboardingBackCtx.Provider value={onboardingBack ?? null}>
+                <SignInNoticeCtx.Provider value={signInNotice}>
+                  <Body platform={platform} tab={tab} setTab={setTab} />
+                </SignInNoticeCtx.Provider>
+              </OnboardingBackCtx.Provider>
             </DataProvider>
           </DocReaderScope>
         </OtpProviderScope>
