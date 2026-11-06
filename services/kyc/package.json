@@ -1,0 +1,37 @@
+{
+    "name":  "@wealthfire/kyc-service",
+    "version":  "0.1.0",
+    "private":  true,
+    "description":  "Final KYC service (AWS Lambda + CDK). Server-side KYC decides Verified; see .kiro/specs/final-kyc-service.",
+    "type":  "module",
+    "scripts":  {
+                    "test":  "vitest run",
+                    "typecheck":  "tsc --noEmit",
+                    "build":  "node scripts/bundle.mjs",
+                    "synth":  "cdk synth --app \"npx tsx infra/app.ts\" --quiet"
+                },
+    "dependencies":  {
+                         "@aws-sdk/client-dynamodb":  "3.1163.0",
+                         "@aws-sdk/client-kms":  "3.1163.0",
+                         "@aws-sdk/client-s3":  "3.1163.0",
+                         "@aws-sdk/client-secrets-manager":  "3.1163.0",
+                         "@aws-sdk/client-sesv2":  "3.1163.0",
+                         "@aws-sdk/client-sns":  "3.1163.0",
+                         "@aws-sdk/lib-dynamodb":  "3.1163.0",
+                         "@aws-sdk/s3-request-presigner":  "3.1163.0",
+                         "@wealthfire/core":  "0.1.0",
+                         "hash-wasm":  "4.12.0",
+                         "jose":  "6.2.15"
+                     },
+    "devDependencies":  {
+                            "@types/aws-lambda":  "8.10.164",
+                            "aws-cdk":  "2.1148.0",
+                            "aws-cdk-lib":  "2.275.0",
+                            "constructs":  "10.8.1",
+                            "esbuild":  "0.28.2",
+                            "tsx":  "4.23.15",
+                            "typescript":  "5.9.3",
+                            "vitest":  "5.1.0",
+                            "@types/node":  "22.20.5"
+                        }
+}
