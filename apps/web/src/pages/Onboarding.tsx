@@ -32,6 +32,10 @@ const DOC_KINDS: DocKind[] = ['selfie', 'aadhaar', 'pan'];
 export const UNDER_REVIEW_TEXT = "Your account is open. We're checking your details by hand, usually within 1 working day. You can use the planner meanwhile.";
 export const RETYPE_AADHAAR_LABEL = 'Enter your Aadhaar number again';
 export const CONFIRM_FAILED = 'Could not confirm your numbers. Try again.';
+/** Must-fix 1: shown on a local Upload documents view when another tab already reached Check numbers. */
+export const MOVED_ON_IN_OTHER_TAB = 'Your onboarding moved on in another tab. Continue here by reading your documents again, or switch to that tab.';
+/** Shown on a local Your details view when the stored step is Aadhaar OTP but this tab has no full Aadhaar. */
+export const RETYPE_FOR_NEW_OTP = 'Enter your Aadhaar number again to get a new OTP.';
 /** Same text as phones (mobile-ui Documents HAND_CHECK_FAILED). */
 export const HAND_CHECK_FAILED = 'Could not send your documents. Try again.';
 const couldNotRead = DOC_MESSAGES.unreadable;
@@ -172,21 +176,18 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
   useEffect(() => {
     if (mounted.current) headingRef.current?.focus();
     mounted.current = true;
-  }, [ob.step]);
+    // lostCheck: the local Upload documents ↔ Check numbers switch has no step change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ob.step, ob.step === 'check' && !checks, ob.step === 'aadhaar-otp' && !aadhaar]);
 
   // After a reload on Aadhaar OTP the full Aadhaar is gone: back to "Your details" (name and PAN kept).
   // On Upload documents the Aadhaar is locked, so the re-type field is shown there instead (C1).
   const lostOtp = ob.step === 'aadhaar-otp' && !aadhaar;
+  // Stored step is Check numbers but this tab has no reads in memory: another tab got there (a reload
+  // opens on documents). Must-fix 1: nothing is dispatched; Upload documents is shown here locally only.
   const lostCheck = ob.step === 'check' && !checks;
-  useEffect(() => {
-    if (lostOtp) dispatch({ type: 'back-to-identity' });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lostOtp]);
-  useEffect(() => {
-    // Not expected (a stored check opens on documents); the reads were in memory only.
-    if (lostCheck) dispatch({ type: 'back-to-documents' });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lostCheck]);
+  // lostOtp is likewise render-only (no dispatch on load or on a cross-tab update): "Your details" is shown
+  // here locally, and only the user's Continue moves the stored step back (back-to-identity, identity-saved).
 
   /** Onboarding is done: drop the full Aadhaar, documents and checks (Req 4.3 / 7.10) and free the text engine (C3). */
   const finishSession = () => {
@@ -252,6 +253,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
     body = (
       <section data-feature="onboard-identity" aria-label="Your details">
         {heading('Your details')}
+        {lostOtp && <p className="muted" role="status">{RETYPE_FOR_NEW_OTP}</p>}
         <p className="intro">We need these to tie your account to you.</p>
         <Identity initial={ob.identity} onContinue={async (id, digits) => {
           // Req 3.8 / C1: save name + PAN, keep the full Aadhaar in memory, send the Aadhaar OTP.
@@ -259,6 +261,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
           setAadhaar(digits);
           setChecks(null);
           setFirstSend(r);
+          // Local view over a stored Aadhaar OTP step: the user's Continue moves the stored step back first.
+          if (lostOtp) dispatch({ type: 'back-to-identity' });
           dispatch({ type: 'identity-saved', ...id });
           if (r.ok) dispatch({ type: 'otp-sent', channel: 'aadhaar', at: r.at });
           else if (r.lockUntil) dispatch({ type: 'aadhaar-locked', until: r.lockUntil });
@@ -286,10 +290,11 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         </Card>
       </section>
     );
-  } else if (ob.step === 'documents') {
+  } else if (ob.step === 'documents' || lostCheck) {
     body = (
       <section data-feature="onboard-documents" aria-label="Upload documents">
         {heading('Upload documents')}
+        {lostCheck && <p className="muted" role="status">{MOVED_ON_IN_OTHER_TAB}</p>}
         <p className="intro">{DOC_MESSAGES.uploadIntro}</p>
         <Documents docs={docs} setDoc={setDoc} pan={ob.identity?.pan ?? ''} aadhaar={aadhaar} verifiedLast4={ob.aadhaar?.last4 ?? ''}
           name={personName} onReadFailed={readFailed} handCheck={handCheck}
@@ -299,14 +304,16 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
           prior={{ pan: priorRead('pan'), aadhaar: priorRead('aadhaar') }}
           onRead={(pan, aad, verified) => {
             const ev: OnboardingEvent = { type: 'documents-ready', at: new Date().toISOString(), reader: documentReader.id };
+            // Already on Check numbers (another tab): only this tab's checks are created; nothing is dispatched.
+            const already = ob.step === 'check';
             // The reducer counts a read after Back as a re-read; seed the checks with the counts it will store (Req 8.8).
-            const counted = onboardingReducer(ob, ev).kyc.rereads;
+            const counted = already ? ob.kyc.rereads : onboardingReducer(ob, ev).kyc.rereads;
             const cs = initialChecks({ pan: ob.identity?.pan ?? '', aadhaar: verified }, { pan: pan.value, aadhaar: aad.value },
               { pan: pan.nameMatch, aadhaar: aad.nameMatch })
               .map((c) => ({ ...c, rereads: Math.min(MAX_REREADS, Math.max(c.rereads, counted[c.field])) }));
             setAadhaar(verified);
             setChecks(cs);
-            dispatch(ev);
+            if (!already) dispatch(ev);
           }} />
       </section>
     );

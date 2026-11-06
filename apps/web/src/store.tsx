@@ -31,13 +31,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
     function onStorage(e: StorageEvent) {
       if (e.storageArea !== localStorage || (e.key !== STORAGE_KEY && e.key !== null) || e.newValue === e.oldValue) return;
       const next = e.newValue;
-      setData((d) => {
-        if (next === serialize(d)) return d;
-        // Not a reload: the other tab's state is taken as it is, without the reload-only rules.
-        const n = deserialize(next, { reload: false });
-        fromOtherTab.current = n;
-        return n;
-      });
+      // Not a reload: the other tab's state is taken as it is, without the reload-only rules.
+      // Built and remembered outside the updater, so the updater stays pure (StrictMode runs it twice).
+      const n = deserialize(next, { reload: false });
+      fromOtherTab.current = n;
+      setData((d) => (next === serialize(d) ? d : n));
     }
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
