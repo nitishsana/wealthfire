@@ -8,7 +8,8 @@
 import { Image, NativeModules, TurboModuleRegistry } from 'react-native';
 import { manipulateAsync, SaveFormat, type Action } from 'expo-image-manipulator';
 import { deleteAsync } from 'expo-file-system/legacy';
-import { PDF_LOCKED_CODE, type DocFile, type TextExtractor } from '@wealthfire/core';
+// OCR_LOAD_CODE (Bug 3): core maps it to reason 'network' (couldNotReadDocs), not "upload a clearer photo".
+import { OCR_LOAD_CODE, PDF_LOCKED_CODE, type DocFile, type TextExtractor } from '@wealthfire/core';
 
 interface MlKit { recognize(uri: string): Promise<{ text: string }> }
 interface PdfThumb { generate(uri: string, page: number, quality: number): Promise<{ uri: string; width: number; height: number }> }
@@ -25,6 +26,11 @@ const LOCKED_PDF = /password|encrypted/i;
 /** The error core's on-device reader maps to ReadResult reason 'locked'. */
 function lockedPdfError(): Error {
   return Object.assign(new Error('PDF is password protected'), { code: PDF_LOCKED_CODE });
+}
+
+/** The image / PDF couldn't be loaded (file gone from the cache, I/O error): not a problem with the photo itself. */
+function loadError(): Error {
+  return Object.assign(new Error('Could not load the document for reading'), { code: OCR_LOAD_CODE });
 }
 
 let cached: Engines | null | undefined;
@@ -89,13 +95,20 @@ export const extractText: TextExtractor = async (doc: DocFile, opts: { strict: b
       } catch (e) {
         // Password-protected PDF: phones cannot take a password, so core reports reason 'locked'.
         if (LOCKED_PDF.test(e instanceof Error ? e.message : String(e))) throw lockedPdfError();
-        throw e;
+        throw loadError(); // Bug 3: the PDF couldn't be opened or rendered
       }
       temps.push(page.uri);
       src = page.uri;
       size = { width: page.width, height: page.height };
     }
-    const texts: string[] = [(await eng.ml.recognize(src)).text ?? ''];
+    let first: string;
+    try {
+      // ML Kit throws only when it can't load the image; an unreadable card gives empty text instead.
+      first = (await eng.ml.recognize(src)).text ?? '';
+    } catch {
+      throw loadError(); // Bug 3
+    }
+    const texts: string[] = [first];
     if (!opts.strict) return texts;
 
     size = size ?? (await sizeOf(src));

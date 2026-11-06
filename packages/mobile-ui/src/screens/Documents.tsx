@@ -7,7 +7,7 @@ import { Image, StyleSheet, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import {
-  applyReread, canReread, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, maskAadhaar, MAX_REREADS, normalizeAadhaar, normalizePan, validateAadhaar,
+  applyReread, canReread, canSendForHandCheck, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, maskAadhaar, MAX_REREADS, normalizeAadhaar, normalizePan, validateAadhaar,
   readBlocked, sameDocument, takeDocumentNumber, validateDocFile, validatePan, type DocFile, type DocKind, type DocMime, type FieldCheck, type KycField,
   type KycState, type ReadResult,
 } from '@wealthfire/core';
@@ -41,6 +41,33 @@ const OTHER_CARD: Partial<Record<DocKind, DocKind>> = { aadhaar: 'pan', pan: 'aa
 function readFailMessage(f: KycField, r: Extract<ReadResult, { ok: false }>): string {
   if (r.reason === 'locked') return DOC_MESSAGES.pdfLockedPhone;
   return r.message || cantRead(f);
+}
+
+/** Bug 2: a failed read where the reader itself can't work (native engine missing, OCR files failed to load). */
+export const readerDown = (r: Extract<ReadResult, { ok: false }>): boolean =>
+  r.reason === 'network' || r.message === DOC_MESSAGES.readerUnavailable;
+/** Counts a failed read in the store (core 'read-failed'). */
+export type OnReadFailed = (field: KycField, unavailable: boolean) => void;
+/** Sends the documents for a hand check (core 'send-for-hand-check'). false: the store refused it. */
+export type OnHandCheck = () => boolean;
+const HAND_CHECK_FAILED = 'Could not send your documents. Try again.';
+
+/**
+ * Bug 2: after repeated failed reads (or with the reader unavailable) the user can send the documents for a hand
+ * check instead of being stuck. Shown on Upload documents and Check numbers, same as web.
+ */
+function HandCheck({ kyc, docs, busy, onHandCheck }: { kyc: KycState; docs: Docs; busy: boolean; onHandCheck: OnHandCheck }) {
+  const [error, setError] = useState('');
+  if (!canSendForHandCheck(kyc)) return null;
+  const allDocs = Boolean(docs.selfie && docs.aadhaar && docs.pan);
+  return (
+    <View testID="feature-onboard-hand-check">
+      <Msg text={DOC_MESSAGES.handCheckNote} tone="muted" />
+      <Btn title={DOC_MESSAGES.handCheckButton} disabled={busy || !allDocs}
+        onPress={() => { if (!onHandCheck()) setError(HAND_CHECK_FAILED); }} />
+      {error ? <Msg text={error} /> : null}
+    </View>
+  );
 }
 
 /** Valid individual PAN / Aadhaar read: null. A company (non-individual) PAN card gets its own message (review bug 4). */
@@ -198,7 +225,9 @@ export function DocSlot({ kind, doc, onChange, number, error: parentError, remov
 
 // ---------- Upload documents step ----------
 
-export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, previous, onRead }: {
+export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, previous, onRead, onReadFailed, onHandCheck }: {
+  onReadFailed: OnReadFailed;
+  onHandCheck: OnHandCheck;
   docs: Docs;
   /** Entered name (Your details), checked against the name on each card. */
   name: CardName | undefined;
@@ -231,9 +260,19 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
   async function readOne(field: KycField, expected: string): Promise<{ value: string; nameMatch: boolean | null } | null> {
     const doc = docs[FIELD_DOC[field]];
     if (!doc) return null;
-    const r = await reader.read(doc, field, { strict: false, expected, name });
+    let r: ReadResult;
+    try {
+      r = await reader.read(doc, field, { strict: false, expected, name });
+    } catch {
+      // The reader itself failed (same as reason 'network', same as web).
+      onReadFailed(field, true); setError(DOC_MESSAGES.couldNotReadDocs); return null;
+    }
     // Reader messages (not a PAN card, masked Aadhaar, reading unavailable, unreadable) go under that document's slot.
-    if (!r.ok) { if (r.reason === 'network') setError(r.message); else setErrors((e) => ({ ...e, [field]: readFailMessage(field, r) })); return null; }
+    if (!r.ok) {
+      onReadFailed(field, readerDown(r)); // Bug 2: counts towards the hand check
+      if (r.reason === 'network') setError(r.message); else setErrors((e) => ({ ...e, [field]: readFailMessage(field, r) }));
+      return null;
+    }
     const v = field === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value);
     const bad = readValueError(field, v);
     if (bad) { setErrors((e) => ({ ...e, [field]: bad })); return null; }
@@ -295,14 +334,16 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
       {busy ? <Msg text={READING} tone="muted" /> : null}
       {error ? <Msg text={error} /> : null}
       <Btn primary title="Continue" disabled={!ready || busy} onPress={() => void continueOn()} />
+      <HandCheck kyc={kyc} docs={docs} busy={busy} onHandCheck={onHandCheck} />
     </Screen>
   );
 }
 
 // ---------- Check your numbers step ----------
 
-function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, onChange, onDoc }: {
+function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, onChange, onDoc, onReadFailed }: {
   check: FieldCheck;
+  onReadFailed: OnReadFailed;
   name: CardName | undefined;
   doc: DocFile | undefined;
   /** The other card's file: "Upload again" must not take the same file (sameFile). */
@@ -336,7 +377,7 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
     let ok = false;
     try {
       const r = await reader.read(withDoc, f, { strict: true, expected: check.typed, name });
-      if (!r.ok) { setError(readFailMessage(f, r)); return; }
+      if (!r.ok) { onReadFailed(f, readerDown(r)); setError(readFailMessage(f, r)); return; }
       const v = f === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value);
       const bad = readValueError(f, v);
       if (bad) { setError(bad); return; }
@@ -345,6 +386,7 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
       if (newDoc) { deleteDoc(doc); onDoc(newDoc); }
       onChange(applyReread(check, final, v, r.nameMatch), true);
     } catch {
+      onReadFailed(f, true); // the reader itself failed (same as web)
       setError(DOC_MESSAGES.couldNotReadDocs);
     } finally {
       if (!ok && newDoc) deleteDoc(newDoc);
@@ -449,8 +491,12 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
   );
 }
 
-export function CheckStep({ checks, setChecks, docs, setDoc, name, onRereadUsed, onConfirm, onBack, confirming, error }: {
+export function CheckStep({ checks, setChecks, docs, setDoc, name, kyc, onRereadUsed, onReadFailed, onHandCheck, onConfirm, onBack, confirming, error }: {
   checks: FieldCheck[];
+  /** Stored KYC state, for the hand-check button (Bug 2). */
+  kyc: KycState;
+  onReadFailed: OnReadFailed;
+  onHandCheck: OnHandCheck;
   /** Entered name, sent with re-reads for the name check. */
   name: CardName | undefined;
   setChecks: (cs: FieldCheck[]) => void;
@@ -478,7 +524,7 @@ export function CheckStep({ checks, setChecks, docs, setDoc, name, onRereadUsed,
       {checks.map((c, i) => (
         <FieldCard key={c.field} check={c} typedField={c.field} doc={docs[FIELD_DOC[c.field]]} hidden={hidden} setHidden={setHidden}
           otherDoc={docs[c.field === 'pan' ? 'aadhaar' : 'pan']} name={name}
-          onDoc={(d) => setDoc(FIELD_DOC[c.field], d)}
+          onDoc={(d) => setDoc(FIELD_DOC[c.field], d)} onReadFailed={onReadFailed}
           onChange={(next, reread) => {
             setChecks(checks.map((x, j) => (j === i ? next : x)));
             if (reread) onRereadUsed(c.field);
@@ -486,6 +532,7 @@ export function CheckStep({ checks, setChecks, docs, setDoc, name, onRereadUsed,
       ))}
       {error ? <Msg text={error} /> : null}
       <Btn primary title="Confirm" disabled={confirming} onPress={onConfirm} />
+      <HandCheck kyc={kyc} docs={docs} busy={confirming} onHandCheck={onHandCheck} />
       <Link title="Back" onPress={onBack} />
     </Screen>
   );

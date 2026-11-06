@@ -417,7 +417,11 @@ export function SettingsScreen() {
         <Text style={s.muted}>Stored only on this phone.</Text>
         <Btn danger title="Delete all data" onPress={() => Alert.alert('Delete all data?', 'This cannot be undone.', [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Delete', style: 'destructive', onPress: () => { replace(emptyData()); setMsg('All data deleted.'); } },
+          { text: 'Delete', style: 'destructive', onPress: () => {
+            replace(emptyData());
+            void clearPickerCache(); // Bug 6: same as Sign out, no picked documents left behind.
+            setMsg('All data deleted.');
+          } },
         ])} />
       </Card>
       {msg ? <Text style={s.text} accessibilityLiveRegion="polite">{msg}</Text> : null}

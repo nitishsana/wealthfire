@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { analyze, deserialize, serialize, STORAGE_KEY, type Analysis, type AppData } from '@wealthfire/core';
 import { previewData } from './preview';
 
@@ -13,9 +13,14 @@ const Ctx = createContext<Store | null>(null);
 
 /** Data lives only in this browser (localStorage). Nothing is sent to a server. */
 export function DataProvider({ children }: { children: ReactNode }) {
+  // First load: the "after a reload" rules apply (deserialize's default).
   const [data, setData] = useState<AppData>(() => previewData() ?? deserialize(localStorage.getItem(STORAGE_KEY)));
+  // The state last taken from another tab. It is never written back, even when loading it changed it
+  // (review bug 1: two tabs would otherwise keep rewriting each other's step).
+  const fromOtherTab = useRef<AppData | null>(null);
 
   useEffect(() => {
+    if (data === fromOtherTab.current) return;
     // Skip identical writes so a change received from another tab is not written straight back.
     const json = serialize(data);
     if (localStorage.getItem(STORAGE_KEY) !== json) localStorage.setItem(STORAGE_KEY, json);
@@ -26,7 +31,13 @@ export function DataProvider({ children }: { children: ReactNode }) {
     function onStorage(e: StorageEvent) {
       if (e.storageArea !== localStorage || (e.key !== STORAGE_KEY && e.key !== null) || e.newValue === e.oldValue) return;
       const next = e.newValue;
-      setData((d) => (next === serialize(d) ? d : deserialize(next)));
+      setData((d) => {
+        if (next === serialize(d)) return d;
+        // Not a reload: the other tab's state is taken as it is, without the reload-only rules.
+        const n = deserialize(next, { reload: false });
+        fromOtherTab.current = n;
+        return n;
+      });
     }
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);

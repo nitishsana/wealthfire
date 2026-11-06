@@ -3,7 +3,7 @@
 // pdf.js renders page 1 of a PDF to that canvas first. Both load lazily on the first read.
 // Privacy (C5): images and text stay in memory. OCR text is returned to the caller only; it is
 // never stored, logged or sent anywhere.
-import type { DocFile, TextExtractor } from '@wealthfire/core';
+import { OCR_LOAD_CODE, type DocFile, type TextExtractor } from '@wealthfire/core';
 import type { Worker as TesseractWorker } from 'tesseract.js';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
@@ -44,11 +44,26 @@ let passCount = 1;
 
 const assetUrl = (path: string) => new URL(`${import.meta.env.BASE_URL}ocr/${path}`, window.location.href).href;
 
+/**
+ * Review bug 3: the OCR files (Tesseract worker/core/language, pdf.js module/worker) failed to load.
+ * Code 'ocr-load' makes the core reader answer reason 'network' (couldNotReadDocs), not "upload a clearer photo".
+ */
+function ocrLoadError(cause: unknown): Error {
+  return Object.assign(new Error(OCR_LOAD_CODE), { code: OCR_LOAD_CODE, cause });
+}
+
+/** pdf.js could not start its worker (it then tries a "fake worker", which also needs the worker file). */
+function isPdfWorkerLoadError(err: unknown): boolean {
+  const msg = err && typeof err === 'object' ? (err as { message?: unknown }).message : err;
+  return typeof msg === 'string' && /fake worker|failed to fetch dynamically imported module|importing a module script failed/i.test(msg);
+}
+
 let workerPromise: Promise<TesseractWorker> | null = null;
 
 /** One Tesseract worker for the page, created on first use and reused. */
 function getWorker(): Promise<TesseractWorker> {
   if (!workerPromise) {
+    // Any failure here is loading the engine (module import, worker, core or language file), never the photo.
     workerPromise = import('tesseract.js')
       .then(({ createWorker, OEM }) =>
         createWorker('eng', OEM.LSTM_ONLY, {
@@ -64,7 +79,7 @@ function getWorker(): Promise<TesseractWorker> {
       )
       .catch((err: unknown) => {
         workerPromise = null; // allow a retry on the next read
-        throw err;
+        throw ocrLoadError(err);
       });
   }
   return workerPromise;
@@ -140,7 +155,12 @@ function asPasswordError(err: unknown, password: string | undefined): Error | nu
 
 /** Page 1 of a PDF on a canvas. `password` (e-Aadhaar / e-PAN) is used for this one open only, never kept. */
 async function pdfToCanvas(blob: Blob, password: string | undefined): Promise<HTMLCanvasElement> {
-  const pdfjs = await import('pdfjs-dist');
+  let pdfjs: typeof import('pdfjs-dist');
+  try {
+    pdfjs = await import('pdfjs-dist');
+  } catch (err) {
+    throw ocrLoadError(err);
+  }
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const task = pdfjs.getDocument({
     data: new Uint8Array(await blob.arrayBuffer()),
@@ -157,7 +177,7 @@ async function pdfToCanvas(blob: Blob, password: string | undefined): Promise<HT
     try {
       pdf = await task.promise;
     } catch (err) {
-      throw asPasswordError(err, password) ?? err;
+      throw asPasswordError(err, password) ?? (isPdfWorkerLoadError(err) ? ocrLoadError(err) : err);
     }
     const page = await pdf.getPage(1);
     const viewport = page.getViewport({ scale: PDF_SCALE });

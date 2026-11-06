@@ -79,6 +79,18 @@ export function readBlocked(kyc: KycState, field: KycField): boolean {
   return kyc.returnedFromCheck && kyc.rereads[field] >= MAX_REREADS;
 }
 
+/** Failed reads of one card after which the user may send the documents for a hand check. */
+export const HAND_CHECK_AFTER_FAILS = 2;
+
+/**
+ * Hand-check fallback: a card failed to read HAND_CHECK_AFTER_FAILS times (or the reader is
+ * unavailable, which the `read-failed` event records as 2). Show DOC_MESSAGES.handCheckNote and
+ * DOC_MESSAGES.handCheckButton, which dispatches `send-for-hand-check`.
+ */
+export function canSendForHandCheck(kyc: KycState): boolean {
+  return kyc.failedReads.pan >= HAND_CHECK_AFTER_FAILS || kyc.failedReads.aadhaar >= HAND_CHECK_AFTER_FAILS;
+}
+
 export function canReread(c: FieldCheck): boolean {
   return c.rereads < MAX_REREADS;
 }
@@ -138,6 +150,7 @@ export function reviewFields(cs: FieldCheck[]): ReviewRecord['fields'] {
  * as different only when the masked numbers differ (masks can hide a difference in the middle).
  */
 export function reviewReasonText(field: ReviewRecord['fields'][number]): string {
+  if (field.handCheck === true) return "Couldn't be read";
   if (field.nameNotChecked === true && field.nameMismatch !== true) {
     return field.typedMasked === field.readMasked ? 'Name not checked' : "Number doesn't match, name not checked";
   }

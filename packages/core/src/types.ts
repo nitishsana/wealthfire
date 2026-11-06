@@ -131,7 +131,8 @@ export interface ReviewRecord {
   sentAt: string;
   /** `nameMismatch`: the name on that card didn't match the name the user entered. */
   /** `nameNotChecked`: the name couldn't be checked (e.g. typed in an Indian script), so a person checks it. */
-  fields: { field: KycField; typedMasked: string; readMasked: string; nameMismatch?: true; nameNotChecked?: true }[];
+  /** `handCheck`: the card couldn't be read (readMasked is 'unreadable'); the team checks the documents by hand. */
+  fields: { field: KycField; typedMasked: string; readMasked: string; nameMismatch?: true; nameNotChecked?: true; handCheck?: true }[];
   decision: { result: 'approved' | 'rejected'; reason: string | null; at: string } | null;
 }
 
@@ -143,6 +144,11 @@ export interface KycState {
   reader: DocReaderId | null;
   /** max 2 each */
   rereads: { pan: number; aadhaar: number };
+  /**
+   * Failed reads per card (0..9). At 2 or more (or once the reader is unavailable) the user may
+   * send the documents for a hand check (canSendForHandCheck). Reset by a successful Check numbers → Confirm.
+   */
+  failedReads: { pan: number; aadhaar: number };
   review: ReviewRecord | null;
   /** time all 3 documents were added (the files themselves are never stored) */
   documentsAt: string | null;

@@ -287,6 +287,18 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   // Name from Your details, checked against the name on each card (PAN and Aadhaar reads and re-reads).
   const cardName = ob.identity ? { first: ob.identity.firstName, last: ob.identity.lastName } : undefined;
   const clearKyc = () => { dropDocs(docsRef.current); setDocs({}); setChecks(null); setPrevChecks(null); setAadhaar(''); };
+  // Bug 2: every failed read is counted; after enough of them (or with the reader unavailable) a hand check is offered.
+  const onReadFailed = (field: KycField, unavailable: boolean) =>
+    dispatch(unavailable ? { type: 'read-failed', field, unavailable: true } : { type: 'read-failed', field });
+  // Sends all three documents for a hand check: Under review, then the done screen (same as web).
+  const onHandCheck = (): boolean => {
+    if (!docs.selfie || !docs.aadhaar || !docs.pan) return false;
+    const ev: OnboardingEvent = { type: 'send-for-hand-check', at: new Date().toISOString() };
+    if (onboardingReducer(ob, ev).step !== 'done') return false;
+    dispatch(ev);
+    clearKyc(); // documents, checks and the full Aadhaar are dropped when onboarding completes
+    return true;
+  };
 
   // After a restart the full Aadhaar is gone (never stored). Before the Aadhaar OTP passes: back to Your details.
   // After it passes the Aadhaar is locked: Upload documents asks for the number again instead (design C1).
@@ -342,7 +354,7 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   if (ob.step === 'documents' && ob.aadhaar) {
     return (
       <DocumentsStep docs={docs} setDoc={setDoc} typed={{ pan: ob.identity?.pan ?? '', aadhaar }} name={cardName} verifiedLast4={ob.aadhaar.last4}
-        kyc={ob.kyc} previous={prevChecks}
+        kyc={ob.kyc} previous={prevChecks} onReadFailed={onReadFailed} onHandCheck={onHandCheck}
         onRead={(cs, full) => {
           setAadhaar(full); // re-typed after a reload / Redo documents: kept for this session only
           // Re-reads already used this session or before a reload still count (Req 8.8), same as web.
@@ -358,6 +370,7 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   if (ob.step === 'check' && checks) {
     return (
       <CheckStep checks={checks} setChecks={setChecks} docs={docs} setDoc={setDoc} name={cardName} confirming={false} error={confirmError}
+        kyc={ob.kyc} onReadFailed={onReadFailed} onHandCheck={onHandCheck}
         onRereadUsed={(field) => dispatch({ type: 'reread-used', field })}
         onBack={() => { setPrevChecks(checks); setChecks(null); dispatch({ type: 'back-to-documents' }); }}
         onConfirm={() => {

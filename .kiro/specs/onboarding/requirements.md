@@ -241,3 +241,10 @@ Reason: three review rounds showed that on-device reading of card photos cannot 
 5. Settings → Account SHALL show "Pre-verified — final KYC pending", "Under review", "Verified" or "Review rejected".
 6. Stored data claiming **Verified** without an approved review decision SHALL be lowered to **Pre-verified** on load.
 7. Filter fixes from round 3: every typed first-name word must match the holder's leading words in order (a shared prefix such as Mohammed/Mohd/Md/Syed/Shaik/Sk/Sri/Shri alone goes to review); an unlabelled pre-2017 PAN needs two name lines before the date (else review); a second date-of-birth or gender line in one Aadhaar or PAN photo counts as more than one card; S/O read as "5 0" is a relation line.
+
+
+## Pre-merge fixes 2026-11-06 (full-flow bug check, approved by Nitish)
+
+1. **Hand-check fallback.** WHEN a PAN or Aadhaar document fails to read twice (or the app build cannot read documents at all) THEN the screen SHALL show "We couldn't read your card. Our team can check your documents by hand instead." and a button "Send my documents for a hand check". It SHALL finish onboarding as **Under review**, so no user is locked out of the app.
+2. Several open browser tabs SHALL NOT reset each other's onboarding step.
+3. When the reading files cannot load (offline, blocked), the message SHALL be "Could not read your documents. Check your connection and try again.", not a request for a clearer photo.

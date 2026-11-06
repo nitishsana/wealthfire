@@ -4,7 +4,7 @@
 // AppData keeps the final PAN, Aadhaar last 4 and masked review fields.
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
-  applyReread, canReread, canSend, checkOutcome, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
+  applyReread, canReread, canSend, canSendForHandCheck, checkOutcome, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
   maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer, panSurnameWarning,
   readBlocked, readsLeft, resendIn, reviewFields, sameDocument, takeDocumentNumber, validateAadhaar, validateEmail, validateMobile, validateName, validatePan,
   type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OnboardingEvent,
@@ -32,6 +32,8 @@ const DOC_KINDS: DocKind[] = ['selfie', 'aadhaar', 'pan'];
 export const UNDER_REVIEW_TEXT = "Your account is open. We're checking your details by hand, usually within 1 working day. You can use the planner meanwhile.";
 export const RETYPE_AADHAAR_LABEL = 'Enter your Aadhaar number again';
 export const CONFIRM_FAILED = 'Could not confirm your numbers. Try again.';
+/** Same text as phones (mobile-ui Documents HAND_CHECK_FAILED). */
+export const HAND_CHECK_FAILED = 'Could not send your documents. Try again.';
 const couldNotRead = DOC_MESSAGES.unreadable;
 
 /** Shared match label ("✅ Match") with the emoji hidden from screen readers. */
@@ -40,7 +42,13 @@ function MatchLabel({ matched }: { matched: boolean }) {
   return <><span aria-hidden="true">{icon}</span>{rest.join('')}</>;
 }
 
-type ReadOutcome = { value: string; nameMatch: boolean | null } | { error: string; locked?: boolean };
+/**
+ * `failed`: the reader returned !ok (or threw), so a 'read-failed' event is sent.
+ * `unavailable`: reading can't work here at all (reader unavailable in this build, or the OCR files didn't load).
+ */
+type ReadOutcome = { value: string; nameMatch: boolean | null } | { error: string; locked?: boolean; failed?: { unavailable: boolean } };
+/** Sends 'read-failed' for one card (review bug 2). */
+type ReadFailed = (field: KycField, unavailable: boolean) => void;
 /** The name entered in "Your details", checked against the name on each card. */
 type PersonName = { first: string; last: string };
 type ReadValue = { value: string; nameMatch: boolean | null };
@@ -59,17 +67,37 @@ async function readNumber(doc: DocFile, field: KycField, strict: boolean, expect
       strict, expected, ...(name ? { name } : {}), ...(password ? { password } : {}),
     });
     if (!r.ok && r.reason === 'locked') {
-      return { error: r.message || (password ? DOC_MESSAGES.wrongPdfPassword : DOC_MESSAGES.pdfLocked), locked: true };
+      // Counts as a failed read too (same as phones).
+      return { error: r.message || (password ? DOC_MESSAGES.wrongPdfPassword : DOC_MESSAGES.pdfLocked), locked: true, failed: { unavailable: false } };
     }
     // notPan / notAadhaar / maskedAadhaar / companyPan / readerUnavailable / unreadable / file / network messages come from the reader.
-    if (!r.ok) return { error: r.message || couldNotRead(field) };
+    if (!r.ok) {
+      const unavailable = r.reason === 'network' || (r.reason === 'unreadable' && r.message === DOC_MESSAGES.readerUnavailable);
+      return { error: r.message || couldNotRead(field), failed: { unavailable } };
+    }
     if (field === 'pan' && isCompanyPan(r.value)) return { error: DOC_MESSAGES.companyPan };
     const bad = field === 'pan' ? validatePan(r.value) : validateAadhaar(r.value);
     if (bad) return { error: couldNotRead(field) };
     return { value: field === 'pan' ? normalizePan(r.value) : normalizeAadhaar(r.value), nameMatch: r.nameMatch ?? null };
   } catch {
-    return { error: DOC_MESSAGES.couldNotReadDocs };
+    // The reader itself failed (same message as reason 'network').
+    return { error: DOC_MESSAGES.couldNotReadDocs, failed: { unavailable: true } };
   }
+}
+
+/** Review bug 2: a way past cards that can't be read. Shown once canSendForHandCheck(kyc) allows it. */
+function HandCheck({ disabled, onSend }: { disabled: boolean; onSend: () => boolean }) {
+  const [error, setError] = useState('');
+  return (
+    <div className="hand-check" data-feature="onboard-hand-check">
+      <p className="muted" id="hand-check-note">{DOC_MESSAGES.handCheckNote}</p>
+      <button type="button" className="btn" disabled={disabled} aria-describedby="hand-check-note"
+        onClick={() => setError(onSend() ? '' : HAND_CHECK_FAILED)}>
+        {DOC_MESSAGES.handCheckButton}
+      </button>
+      {error && <p className="error" role="alert">{error}</p>}
+    </div>
+  );
 }
 
 type ProgressSubscribe = (cb: (p: number) => void) => () => void;
@@ -160,6 +188,27 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lostCheck]);
 
+  /** Onboarding is done: drop the full Aadhaar, documents and checks (Req 4.3 / 7.10) and free the text engine (C3). */
+  const finishSession = () => {
+    dropSessionData();
+    const term = (readerModule as unknown as { terminateOcr?: unknown }).terminateOcr;
+    if (typeof term === 'function') void Promise.resolve(term()).catch(() => undefined);
+  };
+  const readFailed: ReadFailed = (field, unavailable) =>
+    dispatch({ type: 'read-failed', field, ...(unavailable ? { unavailable: true } : {}) });
+  // Review bug 2: after repeated failed reads (or no reader at all) the documents can go to a hand check.
+  const handCheck = canSendForHandCheck(ob.kyc)
+    ? () => {
+      const ev: OnboardingEvent = { type: 'send-for-hand-check', at: new Date().toISOString() };
+      // Refused (e.g. no identity or verified Aadhaar yet): HandCheck shows HAND_CHECK_FAILED.
+      if (onboardingReducer(ob, ev).step !== 'done') return false;
+      onCompleting();
+      dispatch(ev);
+      finishSession();
+      return true;
+    }
+    : undefined;
+
   const heading = (text: string) => <h1 ref={headingRef} tabIndex={-1}>{text}</h1>;
   // Name check: the name from "Your details" is compared with the name on each card.
   const personName: PersonName | undefined = ob.identity ? { first: ob.identity.firstName, last: ob.identity.lastName } : undefined;
@@ -243,7 +292,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         {heading('Upload documents')}
         <p className="intro">{DOC_MESSAGES.uploadIntro}</p>
         <Documents docs={docs} setDoc={setDoc} pan={ob.identity?.pan ?? ''} aadhaar={aadhaar} verifiedLast4={ob.aadhaar?.last4 ?? ''}
-          name={personName}
+          name={personName} onReadFailed={readFailed} handCheck={handCheck}
           // Bug 1: after Back from Check numbers, a field with no re-reads left is not read again;
           // its earlier read result (kept in `checks`) is used instead.
           blocked={{ pan: readBlocked(ob.kyc, 'pan'), aadhaar: readBlocked(ob.kyc, 'aadhaar') }}
@@ -265,7 +314,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
     body = (
       <section data-feature="onboard-check" aria-label="Check your numbers">
         {heading('Check your numbers')}
-        <CheckNumbers checks={checks} docs={docs} personName={personName} setDoc={setDoc}
+        <CheckNumbers checks={checks} docs={docs} personName={personName} setDoc={setDoc} onReadFailed={readFailed} handCheck={handCheck}
           left={{ pan: readsLeft(ob.kyc, 'pan'), aadhaar: readsLeft(ob.kyc, 'aadhaar') }}
           onChange={(cs, reread) => { setChecks(cs); if (reread) dispatch({ type: 'reread-used', field: reread }); }}
           onBack={() => dispatch({ type: 'back-to-documents' })}
@@ -277,11 +326,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
             if (onboardingReducer(ob, ev).step !== 'done') return false;
             onCompleting();
             dispatch(ev);
-            // Req 4.3 / 7.10: drop the full Aadhaar, documents and checks.
-            dropSessionData();
-            // C3: free the on-device text engine once onboarding completes (if the reader offers it).
-            const term = (readerModule as unknown as { terminateOcr?: unknown }).terminateOcr;
-            if (typeof term === 'function') void Promise.resolve(term()).catch(() => undefined);
+            finishSession();
             return true;
           }} />
       </section>
@@ -318,8 +363,11 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
   );
 }
 
-function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, prior, onRead }: {
+function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, prior, onRead, onReadFailed, handCheck }: {
   docs: Docs;
+  onReadFailed: ReadFailed;
+  /** "Send for hand check", when canSendForHandCheck allows it. */
+  handCheck: (() => boolean) | undefined;
   setDoc: (k: DocKind, d: DocFile | null) => void;
   pan: string;
   /** Name from "Your details", checked against each card. */
@@ -369,7 +417,10 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
     fields.forEach((f, i) => {
       const o = outs[i]!;
       if ('value' in o) { nextResults[f] = o; nextErrors[f] = undefined; nextLocked[f] = false; }
-      else { delete nextResults[f]; nextErrors[f] = o.error; nextLocked[f] = !!o.locked; }
+      else {
+        delete nextResults[f]; nextErrors[f] = o.error; nextLocked[f] = !!o.locked;
+        if (o.failed) onReadFailed(f, o.failed.unavailable);
+      }
     });
     setResults(nextResults); setErrors(nextErrors); setLocked(nextLocked);
     if (nextResults.pan && nextResults.aadhaar) onRead(nextResults.pan, nextResults.aadhaar, verified);
@@ -436,12 +487,17 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
       )}
       <ReadingStatus active={reading} />
       <button type="button" className="btn primary" disabled={!ready || reading} onClick={go}>Continue</button>
+      {/* All three documents must be added before they can go for a hand check. */}
+      {handCheck && <HandCheck disabled={reading || !DOC_KINDS.every((k) => docs[k])} onSend={handCheck} />}
     </>
   );
 }
 
-function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack, onConfirm }: {
+function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack, onConfirm, onReadFailed, handCheck }: {
   checks: FieldCheck[];
+  onReadFailed: ReadFailed;
+  /** "Send for hand check", when canSendForHandCheck allows it. */
+  handCheck: (() => boolean) | undefined;
   personName: PersonName | undefined;
   docs: Docs;
   /** Stored re-reads left per field (readsLeft). */
@@ -465,7 +521,7 @@ function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack
       <p className="intro" role="status">{intro}</p>
       {checks.map((c) => (
         <FieldRow key={c.field} check={c} doc={docs[c.field]} otherDoc={docs[c.field === 'pan' ? 'aadhaar' : 'pan']} personName={personName} storedLeft={left[c.field]}
-          setDoc={(d) => setDoc(c.field, d)}
+          setDoc={(d) => setDoc(c.field, d)} onReadFailed={onReadFailed}
           onChange={(next, reread) => onChange(checks.map((x) => (x.field === c.field ? next : x)), reread ? c.field : undefined)} />
       ))}
       <div className="row">
@@ -474,12 +530,14 @@ function CheckNumbers({ checks, docs, personName, setDoc, left, onChange, onBack
         <button type="button" className="link-btn" onClick={onBack}>Back</button>
       </div>
       {confirmError && <p id="chk-confirm-err" className="error" role="alert">{confirmError}</p>}
+      {handCheck && <HandCheck disabled={!DOC_KINDS.every((k) => docs[k])} onSend={handCheck} />}
     </>
   );
 }
 
-function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onChange }: {
+function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onChange, onReadFailed }: {
   check: FieldCheck;
+  onReadFailed: ReadFailed;
   /** Name from "Your details", checked again on every re-read. */
   personName: PersonName | undefined;
   doc: DocFile | null;
@@ -532,7 +590,11 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
     // Demo reader: the number the document "really" holds is the one first typed.
     const r = await readNumber(d, c.field, true, c.typed, personName, password);
     setReading(false);
-    if ('error' in r) { setError(r.error); setPdfLocked(!!r.locked); return r.locked ? 'locked' : 'failed'; }
+    if ('error' in r) {
+      setError(r.error); setPdfLocked(!!r.locked);
+      if (r.failed) onReadFailed(c.field, r.failed.unavailable);
+      return r.locked ? 'locked' : 'failed';
+    }
     setPdfLocked(false);
     onChange(applyReread(c, final, r.value, r.nameMatch), true);
     return 'ok';

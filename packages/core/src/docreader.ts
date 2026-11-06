@@ -83,6 +83,10 @@ export const DOC_MESSAGES = {
   donePreVerified: 'Your documents match. A final KYC check confirms your account before you can invest.',
   /** Done screen after a final KYC approval (status 'verified'). Same text on web and phones. */
   doneVerified: 'Your final KYC check is complete. Your account is verified.',
+  /** Hand-check fallback (canSendForHandCheck): button that dispatches `send-for-hand-check`. */
+  handCheckButton: 'Send my documents for a hand check',
+  /** Shown above handCheckButton. */
+  handCheckNote: "We couldn't read your card. Our team can check your documents by hand instead.",
   unreadable: (field: KycField) =>
     `We couldn't read your ${field === 'pan' ? 'PAN' : 'Aadhaar'} card. Upload a clearer photo or PDF.`,
 } as const;
@@ -153,6 +157,9 @@ export type TextExtractor = (doc: DocFile, opts: { strict: boolean; password?: s
 /** Error codes a TextExtractor may throw (as `Error` with a `code` property) for a password-protected PDF. */
 export const PDF_LOCKED_CODE = 'pdf-locked';
 export const PDF_BAD_PASSWORD_CODE = 'pdf-bad-password';
+/** Error codes a TextExtractor may throw when the OCR engine files couldn't load, or the network failed. */
+export const OCR_LOAD_CODE = 'ocr-load';
+export const NETWORK_CODE = 'network';
 
 function errorCode(e: unknown): unknown {
   return typeof e === 'object' && e !== null && 'code' in e ? (e as { code: unknown }).code : undefined;
@@ -177,6 +184,8 @@ export function createOnDeviceReader(extract: TextExtractor): DocumentReader {
         const code = errorCode(e);
         if (code === PDF_LOCKED_CODE) return { ok: false, reason: 'locked', message: DOC_MESSAGES.pdfLocked };
         if (code === PDF_BAD_PASSWORD_CODE) return { ok: false, reason: 'locked', message: DOC_MESSAGES.wrongPdfPassword };
+        // The engine didn't load (offline, wrong asset path, blocked): not the photo's fault.
+        if (code === OCR_LOAD_CODE || code === NETWORK_CODE) return { ok: false, reason: 'network', message: DOC_MESSAGES.couldNotReadDocs };
         return unreadable;
       }
       const parse = field === 'pan' ? parsePanText : parseAadhaarText;

@@ -26,7 +26,20 @@ export function emptyOnboarding(): OnboardingState {
 
 /** No document check done yet. */
 export function emptyKyc(): KycState {
-  return { match: null, status: null, reader: null, rereads: { pan: 0, aadhaar: 0 }, review: null, documentsAt: null, returnedFromCheck: false };
+  return {
+    match: null, status: null, reader: null, rereads: { pan: 0, aadhaar: 0 }, failedReads: { pan: 0, aadhaar: 0 },
+    review: null, documentsAt: null, returnedFromCheck: false,
+  };
+}
+
+/** Options for sanitizeOnboarding / deserialize. */
+export interface SanitizeOptions {
+  /**
+   * true (default): this is a fresh app load, so the "after a reload" rules run (a stored
+   * Check numbers step opens on Upload documents, returnedFromCheck is cleared).
+   * false: e.g. a cross-tab storage update; only the safety rules run.
+   */
+  reload?: boolean;
 }
 
 const STEPS: readonly OnboardingStep[] = ['signin', 'otp', 'identity', 'aadhaar-otp', 'documents', 'check', 'done'];
@@ -38,9 +51,15 @@ const STATUSES: readonly KycStatus[] = ['pre-verified', 'verified', 'under-revie
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter(isStr) : []);
 const pick = <T extends string>(list: readonly T[], v: unknown): T | null => (list.includes(v as T) ? (v as T) : null);
-const rereadCount = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.min(2, Math.max(0, Math.floor(v))) : 0);
+const clampCount = (v: unknown, max: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(0, Math.floor(v))) : 0);
+const rereadCount = (v: unknown): number => clampCount(v, 2);
+/** Stored failed-read counts are kept within 0..9. */
+export const MAX_FAILED_READS = 9;
 
 /** A stored mask: masked shape only, and never a run of 5+ digits (so never a full Aadhaar). */
+/** readMasked of a hand-check review row: the card couldn't be read. */
+export const UNREADABLE_MASK = 'unreadable';
+
 export function isSafeMask(s: unknown): s is string {
   return isStr(s) && /^[A-Z0-9X* ]{4,14}$/.test(s) && !/\d{5,}/.test(s);
 }
@@ -51,11 +70,13 @@ function sanitizeReview(raw: unknown): ReviewRecord | null {
   if (!isStr(r.id) || !isStr(r.sentAt)) return null;
   const fields = (Array.isArray(r.fields) ? r.fields : [])
     .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
-    .filter((f) => (f.field === 'pan' || f.field === 'aadhaar') && isSafeMask(f.typedMasked) && isSafeMask(f.readMasked))
+    .filter((f) => (f.field === 'pan' || f.field === 'aadhaar') && isSafeMask(f.typedMasked) &&
+      (f.handCheck === true ? f.readMasked === UNREADABLE_MASK : isSafeMask(f.readMasked)))
     .map((f) => ({
       field: f.field as KycField, typedMasked: f.typedMasked as string, readMasked: f.readMasked as string,
       ...(f.nameMismatch === true ? { nameMismatch: true as const } : {}),
       ...(f.nameNotChecked === true ? { nameNotChecked: true as const } : {}),
+      ...(f.handCheck === true ? { handCheck: true as const } : {}),
     }));
   const d = r.decision as Record<string, unknown> | null | undefined;
   let decision: ReviewRecord['decision'] = null;
@@ -70,6 +91,7 @@ function sanitizeKyc(raw: unknown): KycState {
   if (!raw || typeof raw !== 'object') return out;
   const k = raw as Record<string, unknown>;
   const rr = (k.rereads && typeof k.rereads === 'object' ? k.rereads : {}) as Record<string, unknown>;
+  const fr = (k.failedReads && typeof k.failedReads === 'object' ? k.failedReads : {}) as Record<string, unknown>;
   const review = sanitizeReview(k.review);
   let status = pick(STATUSES, k.status);
   // Only a final KYC approval gives 'verified': stored 'verified' without an approved review
@@ -80,6 +102,7 @@ function sanitizeKyc(raw: unknown): KycState {
     status,
     reader: pick(READERS, k.reader),
     rereads: { pan: rereadCount(rr.pan), aadhaar: rereadCount(rr.aadhaar) },
+    failedReads: { pan: clampCount(fr.pan, MAX_FAILED_READS), aadhaar: clampCount(fr.aadhaar, MAX_FAILED_READS) },
     review,
     documentsAt: isStr(k.documentsAt) ? k.documentsAt : null,
     returnedFromCheck: k.returnedFromCheck === true,
@@ -93,7 +116,8 @@ function sanitizeKyc(raw: unknown): KycState {
  * skipping a step. It is not a security boundary: storage is client-side, so a deliberate
  * hand edit can still mark Aadhaar as verified. A real provider must verify server-side.
  */
-export function sanitizeOnboarding(raw: unknown): OnboardingState {
+export function sanitizeOnboarding(raw: unknown, opts?: SanitizeOptions): OnboardingState {
+  const reload = opts?.reload !== false;
   const out = emptyOnboarding();
   if (!raw || typeof raw !== 'object') return out;
   const r = raw as Record<string, unknown>;
@@ -129,9 +153,10 @@ export function sanitizeOnboarding(raw: unknown): OnboardingState {
 
   out.kyc = sanitizeKyc(r.kyc);
 
-  // A reload never leaves a field blocked without an earlier read on screen (the reads were in
-  // memory only). Re-read counts are kept; Back within one session still counts.
-  out.kyc.returnedFromCheck = false;
+  // After a reload: never leave a field blocked without an earlier read on screen (the reads were
+  // in memory only). Re-read counts are kept; Back within one session still counts.
+  // Not on a cross-tab update (reload false): that would let a second tab reset the flag.
+  if (reload) out.kyc.returnedFromCheck = false;
 
   // Furthest step the stored data supports. Steps past aadhaar-otp need the Aadhaar OTP;
   // done needs kyc.match and kyc.status.
@@ -145,9 +170,13 @@ export function sanitizeOnboarding(raw: unknown): OnboardingState {
     : 'done';
   let want = STEPS.includes(r.step as OnboardingStep) ? (r.step as OnboardingStep) : 'signin';
   // Check numbers shows reads held in memory only, so after a reload it opens on Upload documents.
-  if (want === 'check') want = 'documents';
-  out.step = STEPS.indexOf(want) <= STEPS.indexOf(maxStep) ? want : maxStep;
-  if (out.step === 'check') out.step = 'documents';
+  // A cross-tab update (reload false) keeps a stored 'check' when the data supports it.
+  if (want === 'check' && reload) want = 'documents';
+  const clamped = STEPS.indexOf(want) > STEPS.indexOf(maxStep);
+  out.step = clamped ? maxStep : want;
+  // Safety: a step moved back to Check numbers (data missing for a later step) never opens there.
+  // Check numbers also needs the documents to have been added.
+  if (out.step === 'check' && (reload || clamped || !out.kyc.documentsAt)) out.step = 'documents';
   out.completedAt = out.step === 'done' && isStr(r.completedAt) ? r.completedAt : null;
   if (out.step === 'done' && !out.completedAt) out.completedAt = out.aadhaar?.verifiedAt ?? null;
   return out;
@@ -176,7 +205,7 @@ export function mergeExpenses(data: AppData, incoming: AppData['expenses']): App
 }
 
 /** Parse stored JSON safely. Bad or old data falls back to defaults field by field. */
-export function deserialize(json: string | null | undefined): AppData {
+export function deserialize(json: string | null | undefined, opts?: SanitizeOptions): AppData {
   const base = emptyData();
   if (!json) return base;
   try {
@@ -193,7 +222,7 @@ export function deserialize(json: string | null | undefined): AppData {
       buckets: raw.buckets ?? null,
       snapshots: Array.isArray(raw.snapshots) ? raw.snapshots : [],
       gmailLastSync: typeof raw.gmailLastSync === 'string' ? raw.gmailLastSync : null,
-      onboarding: sanitizeOnboarding(raw.onboarding),
+      onboarding: sanitizeOnboarding(raw.onboarding, opts),
     };
   } catch {
     return base;

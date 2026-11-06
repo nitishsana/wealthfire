@@ -4,8 +4,8 @@ import type {
   AppData, ContactKind, DocReaderId, KycField, KycMatch, OnboardingState, OtpProviderId, ReviewRecord,
 } from './types';
 // Circular imports (store, kyc) are safe: they are only used inside functions.
-import { emptyKyc, emptyOnboarding, isSafeMask } from './store';
-import { MAX_REREADS } from './kyc';
+import { emptyKyc, emptyOnboarding, isSafeMask, MAX_FAILED_READS, UNREADABLE_MASK } from './store';
+import { canSendForHandCheck, HAND_CHECK_AFTER_FAILS, MAX_REREADS } from './kyc';
 
 // ---------- Validators (return error text, or null when OK) ----------
 
@@ -211,6 +211,10 @@ export type OnboardingEvent =
   | { type: 'back-to-documents' }
   | { type: 'reread-used'; field: KycField }
   | { type: 'check-confirmed'; match: KycMatch; pan: string; fields: ReviewRecord['fields']; at: string }
+  /** A card could not be read (+1), or the reader isn't available in this build (unavailable: set to 2). */
+  | { type: 'read-failed'; field: KycField; unavailable?: boolean }
+  /** Hand-check fallback: send the documents to the team (only when canSendForHandCheck). */
+  | { type: 'send-for-hand-check'; at: string }
   | { type: 'review-decided'; result: 'approved' | 'rejected'; reason: string | null; at: string }
   | { type: 'redo-documents' };
 
@@ -319,10 +323,43 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
           // The device checks never give 'verified': only a final KYC confirmation does (review-decided).
           status: e.match === 'matched' ? 'pre-verified' : 'under-review',
           returnedFromCheck: false,
+          failedReads: { pan: 0, aadhaar: 0 },
           // On 'matched', a decided review from an earlier round stays as history.
           review: e.match === 'review'
             ? { id, sentAt: e.at, fields: e.fields.map((f) => ({ ...f })), decision: null }
             : s.kyc.review?.decision ? s.kyc.review : null,
+        },
+      };
+    }
+    case 'read-failed': {
+      if (s.step !== 'documents' && s.step !== 'check') return s;
+      if (e.field !== 'pan' && e.field !== 'aadhaar') return s;
+      const now = s.kyc.failedReads[e.field];
+      const next = e.unavailable ? Math.max(now, HAND_CHECK_AFTER_FAILS) : Math.min(MAX_FAILED_READS, now + 1);
+      return { ...s, kyc: { ...s.kyc, failedReads: { ...s.kyc.failedReads, [e.field]: next } } };
+    }
+    case 'send-for-hand-check': {
+      if (s.step !== 'documents' && s.step !== 'check') return s;
+      // The UI requires all three documents before offering this; no documentsAt needed.
+      if (!canSendForHandCheck(s.kyc)) return s;
+      if (!s.identity || !s.aadhaar) return s;
+      const id = reviewId(e.at);
+      if (!id) return s;
+      const typed = { pan: maskPan(s.identity.pan), aadhaar: maskAadhaar(s.aadhaar.last4) };
+      const fields: ReviewRecord['fields'] = (['pan', 'aadhaar'] as const)
+        .filter((f) => s.kyc.failedReads[f] >= HAND_CHECK_AFTER_FAILS)
+        .map((f) => ({ field: f, typedMasked: typed[f], readMasked: UNREADABLE_MASK, handCheck: true as const }));
+      return {
+        ...s,
+        step: 'done',
+        completedAt: e.at,
+        kyc: {
+          ...s.kyc,
+          match: 'review',
+          status: 'under-review',
+          returnedFromCheck: false,
+          documentsAt: s.kyc.documentsAt ?? e.at,
+          review: { id, sentAt: e.at, fields, decision: null },
         },
       };
     }
