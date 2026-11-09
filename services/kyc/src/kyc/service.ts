@@ -224,13 +224,32 @@ function minimise(w: KycCaseRecord): void {
     ...(w.evidence.esign !== undefined ? { esign: w.evidence.esign } : {}),
   };
   delete w.pendingUploads;
+  delete w.refusedUploads;
+}
+
+/**
+ * S14: clears the refusal of each kind in `cleared` (a good upload of that kind was linked), then
+ * records the newest refusal per kind in `refused`. Never touches `documents`. Also drops a legacy
+ * 'rejected' entry from `documents` for a kind that has a refusal or a fresh link.
+ */
+function applyRefusals(w: KycCaseRecord, cleared: ReadonlySet<DocumentKind>, refused: Partial<Record<DocumentKind, string>>): void {
+  const next: Partial<Record<DocumentKind, string>> = { ...(w.refusedUploads ?? {}) };
+  for (const k of cleared) delete next[k];
+  Object.assign(next, refused);
+  if (Object.keys(next).length > 0) w.refusedUploads = next;
+  else delete w.refusedUploads;
+  if (w.documents) {
+    for (const k of DOC_KINDS) {
+      if (w.documents[k]?.state === 'rejected' && (k in next || cleared.has(k))) delete w.documents[k];
+    }
+  }
 }
 
 /** True when minimise() (plus dropping the document links) would change nothing. */
 function isMinimised(r: KycCaseRecord): boolean {
   return r.panEnc === '' && r.evidence.typed.firstName === '' && r.evidence.typed.dob === '' && r.evidence.otpAadhaarLast4 === ''
     && r.evidence.kra === undefined && r.evidence.pan === undefined && r.evidence.aadhaar === undefined && r.evidence.face === undefined
-    && !r.pendingUploads?.length && !r.documents;
+    && !r.pendingUploads?.length && !r.documents && !r.refusedUploads;
 }
 
 const panMask = (last4: string): string => `XXXXXX${last4}`;
@@ -245,7 +264,8 @@ function verifiedFollowUp(rec: KycCaseRecord): 'esign' | 'kra-upload' | null {
 export function statusView(rec: KycCaseRecord | null): StatusView {
   if (!rec) return { status: null, path: null, reason: null, next: 'start', eligibleToInvest: false };
   const held = DOC_KINDS.filter((k) => rec.documents?.[k]?.state === 'linked');
-  const refused = DOC_KINDS.filter((k) => rec.documents?.[k]?.state === 'rejected');
+  // S14: refusals live in refusedUploads (a legacy 'rejected' documents entry still counts)
+  const refused = DOC_KINDS.filter((k) => rec.refusedUploads?.[k] !== undefined || rec.documents?.[k]?.state === 'rejected');
   const followUp = verifiedFollowUp(rec);
   return {
     status: rec.status,
@@ -1011,7 +1031,10 @@ export class KycService {
     const rec = await this.deps.repos.cases.get(userId);
     if (!rec || rec.status === 'rejected' || !rec.pendingUploads?.length) return;
     const done = new Set<string>();
-    const set: Partial<Record<DocumentKind, { uploadId: string; state: 'linked' | 'rejected' }>> = {};
+    // good uploads replace the linked entry and clear a refusal; a refused one never touches `documents`
+    const set: Partial<Record<DocumentKind, { uploadId: string; state: 'linked' }>> = {};
+    const refused: Partial<Record<DocumentKind, string>> = {};
+    const cleared = new Set<DocumentKind>();
     for (const p of rec.pendingUploads) {
       if (!UPLOAD_ID.test(p.uploadId)) {
         done.add(p.uploadId);
@@ -1023,11 +1046,15 @@ export class KycService {
         continue;
       }
       done.add(p.uploadId);
+      const kind = kindOf(p.uploadId);
       if (res === 'ok') {
         await this.linkUpload({ ...rec, documents: { ...rec.documents, ...set } }, p.uploadId);
-        set[kindOf(p.uploadId)] = { uploadId: p.uploadId, state: 'linked' };
+        set[kind] = { uploadId: p.uploadId, state: 'linked' };
+        delete refused[kind];
+        cleared.add(kind);
       } else {
-        set[kindOf(p.uploadId)] = { uploadId: p.uploadId, state: 'rejected' };
+        // S14: the older linked document (if any) stays linked; the refusal is recorded apart
+        refused[kind] = p.uploadId;
       }
     }
     if (done.size === 0) return;
@@ -1036,6 +1063,7 @@ export class KycService {
         w.pendingUploads = (w.pendingUploads ?? []).filter((p) => !done.has(p.uploadId));
         if (w.pendingUploads.length === 0) delete w.pendingUploads;
         if (Object.keys(set).length > 0) w.documents = { ...(w.documents ?? {}), ...set };
+        applyRefusals(w, cleared, refused);
       }, { redecide: false });
     } catch (e) {
       if (!(e instanceof KycError)) throw e; // a concurrent change: the next status read links again
@@ -1069,6 +1097,7 @@ export class KycService {
       if (!open(w)) throw new KycError('wrong_step');
       w.evidence.face = [...(w.evidence.face ?? []), r];
       w.documents = { ...(w.documents ?? {}), selfie: { uploadId, state: 'linked' } };
+      applyRefusals(w, new Set(['selfie']), {});
       if (w.pendingUploads) {
         w.pendingUploads = w.pendingUploads.filter((p) => p.uploadId !== uploadId);
         if (w.pendingUploads.length === 0) delete w.pendingUploads;

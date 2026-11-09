@@ -12,6 +12,8 @@ import {
   STEP_CONSENT,
   hasKycCase,
   isConsentRequired,
+  kycDataButtons,
+  kycDeleteDone,
   kycDocsNeeded,
   kycFinalLabel,
   kycFinalReason,
@@ -427,6 +429,51 @@ describe('wave 4b', () => {
     expect(v.next.type).toBe('retry');
     expect(kycDocsNeeded(v)).toEqual([]);
     expect(kycDocsNeeded(toKycStatusView({ status: 'under-review', reason: 'hand-check', next: 'wait' }))).toEqual(['selfie', 'aadhaar', 'pan']);
+  });
+
+  it('data buttons: withdraw hides after a withdraw on a verified case; delete that kept the record hides both', () => {
+    const fresh = { withdrew: false, deletedKept: false };
+    const verified = sv({ status: 'verified', next: { type: 'none' } });
+    expect(kycDataButtons(null, fresh)).toEqual({ withdraw: false, delete: false });
+    expect(kycDataButtons(sv({ status: null }), fresh)).toEqual({ withdraw: false, delete: false });
+    expect(kycDataButtons(verified, fresh)).toEqual({ withdraw: true, delete: true });
+    expect(kycDataButtons(verified, { ...fresh, withdrew: true })).toEqual({ withdraw: false, delete: true });
+    expect(kycDataButtons(verified, { withdrew: false, deletedKept: true })).toEqual({ withdraw: false, delete: false });
+    expect(kycDataButtons(sv({ status: 'rejected', reason: 'consent-withdrawn' }), fresh)).toEqual({ withdraw: false, delete: true });
+    expect(kycDataButtons(sv({ status: 'under-review' }), { ...fresh, withdrew: true })).toEqual({ withdraw: true, delete: true });
+  });
+
+  it('client data session: withdraw and a kept-record delete are remembered; a new case or sign-out resets', async () => {
+    const keptBody = { deleted: { documents: 1, case: 'minimised', archived: 0 }, kept: [{ what: 'audit-log', reason: 'x' }, { what: 'kyc-record', reason: 'ABCPE1234F' }] };
+    const f = fakeFetch({
+      'POST /kyc/consent/withdraw': [ok],
+      'DELETE /kyc/data': [{ status: 200, body: keptBody }, { status: 200, body: { deleted: {}, kept: [{ what: 'audit-log', reason: 'x' }] } }],
+      'POST /kyc/consent': [ok],
+      'POST /kyc/start': [{ status: 200, body: view() }],
+      'POST /auth/logout': [ok],
+    });
+    const c = client(f);
+    expect(c.dataSession()).toEqual({ withdrew: false, deletedKept: false });
+    await c.withdrawConsent();
+    expect(c.dataSession().withdrew).toBe(true);
+    await c.deleteKycData();
+    expect(c.dataSession().deletedKept).toBe(true);
+    expect(kycDeleteDone(c.dataSession())).toBe('We deleted what we could. We keep your KYC record because the law needs it.');
+    await c.startKyc(input);
+    expect(c.dataSession()).toEqual({ withdrew: false, deletedKept: false });
+    await c.deleteKycData();
+    expect(c.dataSession().deletedKept).toBe(false);
+    expect(kycDeleteDone(c.dataSession())).toBe(KYC_TEXT.deleteDone);
+    await c.withdrawConsent();
+    await c.logout();
+    expect(c.dataSession()).toEqual({ withdrew: false, deletedKept: false });
+  });
+
+  it('a failed withdraw is not remembered', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent/withdraw': [{ status: 503, body: { error: 'internal' } }] });
+    const c = client(f);
+    await c.withdrawConsent().catch(() => undefined);
+    expect(c.dataSession().withdrew).toBe(false);
   });
 
   it('F3: a verified case gets its own withdraw text and no stopped line; others keep the original', () => {

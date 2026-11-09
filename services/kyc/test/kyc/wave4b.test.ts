@@ -275,3 +275,90 @@ describe('F9: GET /kyc/status auto-retries at most 3 times per India day, one at
     expect((await e.repos.cases.get(userId))!.autoRetries).toMatchObject({ count: 1 });
   });
 });
+
+describe('S14: a refused upload never replaces a good linked document', () => {
+  const HTML = new TextEncoder().encode('<html><script>x</script>');
+
+  it('good then bad: the good one stays linked and approvable, the kind is in rejectedDocuments; good again clears it', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token, PANS.unclear);
+    const selfie = await e.uploadDoc(token, 'selfie');
+    const aadhaar = await e.uploadDoc(token, 'aadhaar');
+    const good = await e.uploadDoc(token, 'pan', 'application/pdf');
+    let st = await e.call('GET', '/kyc/status', { token });
+    expect(st.json.documents).toEqual(['selfie', 'aadhaar', 'pan']);
+    expect(st.json.rejectedDocuments).toBeUndefined();
+
+    const bad = await e.uploadDoc(token, 'pan', 'application/pdf', HTML);
+    st = await e.call('GET', '/kyc/status', { token });
+    expect(st.json.documents).toEqual(['selfie', 'aadhaar', 'pan']);
+    expect(st.json.rejectedDocuments).toEqual(['pan']);
+    let rec = (await e.repos.cases.get(userId))!;
+    expect(rec.documents!.pan).toEqual({ uploadId: good.uploadId, state: 'linked' });
+    expect(rec.refusedUploads).toEqual({ pan: bad.uploadId });
+    expect(e.uploads.states.get(good.key)).toBe('linked');
+    expect(e.uploads.states.get(bad.key)).toBe('pending'); // the lifecycle deletes it
+
+    // the reviewer still sees and can approve the good file (linked entries only)
+    const view = await e.call('GET', `/review/cases/${userId}`, { headers: REVIEWER });
+    expect(view.json.documents.map((d: { kind: string }) => d.kind)).toEqual(['selfie', 'aadhaar', 'pan']);
+
+    // a later good upload replaces the linked entry and clears the refusal
+    const again = await e.uploadDoc(token, 'pan', 'image/png');
+    st = await e.call('GET', '/kyc/status', { token });
+    expect(st.json.documents).toEqual(['selfie', 'aadhaar', 'pan']);
+    expect(st.json.rejectedDocuments).toBeUndefined();
+    rec = (await e.repos.cases.get(userId))!;
+    expect(rec.documents!.pan).toEqual({ uploadId: again.uploadId, state: 'linked' });
+    expect(rec.refusedUploads).toBeUndefined();
+    expect(e.uploads.states.get(again.key)).toBe('linked');
+    expect(e.uploads.states.get(good.key)).toBe('pending'); // replaced: back to pending
+
+    const ok = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve' } });
+    expect(ok.statusCode).toBe(200);
+    for (const k of [selfie.key, aadhaar.key, again.key]) expect(e.uploads.states.get(k)).toBe('linked');
+  });
+
+  it('bad with no earlier good one: no documents entry (Approve answers documents_missing), kind in rejectedDocuments', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token, PANS.unclear);
+    await e.uploadDoc(token, 'selfie');
+    await e.uploadDoc(token, 'aadhaar');
+    await e.uploadDoc(token, 'pan', 'application/pdf', HTML);
+    const st = await e.call('GET', '/kyc/status', { token });
+    expect(st.json.documents).toEqual(['selfie', 'aadhaar']);
+    expect(st.json.rejectedDocuments).toEqual(['pan']);
+    expect((await e.repos.cases.get(userId))!.documents!.pan).toBeUndefined();
+    const no = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve' } });
+    expect(no.statusCode).toBe(409);
+    expect(no.json.error).toBe('documents_missing');
+  });
+
+  it('bad then good in the same link pass: the good one wins, no refusal left', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token);
+    const bad = await e.uploadDoc(token, 'aadhaar', 'image/jpeg', HTML);
+    const good = await e.uploadDoc(token, 'aadhaar');
+    const st = await e.call('GET', '/kyc/status', { token });
+    expect(st.json.documents).toEqual(['aadhaar']);
+    expect(st.json.rejectedDocuments).toBeUndefined();
+    const rec = (await e.repos.cases.get(userId))!;
+    expect(rec.documents!.aadhaar!.uploadId).toBe(good.uploadId);
+    expect(rec.refusedUploads).toBeUndefined();
+    expect(e.uploads.states.get(bad.key)).toBe('pending');
+  });
+
+  it('a withdrawal clears refusals with the rest of the case data', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token);
+    await e.uploadDoc(token, 'pan', 'application/pdf', HTML);
+    await e.call('GET', '/kyc/status', { token });
+    expect((await e.repos.cases.get(userId))!.refusedUploads).toBeDefined();
+    await e.call('POST', '/kyc/consent/withdraw', { token, body: { purpose: 'esign' } });
+    expect((await e.repos.cases.get(userId))!.refusedUploads).toBeUndefined();
+  });
+});

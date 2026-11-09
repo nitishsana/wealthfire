@@ -16,7 +16,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { File, UploadType } from 'expo-file-system';
 import {
   CONSENT_TEXT, DOB_HINT, DOB_LABEL, hasKycCase, HttpOtpProvider, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycFinalLabel,
-  kycFinalReason, kycRejectedDocs, kycUploadAgainText, kycWithdrawBody, kycWithdrawDone, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
+  kycDataButtons, kycDeleteDone, kycFinalReason, kycRejectedDocs, kycUploadAgainText, kycWithdrawBody, kycWithdrawDone, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
   type ConsentPurpose, type DocFile, type DocKind, type KycStatusView, type OnboardingState, type StartKycInput, type TokenStore,
 } from '@wealthfire/core';
 import { useBlockBackWhile } from './shell';
@@ -592,7 +592,8 @@ export function KycDataControls() {
   }, [ask]);
   if (!server || (!hasKycCase(server.view) && !done)) return null;
   const { busy, view } = server;
-  const withdrawn = view?.reason === 'consent-withdrawn';
+  // which buttons show (core rule, same as web): no repeat withdraw / delete on a verified case this session
+  const buttons = kycDataButtons(view, server.client.dataSession());
 
   const confirm = async () => {
     const what = ask;
@@ -602,7 +603,7 @@ export function KycDataControls() {
     const ok = what === 'withdraw' ? await server.withdrawConsent() : await server.deleteData();
     if (!ok) { setFailed(true); return; }
     // F3: a verified case keeps its KYC, so no 'stopped' line after a withdraw
-    setDone(what === 'withdraw' ? kycWithdrawDone(before) : KYC_TEXT.deleteDone);
+    setDone(what === 'withdraw' ? kycWithdrawDone(before) : kycDeleteDone(server.client.dataSession()));
     setAsk(null);
   };
   // F12: never fail silently: the server's error, the ended session, or a fixed text (another action was running)
@@ -620,10 +621,10 @@ export function KycDataControls() {
           <Btn title={KYC_TEXT.cancel} disabled={busy} onPress={() => { setFailed(false); setAsk(null); }} />
           <Btn danger solid title={ask === 'withdraw' ? KYC_TEXT.withdrawConfirm : KYC_TEXT.deleteConfirm} disabled={busy} onPress={() => void confirm()} />
         </View>
-      ) : hasKycCase(view) ? (
+      ) : buttons.withdraw || buttons.delete ? (
         <>
-          {!withdrawn ? <Btn danger title={KYC_TEXT.withdrawButton} onPress={() => { setDone(''); setAsk('withdraw'); }} /> : null}
-          <Btn danger title={KYC_TEXT.deleteButton} onPress={() => { setDone(''); setAsk('delete'); }} />
+          {buttons.withdraw ? <Btn danger title={KYC_TEXT.withdrawButton} onPress={() => { setDone(''); setAsk('withdraw'); }} /> : null}
+          {buttons.delete ? <Btn danger title={KYC_TEXT.deleteButton} onPress={() => { setDone(''); setAsk('delete'); }} /> : null}
         </>
       ) : null}
       {busy ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}

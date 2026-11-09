@@ -64,13 +64,22 @@ export interface KycCaseRecord extends KycCase {
   pendingUploads?: { uploadId: string; signedAt: number }[];
   /** S11: the upload linked per document kind (tagged state=linked); a newer upload replaces it */
   documents?: Partial<Record<DocumentKind, DocumentLink>>;
+  /**
+   * S14: per kind, the newest upload that failed the type check (uploadId). Kept apart from
+   * `documents`, so a refused upload never replaces a good linked one; a later good upload of
+   * that kind clears it. Feeds StatusView.rejectedDocuments.
+   */
+  refusedUploads?: Partial<Record<DocumentKind, string>>;
 }
 
 export type DocumentKind = 'selfie' | 'aadhaar' | 'pan';
 
 export interface DocumentLink {
   uploadId: string;
-  /** 'linked' = checked (S14 magic bytes) and kept; 'rejected' = content did not match its type */
+  /**
+   * 'linked' = checked (S14 magic bytes) and kept. 'rejected' is no longer written (refusals go to
+   * KycCaseRecord.refusedUploads); older items may still hold it.
+   */
   state: 'linked' | 'rejected';
 }
 

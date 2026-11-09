@@ -129,6 +129,8 @@ export const KYC_TEXT = {
   deleteBody: 'We delete your documents and details. Some records stay if the law needs them.',
   deleteConfirm: 'Delete',
   deleteDone: 'We deleted your KYC data.',
+  /** a verified case: the server keeps the KYC record (its `kept` list names 'kyc-record') */
+  deleteKept: 'We deleted what we could. We keep your KYC record because the law needs it.',
   cancel: 'Cancel',
   dataTitle: 'Your KYC data',
   /** F7: staff approved, e-sign still open (eligibleToInvest false) */
@@ -143,6 +145,30 @@ export function kycWithdrawBody(view: KycStatusView | null): string {
 /** F3: the line after a withdraw; a verified case gets a neutral line (nothing was stopped). */
 export function kycWithdrawDone(before: KycStatusView | null): string {
   return before?.status === 'verified' ? KYC_TEXT.withdrawRecorded : KYC_TEXT.withdrawDone;
+}
+
+/** What the Profile data buttons did this session (memory only, kept by ServerKycClient). */
+export interface KycDataSession {
+  /** a withdraw went through */
+  withdrew: boolean;
+  /** a delete went through and the server kept the KYC record (verified case) */
+  deletedKept: boolean;
+}
+
+/**
+ * Which Profile data buttons show. None without a case. Withdraw hides once withdrawn (reason
+ * 'consent-withdrawn', or a verified case already withdrawn this session: no repeat calls). After a
+ * delete that kept the verified record, both hide for the session.
+ */
+export function kycDataButtons(view: KycStatusView | null, s: KycDataSession): { withdraw: boolean; delete: boolean } {
+  if (!hasKycCase(view) || s.deletedKept) return { withdraw: false, delete: false };
+  const withdrawn = view!.reason === 'consent-withdrawn' || (view!.status === 'verified' && s.withdrew);
+  return { withdraw: !withdrawn, delete: true };
+}
+
+/** The line after a delete: a kept verified record says so (fixed text, never the server's words). */
+export function kycDeleteDone(s: KycDataSession): string {
+  return s.deletedKept ? KYC_TEXT.deleteKept : KYC_TEXT.deleteDone;
 }
 
 /** F7: the 'Final KYC:' label. A staff-approved case still waiting for e-sign is not shown as Verified. */
@@ -415,6 +441,8 @@ export class ServerKycClient {
   private readonly consents = new Set<ConsentPurpose>();
   /** document kinds uploaded through this client (memory only) */
   private readonly sent = new Set<DocKind>();
+  /** Profile data actions this session (memory only); reset by a new case or sign-out */
+  private data: KycDataSession = { withdrew: false, deletedKept: false };
 
   constructor(opts: ServerKycClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
@@ -452,6 +480,7 @@ export class ServerKycClient {
       const refreshToken = this.web ? null : await this.tokens.getRefresh?.();
       await this.call({ method: 'POST', path: '/auth/logout', body: refreshToken ? { refreshToken } : {} });
     } finally {
+      this.data = { withdrew: false, deletedKept: false };
       await this.tokens.set(null);
       await this.tokens.setRefresh?.(null);
     }
@@ -490,13 +519,22 @@ export class ServerKycClient {
         continue;
       }
       any = true;
+      this.data.withdrew = true;
       this.consents.delete(purpose);
     }
   }
 
+  /** What the Profile data buttons did this session. */
+  dataSession(): KycDataSession {
+    return { ...this.data };
+  }
+
   /** DELETE /kyc/data: deletes the documents and details the rules allow (the server keeps and audits the rest). */
   async deleteKycData(): Promise<void> {
-    await this.call({ method: 'DELETE', path: '/kyc/data', auth: true });
+    const b = await this.call({ method: 'DELETE', path: '/kyc/data', auth: true });
+    // the server keeps a verified KYC record: its `kept` list names it (only the code is read)
+    const kept = Array.isArray(b.kept) && b.kept.some((k) => typeof k === 'object' && k !== null && (k as { what?: unknown }).what === 'kyc-record');
+    if (kept) this.data.deletedKept = true;
     this.sent.clear();
     this.consents.clear();
   }
@@ -506,6 +544,7 @@ export class ServerKycClient {
   /** POST /kyc/start (paid). Records the 'pan-check' consent first. */
   async startKyc(input: StartKycInput): Promise<KycStatusView> {
     await this.consentFor(STEP_CONSENT.start);
+    this.data = { withdrew: false, deletedKept: false }; // a new case gets its buttons back
     const body = {
       firstName: input.firstName,
       lastName: input.lastName,

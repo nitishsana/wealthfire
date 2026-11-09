@@ -3,7 +3,8 @@
 // confirm button). Same texts and order as packages/mobile-ui/src/server.tsx KycDataControls.
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import {
-  hasKycCase, isServerError, KYC_TEXT, kycWithdrawBody, kycWithdrawDone, needsSignIn, type KycStatusView, type ServerKycClient,
+  hasKycCase, isServerError, KYC_TEXT, kycDataButtons, kycDeleteDone, kycWithdrawBody, kycWithdrawDone, needsSignIn,
+  type KycStatusView, type ServerKycClient,
 } from '@wealthfire/core';
 
 type Ask = 'withdraw' | 'delete' | null;
@@ -45,8 +46,8 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
     try {
       if (what === 'withdraw') await client.withdrawConsent();
       else await client.deleteKycData();
-      // F3: a verified case keeps its KYC, so no 'stopped' line after a withdraw
-      setDone(what === 'withdraw' ? kycWithdrawDone(before) : KYC_TEXT.deleteDone);
+      // F3: a verified case keeps its KYC, so no 'stopped' line after a withdraw; a kept record says so after a delete
+      setDone(what === 'withdraw' ? kycWithdrawDone(before) : kycDeleteDone(client.dataSession()));
       lastAsk.current = null;
       setAsk(null);
       await load();
@@ -59,7 +60,8 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
   }
 
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) setAsk(null); };
-  const withdrawn = view?.reason === 'consent-withdrawn';
+  // which buttons show (core rule, same on phones): no repeat withdraw / delete on a verified case this session
+  const buttons = kycDataButtons(view, client.dataSession());
   const title = ask === 'withdraw' ? KYC_TEXT.withdrawTitle : KYC_TEXT.deleteTitle;
   const body = ask === 'withdraw' ? kycWithdrawBody(view) : KYC_TEXT.deleteBody;
 
@@ -77,10 +79,10 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
             </button>
           </div>
         </div>
-      ) : hasKycCase(view) ? (
+      ) : buttons.withdraw || buttons.delete ? (
         <div className="row">
-          {!withdrawn && <button ref={withdrawRef} type="button" className="btn danger" onClick={() => { setDone(''); setError(''); setAsk('withdraw'); }}>{KYC_TEXT.withdrawButton}</button>}
-          <button ref={deleteRef} type="button" className="btn danger" onClick={() => { setDone(''); setError(''); setAsk('delete'); }}>{KYC_TEXT.deleteButton}</button>
+          {buttons.withdraw && <button ref={withdrawRef} type="button" className="btn danger" onClick={() => { setDone(''); setError(''); setAsk('withdraw'); }}>{KYC_TEXT.withdrawButton}</button>}
+          {buttons.delete && <button ref={deleteRef} type="button" className="btn danger" onClick={() => { setDone(''); setError(''); setAsk('delete'); }}>{KYC_TEXT.deleteButton}</button>}
         </div>
       ) : null}
       {done && <p className="muted" role="status">{done}</p>}
