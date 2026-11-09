@@ -87,12 +87,16 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 | Date of birth | **Locked**: shown, cannot be edited. |
 | Name | Always the **name as per the PAN card**. Onboarding does not move past the check until the typed name matches the PAN card, so the name is always in sync with the PAN; Profile shows it read-only. |
 | Users who already answered Risk | Keep their answers; they can change them later in the Risk section in Profile. |
+| Can the risk cards be skipped? | **No.** They are mandatory; the user cannot skip them. |
+| Age | Worked out from the locked date of birth, so it **goes up every year** on the birthday. |
+| After "Delete my KYC data" | **All of the user's data is erased** (name, date of birth, age and the rest). |
+| Withdraw consent | **Removed as a separate option.** The only way out is "Delete my KYC data". |
+
+**Change to what is live today:** Profile currently has both "Withdraw consent" and "Delete my KYC data" (PR #10). This idea removes the "Withdraw consent" button, its server routes stay unused or are removed, and the test cases for it (TC-72, TC-79) are retired. Note for the compliance adviser: India's data protection law expects users to be able to withdraw consent; "Delete my KYC data" must count as that withdrawal and say so in its text.
 
 ### Still open (ask Nitish in the spec)
 
-- Can the user skip the risk cards and use the planner meanwhile, with only investing blocked? Or must the cards be finished before anything else?
-- Age: shown from the locked date of birth (so it goes up every birthday)?
-- If a user deletes KYC data or withdraws consent, do name, date of birth and age stay locked?
+- "Delete my KYC data" erasing everything: the KYC server must still keep what the law requires (the retention rule) for a verified KYC; the app's own data is fully erased. Confirm with the compliance adviser.
 - Home tiles and links that point to the Risk tab today need a new target. Same layout on web, Android and iOS.
 
 ---
