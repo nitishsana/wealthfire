@@ -102,9 +102,23 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - Never used for anything else (no planning, no marketing); deleted automatically when the retention period ends.
 - The delete confirmation tells the user that some records are kept because the law requires it, and for how long.
 
-### Still open (ask Nitish in the spec)
+### Links that lead to the Risk tab today, and their new target
 
-- Home tiles and links that point to the Risk tab today need a new target. Same layout on web, Android and iOS.
+When the Risk tab moves into a collapsible section of Profile, every place that opens the Risk tab today needs a new target. Found in the code (web `apps/web`, phones `packages/mobile-ui`):
+
+| # | Where today | What it does today | New target (proposal) |
+|---|---|---|---|
+| 1 | Main menu: "Risk" tab (web nav bar; phone tab bar) | Opens the Risk page | **Removed** from the menu |
+| 2 | Home, "A few steps left" card: "Take the risk quiz" link (web `ui.tsx`, phone `Core.tsx`) | Opens the Risk page | Opens **Profile with the Risk section expanded** and scrolled into view. Since the risk cards are now mandatory at the end of onboarding, this link only shows for an older user with missing answers. |
+| 3 | Home, "Risk profile" tile (shows profile and score; web hint "Take the quiz") | Text only today | **Becomes a tappable link** (Nitish, 2026-11-09): opens **Profile, Risk section expanded**. Works with tap, click and keyboard (Enter), and reads as a link to screen readers. |
+| 4 | Profile, Save button (web `Profile.tsx`, phone `Core.tsx`) | Jumps to the Risk page if risk is not answered | **Removed**: risk is always answered before Profile can be reached |
+| 5 | Old address `/risk` (bookmarks, test case links, the path-route fix from PR #10) | Opens the Risk page | **Redirects to Profile with the Risk section expanded**, so old links still work |
+| 6 | Feature list for the parity check (`packages/core/src/features.ts`, id `risk`) | Lists Risk as its own page | Renamed to "Profile: risk section", same on all platforms |
+| 7 | Test cases (Risk section, e.g. TC-42) | Open the Risk tab | Rewritten to open Profile's Risk section |
+
+Same behaviour on web, Android and iOS, and across browsers and devices.
+
+All Idea 2 questions are answered.
 
 ---
 
@@ -360,3 +374,66 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**. Split out of Idea 6.
 - Joint accounts and joint loans: count once, or split between members?
 - Is KYC needed for each member, or only for members who invest?
 - Same on web, Android and iOS.
+
+---
+
+## Idea 8: CIBIL credit score in the Net worth tab
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+- Fetch the user's **CIBIL score**.
+- Show it **inside the Net worth tab**.
+- **Whenever the score changes**, show the change (for example "Your CIBIL score went up 12 points to 781").
+
+### Notes for the spec
+
+- The score comes from a credit bureau (TransUnion CIBIL; others are Experian, Equifax and CRIF High Mark), through a bureau partnership or a licensed reseller, with the user's consent and an OTP. It is pulled against the PAN and the mobile number already verified in onboarding.
+- The same credit report also lists all loans and credit cards, so it can feed **Idea 6's liabilities** (loans not found through the Account Aggregator).
+- A user's own check is a "soft" enquiry and does not lower the score.
+- Consent, storage and deletion follow the same rules as KYC data; "Delete my KYC data" (Idea 2) also erases the credit report, except anything the law requires to keep.
+
+### Answers from Nitish (Idea board comments, 2026-11-09)
+
+| Question | Answer |
+|---|---|
+| Which bureau? | The **best and most used bureau in India**. Today that is TransUnion CIBIL; Experian, Equifax and CRIF High Mark are the alternatives if CIBIL is not available through the partner. |
+| How often to refresh? | **Automatically once every 15 days** (this overrides an earlier "monthly" note). When the user logs in and 15 days have passed since the last pull, refresh then. |
+| How is a change shown? | On the Net worth tab, **and a notification** is sent whenever the score changes. |
+| Score history chart and main reasons | **Not now**: moved to a later idea (Idea 9). |
+| No credit history (no score) | Show a short message encouraging the user to **build a credit history** going forward. |
+| Platforms | **Consistent on web, Android and iOS, and across browsers and devices.** |
+
+| Who pays per pull? | **Wealthfire (the app company) pays**; free for the user. |
+| Notification channels | **All channels: in-app, SMS and email** (and phone push notifications, as part of "all channels"). |
+| Wording | Polite placeholder texts below; Nitish will edit them later. |
+
+**Placeholder texts (Nitish to edit later):**
+
+| When | Text |
+|---|---|
+| Score went up | "Good news! Your CIBIL score went up by {points} points to {score}. Keep it up." |
+| Score went down | "Your CIBIL score changed by {points} points to {score}. Paying dues on time helps it grow again." |
+| No credit history | "You don't have a credit score yet. Using a credit card or loan wisely and paying on time will help you build one." |
+| SMS (short) | "Wealthfire: your CIBIL score is now {score} ({change}). Open the app to see more." |
+| Email subject | "Your CIBIL score has changed" |
+
+All Idea 8 questions are answered.
+
+---
+
+## Idea 9: Credit score history and reasons (later)
+
+Added 2026-11-09 by Nitish (split from Idea 8, "for future consideration, not right now"). Status: **idea, later**.
+
+### What Nitish wants
+
+- A **chart of the credit score over time** (each 15-day refresh from Idea 8).
+- The **main reasons** behind the score and its changes (for example late payments, how much of the credit limit is used, age of accounts, number of new loan enquiries), with simple tips to improve it.
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- How far back the chart goes, and whether old points are kept after "Delete my KYC data" (Idea 2 says all data is erased).
+- Which reasons the bureau partner actually provides.
+- Same on web, Android and iOS, across browsers and devices.
