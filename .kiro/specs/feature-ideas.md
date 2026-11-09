@@ -110,7 +110,7 @@ When the Risk tab moves into a collapsible section of Profile, every place that 
 |---|---|---|---|
 | 1 | Main menu: "Risk" tab (web nav bar; phone tab bar) | Opens the Risk page | **Removed** from the menu |
 | 2 | Home, "A few steps left" card: "Take the risk quiz" link (web `ui.tsx`, phone `Core.tsx`) | Opens the Risk page | Opens **Profile with the Risk section expanded** and scrolled into view. Since the risk cards are now mandatory at the end of onboarding, this link only shows for an older user with missing answers. |
-| 3 | Home, "Risk profile" tile (shows profile and score; web hint "Take the quiz") | Text only today | Tapping it opens **Profile, Risk section expanded** (proposal: make the tile a link) |
+| 3 | Home, "Risk profile" tile (shows profile and score; web hint "Take the quiz") | Text only today | **Becomes a tappable link** (Nitish, 2026-11-09): opens **Profile, Risk section expanded**. Works with tap, click and keyboard (Enter), and reads as a link to screen readers. |
 | 4 | Profile, Save button (web `Profile.tsx`, phone `Core.tsx`) | Jumps to the Risk page if risk is not answered | **Removed**: risk is always answered before Profile can be reached |
 | 5 | Old address `/risk` (bookmarks, test case links, the path-route fix from PR #10) | Opens the Risk page | **Redirects to Profile with the Risk section expanded**, so old links still work |
 | 6 | Feature list for the parity check (`packages/core/src/features.ts`, id `risk`) | Lists Risk as its own page | Renamed to "Profile: risk section", same on all platforms |
@@ -118,9 +118,7 @@ When the Risk tab moves into a collapsible section of Profile, every place that 
 
 Same behaviour on web, Android and iOS, and across browsers and devices.
 
-### Still open (ask Nitish in the spec)
-
-- Should the Home "Risk profile" tile become a link to Profile's Risk section (row 3)?
+All Idea 2 questions are answered.
 
 ---
 
