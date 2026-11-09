@@ -6,6 +6,20 @@ Features apply to web, Android and iOS unless the row says otherwise.
 
 Last updated: 2026-11-06 (PR #7)
 
+## The apps and what each is for
+
+Wealthfire is made of these apps. They must always stay in sync (rule: `.kiro/steering/apps-in-sync.md`).
+
+| App | Where it runs | Who uses it | What it is for |
+|---|---|---|---|
+| Wealthfire app | Web (`apps/web`), Android (`apps/android`), iOS (`apps/ios`); shared code in `packages/core` and `packages/mobile-ui` | Investors | The FIRE planner itself: onboarding, profile, risk, net worth, expenses, FIRE plan, portfolio, buckets, progress. In server mode it also runs the final KYC (consent ticks, DigiLocker, selfie and documents, e-sign, Profile data controls). |
+| KYC server | `services/kyc` (AWS Lambda online; `npm run local` on the laptop) | The app and the review console | Does the real KYC work: sign-in OTP, consent records, KYC checks with the partner, document uploads, e-sign, staff decisions, audit. It is the only place that can make a user Verified. |
+| Review console | `services/kyc/review-console` (static site online; port 5182 on the laptop) | Wealthfire staff (reviewers) | Lets staff open Under-review cases, see the linked documents and Approve or Reject them. |
+| Local test home | Served by the local KYC server at http://127.0.0.1:5181/ | Nitish, testers | One page to test everything on the laptop: sign in to the app as a test investor, sign in to the console as the demo reviewer, reset local data, open the test cases. Local only, never online. |
+| Infra | `services/kyc/infra` (AWS CDK) | Deploys only | Describes the AWS setup for the KYC server and console (ap-south-1). Nothing is deployed until Nitish says yes (see `.kiro/specs/final-kyc-service/go-online-tasks.md`). |
+
+The KYC server, review console, local test home and final KYC in the app are on branch `feature/final-kyc` and are not merged yet; their feature rows are added when they merge.
+
 ## Platform (all apps)
 
 | Date | Category | Feature Description |

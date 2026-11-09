@@ -33,6 +33,8 @@ let depsPromise: Promise<WebhookDeps> | undefined;
 
 async function buildDeps(): Promise<WebhookDeps> {
   const env = process.env;
+  // local mode runs only in the local Node server (services/kyc/local/server.ts)
+  if ((env.STAGE ?? '').trim().toLowerCase() === 'local') throw new Error('STAGE=local runs only in the local server');
   const arn = env[WEBHOOK_ENV.secretArn];
   if (!arn) throw new Error(`Missing env ${WEBHOOK_ENV.secretArn}`);
   const out = await new SecretsManagerClient({}).send(new GetSecretValueCommand({ SecretId: arn }));

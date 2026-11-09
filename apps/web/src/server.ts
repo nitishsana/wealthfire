@@ -1,14 +1,18 @@
 // Final KYC server (services/kyc) for the web app. Only active when VITE_API_URL is set at build time.
-// Without it (the live site today and the local preview) `kycServer` is null and every screen keeps
-// its device-only behaviour (demo OTP, device status).
+// Without it (the live site today, plain `vite`) `kycServer` is null and every screen keeps its
+// device-only behaviour (demo OTP, device status). The preview launcher runs `vite --mode localkyc`,
+// which sets it to the local KYC server on http://127.0.0.1:5181 (apps/web/.env.localkyc).
 //
 // Tokens: the access token stays in memory only (lost on reload). The refresh token is an HttpOnly
 // cookie on the API domain; ServerKycClient sends `credentials: 'include'` on /auth/* so
 // POST {API}/auth/refresh issues a new access token after a reload.
 import { ServerKycClient, type TokenStore } from '@wealthfire/core';
+import { serverOff, testPersona } from './localTest';
 
 /** '' counts as unset: CI turns a missing repo variable into an empty string. */
 function apiBase(): string | null {
+  // ?server=off (localkyc build only): demo mode, no server
+  if (serverOff) return null;
   const raw = import.meta.env.VITE_API_URL?.trim();
   if (!raw) return null;
   try {
@@ -35,7 +39,7 @@ export const API_URL = apiBase();
 
 /** The one server client for the page's life, or null without VITE_API_URL. */
 export const kycServer: ServerKycClient | null = API_URL
-  ? new ServerKycClient({ baseUrl: API_URL, fetch: (url, init) => window.fetch(url, init), tokens: memoryTokens(), client: 'web' })
+  ? new ServerKycClient({ baseUrl: API_URL, fetch: (url, init) => window.fetch(url, init), tokens: memoryTokens(), client: 'web', persona: testPersona?.id ?? null })
   : null;
 
 /** Query flag the partner pages (DigiLocker, e-sign) send the user back with. */

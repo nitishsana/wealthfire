@@ -12,6 +12,7 @@ import {
 import { useStore } from '../store';
 import { aadhaarOtpProvider, otpProvider } from '../otp';
 import { kycServer } from '../server';
+import { personaFill, storageKey } from '../localTest';
 import { ServerKyc, startDetails } from '../components/ServerKyc';
 import { DobField, isoToDmy } from '../components/DobField';
 import * as readerModule from '../docreader';
@@ -43,7 +44,7 @@ export const RETYPE_FOR_NEW_OTP = 'Enter your Aadhaar number again to get a new 
 export const HAND_CHECK_FAILED = 'Could not send your documents. Try again.';
 /** Shown once on Sign in right after Settings → "Delete all data" (the gate switches to Sign in at once). */
 export const DATA_DELETED_TEXT = 'All data deleted.';
-const DATA_DELETED_KEY = 'wealthfire.dataDeleted';
+const DATA_DELETED_KEY = storageKey('wealthfire.dataDeleted');
 /** Settings calls this just before deleting, so Sign in can say the data was deleted. */
 export function markDataDeleted() {
   try { window.sessionStorage.setItem(DATA_DELETED_KEY, '1'); } catch { /* storage blocked: no message */ }
@@ -798,7 +799,8 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
 
 function SignIn({ onSent }: { onSent: (kind: ContactKind, value: string, r: Extract<OtpRequest, { ok: true }>) => void }) {
   const [kind, setKind] = useState<ContactKind>('mobile');
-  const [raw, setRaw] = useState('');
+  // localkyc test user (?persona=): the mobile starts filled in
+  const [raw, setRaw] = useState(personaFill?.mobile ?? '');
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sendError, setSendError] = useState('');
@@ -876,12 +878,14 @@ function Identity({ initial, onContinue }: {
   initial: IdentityValues | null;
   onContinue: (id: Required<IdentityValues>, aadhaarDigits: string) => Promise<void>;
 }) {
-  const [firstName, setFirst] = useState(initial?.firstName ?? '');
-  const [lastName, setLast] = useState(initial?.lastName ?? '');
-  const [pan, setPan] = useState(initial?.pan ?? '');
-  const [dob, setDob] = useState(isoToDmy(initial?.dob ?? ''));
-  // Full Aadhaar typed here: component state only, empty again after Back.
-  const [aadhaar, setAadhaar] = useState('');
+  // localkyc test user (?persona=): empty fields start with the test user's details
+  const fill = personaFill?.identity;
+  const [firstName, setFirst] = useState(initial?.firstName ?? fill?.firstName ?? '');
+  const [lastName, setLast] = useState(initial?.lastName ?? fill?.lastName ?? '');
+  const [pan, setPan] = useState(initial?.pan ?? fill?.pan ?? '');
+  const [dob, setDob] = useState(isoToDmy(initial?.dob ?? fill?.dob ?? ''));
+  // Full Aadhaar typed here: component state only, empty again after Back (a test user's made-up one is filled in).
+  const [aadhaar, setAadhaar] = useState(personaFill?.aadhaar ?? '');
   const [showAadhaar, setShowAadhaar] = useState(false);
   const [consent, setConsent] = useState(false);
   const [touched, setTouched] = useState<Record<string, boolean>>({});

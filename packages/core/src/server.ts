@@ -16,6 +16,7 @@ import type { OtpProvider, OtpSendRequest, OtpSendResult, OtpVerifyResult } from
 import { OTP_MESSAGES } from './otp';
 import type { OtpProviderId } from './types';
 import type { DocKind } from './docreader';
+import { isLocalApiUrl } from './localTest';
 
 export type ServerStatus = KycStatus; // 'pre-verified' | 'under-review' | 'verified' | 'rejected'
 
@@ -305,7 +306,14 @@ export interface ServerKycClientOptions {
   client?: 'web' | 'app';
   /** Idempotency-Key source (tests) */
   newKey?: () => string;
+  /**
+   * Local test user id (localkyc build, ?persona=). Sent as `x-wf-persona` on /auth/* so the local KYC
+   * server keeps one refresh cookie per test user. Ignored unless baseUrl is a loopback address.
+   */
+  persona?: string | null;
 }
+
+const PERSONA_ID = /^[a-z0-9-]{1,32}$/;
 
 /** Fixed, client-safe messages by server error code. */
 export const SERVER_ERROR_MESSAGES: Record<string, string> = {
@@ -339,6 +347,17 @@ export const SERVER_ERROR_MESSAGES: Record<string, string> = {
 };
 
 const SAFE_CODE = /^[a-z_]{1,40}$/;
+
+/** A demo OTP from the local KYC server: exactly 6 digits, anything else is dropped. */
+const DEMO_CODE = /^\d{6}$/;
+
+/**
+ * Line under the code box when the local KYC server sent the code back (no SMS or email in local
+ * mode). Same text on web, Android and iOS.
+ */
+export function kycDemoCodeText(code: string): string {
+  return `DEMO code: ${code}`;
+}
 
 export class ServerError extends Error {
   readonly status: number;
@@ -436,6 +455,8 @@ export class ServerKycClient {
   private readonly customRefresh?: () => Promise<string | null>;
   private readonly web: boolean;
   private readonly newKey: () => string;
+  /** local test user id sent as x-wf-persona on /auth/* (local KYC server only), or null */
+  private readonly persona: string | null;
   private refreshing: Promise<string | null> | null = null;
   /** consents recorded through this client (memory only) */
   private readonly consents = new Set<ConsentPurpose>();
@@ -453,18 +474,24 @@ export class ServerKycClient {
     this.customRefresh = opts.refresh;
     this.web = (opts.client ?? 'web') === 'web';
     this.newKey = opts.newKey ?? defaultKey;
+    // only to a loopback server (the localkyc build) and only a plain id; any other build never sends it
+    this.persona = opts.persona && PERSONA_ID.test(opts.persona) && isLocalApiUrl(this.baseUrl) ? opts.persona : null;
   }
 
   // ----- auth -----
 
-  /** POST /auth/otp/send. `value` is the email or 10-digit mobile. */
-  async sendOtp(kind: 'email' | 'mobile', value: string): Promise<{ challengeId: string; expiresAt?: number; resendAt?: number }> {
+  /**
+   * POST /auth/otp/send. `value` is the email or 10-digit mobile. `demoCode` is only sent by the local
+   * KYC server (STAGE=local, no SMS or email); it is kept only when it is a plain 6-digit code.
+   */
+  async sendOtp(kind: 'email' | 'mobile', value: string): Promise<{ challengeId: string; expiresAt?: number; resendAt?: number; demoCode?: string }> {
     const b = await this.call({ method: 'POST', path: '/auth/otp/send', body: { kind, contact: value } });
     if (typeof b.challengeId !== 'string') throw new ServerError(502, 'bad_response');
     return {
       challengeId: b.challengeId,
       ...(typeof b.expiresAt === 'number' ? { expiresAt: b.expiresAt } : {}),
       ...(typeof b.resendAt === 'number' ? { resendAt: b.resendAt } : {}),
+      ...(typeof b.demoCode === 'string' && DEMO_CODE.test(b.demoCode) ? { demoCode: b.demoCode } : {}),
     };
   }
 
@@ -750,6 +777,8 @@ export class ServerKycClient {
     const init: ServerFetchInit = { method: o.method, headers, ...(o.body !== undefined ? { body: JSON.stringify(o.body) } : {}) };
     // the refresh cookie is Path=/, but only /auth/* reads it, so only those requests send cookies
     if (this.web && o.path.startsWith('/auth/')) init.credentials = 'include';
+    // local KYC server only: each test user keeps its own refresh cookie (wf_rt_<id>)
+    if (this.persona && o.path.startsWith('/auth/')) headers['x-wf-persona'] = this.persona;
     let res: ServerFetchResponse;
     try {
       res = await this.doFetch(`${this.baseUrl}${o.path}`, init);
@@ -787,7 +816,7 @@ export class HttpOtpProvider implements OtpProvider {
     if (req.channel === 'aadhaar') throw new Error('Aadhaar OTP is not supported by HttpOtpProvider');
     try {
       const r = await this.client.sendOtp(req.channel === 'email' ? 'email' : 'mobile', req.target);
-      return { ok: true, requestId: r.challengeId, expiresAt: r.expiresAt ?? now + 10 * 60_000 };
+      return { ok: true, requestId: r.challengeId, expiresAt: r.expiresAt ?? now + 10 * 60_000, ...(r.demoCode ? { demoCode: r.demoCode } : {}) };
     } catch (e) {
       const err = isServerError(e) ? e : new ServerError(0, 'network');
       if (err.code === 'bad_request') return { ok: false, reason: 'invalid-target', message: OTP_MESSAGES.invalidTarget };

@@ -5,7 +5,7 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import {
-  canSend, checkOutcome, DOC_MESSAGES, MAX_REREADS, resendIn, groupAadhaar, maskAadhaar, maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan,
+  canSend, checkOutcome, DOC_MESSAGES, kycDemoCodeText, MAX_REREADS, resendIn, groupAadhaar, maskAadhaar, maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan,
   normalizeDob, onboardingReducer, OTP_RULES, DOB_HINT, DOB_LABEL, validateDob, panSurnameWarning, pruneSends, reviewFields, validateAadhaar, validateEmail, validateMobile, validateName,
   validatePan, type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OtpChannel, type OtpProvider, type OtpVerifyResult,
 } from '@wealthfire/core';
@@ -140,6 +140,10 @@ function OtpStep({ channel, target, sends, lockedUntil, initial, initialError, v
           <Input label="6-digit code" value={code} onChangeText={(t) => setCode(t.replace(/\D/g, '').slice(0, OTP_RULES.length))}
             keyboardType="number-pad" textContentType="oneTimeCode" autoComplete="sms-otp" maxLength={OTP_RULES.length + 6}
             placeholder="123456" error={error || null} />
+          {/* Local KYC server only (no SMS or email): same 'DEMO code: …' line as web, under the code box */}
+          {!provider.isDemo && req.demoCode ? (
+            <Text style={[s.text, st.demoCode]} accessibilityLiveRegion="polite">{kycDemoCodeText(req.demoCode)}</Text>
+          ) : null}
           <Btn primary title={verifyLabel} disabled={busy || code.length !== OTP_RULES.length} onPress={() => void verify()} />
           <Btn title={cooling ? resendIn(coolMs) : 'Resend OTP'} disabled={busy || cooling} onPress={() => void send()} />
         </>
@@ -498,6 +502,7 @@ const st = StyleSheet.create({
   prefixRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
   prefix: { color: theme.text, fontSize: 15, marginTop: 30, paddingHorizontal: 10, paddingVertical: 11, backgroundColor: theme.panel2, borderColor: theme.line, borderWidth: 1, borderRadius: 9 },
   demo: { backgroundColor: theme.panel2, borderColor: theme.warn, borderWidth: 1, borderRadius: 10, padding: 12, marginBottom: 12 },
+  demoCode: { fontWeight: '600', marginBottom: 8 },
   check: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 10, minHeight: 44 },
   box: { width: 24, height: 24, borderRadius: 6, borderWidth: 2, borderColor: theme.line, alignItems: 'center', justifyContent: 'center' },
   boxOn: { borderColor: theme.accent, backgroundColor: theme.accent },

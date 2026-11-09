@@ -20,3 +20,5 @@ export * from './docreader';
 export * from './cardtext';
 export * from './kyc';
 export * from './server';
+export * from './localPersonas';
+export * from './localTest';

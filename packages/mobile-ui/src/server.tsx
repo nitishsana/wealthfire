@@ -16,7 +16,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { File, UploadType } from 'expo-file-system';
 import {
   CONSENT_TEXT, DOB_HINT, DOB_LABEL, hasKycCase, HttpOtpProvider, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycFinalLabel,
-  kycDataButtons, kycDeleteDone, kycFinalReason, kycRejectedDocs, kycUploadAgainText, kycWithdrawBody, kycWithdrawDone, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
+  kycDataButtons, kycDeleteDone, kycDemoCodeText, kycFinalReason, kycRejectedDocs, kycUploadAgainText, kycWithdrawBody, kycWithdrawDone, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
   type ConsentPurpose, type DocFile, type DocKind, type KycStatusView, type OnboardingState, type StartKycInput, type TokenStore,
 } from '@wealthfire/core';
 import { useBlockBackWhile } from './shell';
@@ -378,6 +378,8 @@ function SignInAgain({ client, onDone }: { client: ServerKycClient; onDone: () =
   const c = data.onboarding.contact;
   const provider = useMemo(() => new HttpOtpProvider(client), [client]);
   const [req, setReq] = useState<string | null>(null);
+  /** local KYC server only: the code it sent back (memory only) */
+  const [demoCode, setDemoCode] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -391,7 +393,7 @@ function SignInAgain({ client, onDone }: { client: ServerKycClient; onDone: () =
     const r = await provider.send({ channel: c.kind === 'email' ? 'email' : 'sms', target: c.value }, Date.now());
     if (!alive.current) return;
     setBusy(false);
-    if (r.ok) { setReq(r.requestId); setCode(''); } else setError(r.message);
+    if (r.ok) { setReq(r.requestId); setDemoCode(r.demoCode ?? ''); setCode(''); } else setError(r.message);
   }
 
   async function verify() {
@@ -401,8 +403,8 @@ function SignInAgain({ client, onDone }: { client: ServerKycClient; onDone: () =
     if (!alive.current) return;
     setBusy(false);
     setCode('');
-    if (r.ok) { setReq(null); onDone(); return; }
-    if (r.reason === 'void' || r.reason === 'expired') setReq(null);
+    if (r.ok) { setReq(null); setDemoCode(''); onDone(); return; }
+    if (r.reason === 'void' || r.reason === 'expired') { setReq(null); setDemoCode(''); }
     setError(r.message);
   }
 
@@ -417,6 +419,7 @@ function SignInAgain({ client, onDone }: { client: ServerKycClient; onDone: () =
               <Input label="6-digit code" value={code} onChangeText={(t) => setCode(t.replace(/\D/g, '').slice(0, OTP_RULES.length))}
                 keyboardType="number-pad" textContentType="oneTimeCode" autoComplete="sms-otp" maxLength={OTP_RULES.length + 6}
                 placeholder="123456" error={error || null} />
+              {demoCode ? <Text style={[s.text, { fontWeight: '600', marginBottom: 8 }]} accessibilityLiveRegion="polite">{kycDemoCodeText(demoCode)}</Text> : null}
               <Btn primary title="Sign in" disabled={busy || code.length !== OTP_RULES.length} onPress={() => void verify()} />
               <Btn title="Resend OTP" disabled={busy} onPress={() => void send()} />
             </>

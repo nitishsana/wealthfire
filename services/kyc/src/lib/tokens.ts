@@ -33,11 +33,20 @@ export class LocalTokenSigner implements TokenSigner {
   private readonly priv: KeyObject;
   private readonly pub: KeyObject;
 
-  constructor(kid = 'local') {
-    const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  /** `privateKey`: a P-256 private key (local preview keeps one on disk); default a fresh key pair. */
+  constructor(kid = 'local', privateKey?: KeyObject) {
+    if (privateKey) {
+      if (privateKey.type !== 'private' || privateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+        throw new Error('LocalTokenSigner needs a P-256 private key');
+      }
+      this.priv = privateKey;
+      this.pub = createPublicKey(privateKey);
+    } else {
+      const { privateKey: priv, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+      this.priv = priv;
+      this.pub = publicKey;
+    }
     this.kid = kid;
-    this.priv = privateKey;
-    this.pub = publicKey;
   }
 
   async sign(data: Uint8Array): Promise<Uint8Array> {

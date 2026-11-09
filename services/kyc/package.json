@@ -9,6 +9,7 @@
                     "typecheck":  "tsc --noEmit",
                     "build":  "node scripts/bundle.mjs",
                     "synth":  "cdk synth --app \"npx tsx infra/app.ts\" -c synthOnly=true --quiet",
+                    "local":  "tsx local/server.ts",
                     "deploy":  "npx tsx infra/deploy.ts"
                 },
     "dependencies":  {

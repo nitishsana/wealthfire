@@ -1,7 +1,8 @@
 // Review console: sign in, list Under-review cases, open one, Approve / Reject with a reason.
 // Routes are hash-based (#/ and #/cases/<id>) so the in-memory session survives navigation.
 import { ApiError, decide, getCase, listCases, type CaseView, type DocumentLink, type HistoryRow } from './api';
-import { completeSignIn, current, signIn, signOut } from './auth';
+import { completeSignIn, current, signIn, signInDemo, signOut } from './auth';
+import { config, isLocalDemo, loadRuntimeConfig } from './config';
 import { announce, h, show, when } from './dom';
 
 const REVIEWER = 'reviewer';
@@ -34,6 +35,23 @@ function errorBox(message: string): HTMLElement {
 
 function signedOutView(message?: string): void {
   updateHeader();
+  if (isLocalDemo()) {
+    show(
+      h('h1', {}, 'Sign in'),
+      message ? errorBox(message) : null,
+      h('p', {}, 'Local test mode on this computer. No password is needed and only the local KYC server accepts this sign-in.'),
+      h('button', {
+        type: 'button',
+        id: 'demo-signin',
+        onclick: () => {
+          signInDemo();
+          announce('Signed in as demo reviewer.');
+          route();
+        },
+      }, 'Sign in as demo reviewer'),
+    );
+    return;
+  }
   show(
     h('h1', {}, 'Sign in'),
     message ? errorBox(message) : null,
@@ -55,6 +73,8 @@ function updateHeader(): void {
   const out = document.getElementById('signout') as HTMLButtonElement | null;
   if (who) who.textContent = s ? `Signed in as ${s.email || s.sub}` : '';
   if (out) out.hidden = !s;
+  const mode = document.getElementById('mode');
+  if (mode) mode.hidden = !isLocalDemo();
 }
 
 function handleError(e: unknown, retry: () => void): void {
@@ -285,7 +305,25 @@ function route(): void {
 }
 
 async function start(): Promise<void> {
-  document.getElementById('signout')?.addEventListener('click', () => signOut());
+  const configError = await loadRuntimeConfig();
+  if (configError) {
+    updateHeader();
+    show(h('h1', {}, 'Console setup problem'), errorBox(configError));
+    return;
+  }
+  if (config.localDemo === true && !isLocalDemo()) {
+    // A local test build has no Cognito settings, so it must not run anywhere but this computer.
+    updateHeader();
+    show(h('h1', {}, 'Console setup problem'), errorBox('This is a local test build. Open it on http://127.0.0.1 with a local API, or build it with the online config.'));
+    return;
+  }
+  document.getElementById('signout')?.addEventListener('click', () => {
+    // Online: redirects to the Cognito logout page. Local test mode: back to the sign-in button.
+    if (!signOut()) {
+      announce('Signed out.');
+      signedOutView();
+    }
+  });
   window.addEventListener('hashchange', route);
   try {
     await completeSignIn();

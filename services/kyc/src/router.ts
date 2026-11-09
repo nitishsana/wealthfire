@@ -2,8 +2,8 @@
 // /review/* (staff Cognito token, group 'reviewer'). Pure: the Lambda adapter (handlers/api.ts)
 // maps API Gateway events to HttpRequest and HttpResponse back.
 //
-// Every response is JSON with no-store caching, HSTS and nosniff (the dev-only fake partner pages,
-// registered only when STAGE=dev, may answer text/html). Errors use fixed messages and
+// Every response is JSON with no-store caching, HSTS and nosniff (the fake partner pages,
+// registered only when STAGE=dev or STAGE=local, may answer text/html). Errors use fixed messages and
 // never echo a PAN, Aadhaar number, contact, OTP or token. Logs hold the route template, status
 // and latency only.
 import { AUTH_ERROR_MESSAGES } from './lib/errors';
@@ -72,10 +72,21 @@ export interface RouterDeps {
   appOrigins?: readonly string[];
   logger: Logger;
   clock: { now(): number };
-  /** env STAGE; dev partner pages are registered only when this is exactly 'dev' */
+  /**
+   * env STAGE; dev partner pages are registered only when this is exactly 'dev' or 'local' (the
+   * local Node server; the Lambda refuses STAGE=local). `auth.demo` is used only on 'local'.
+   */
   stage?: string;
-  /** devPartnerRoutes(deps) from src/partner/devPages.ts (ignored unless stage === 'dev') */
+  /** devPartnerRoutes(deps) from src/partner/devPages.ts (ignored unless stage is 'dev' or 'local') */
   devPartner?: Record<string, DevPartnerHandler>;
+}
+
+/** The local-only stage (services/kyc/local/server.ts). */
+export const LOCAL_STAGE = 'local';
+
+/** Stages that serve the fake DigiLocker / e-sign pages. */
+export function servesDevPartner(stage: string | undefined): boolean {
+  return stage === 'dev' || stage === LOCAL_STAGE;
 }
 
 export const CORS_ALLOW_METHODS = 'GET, POST, DELETE, OPTIONS';
@@ -156,9 +167,17 @@ export function createRouter(deps: RouterDeps): (req: HttpRequest) => Promise<Ht
   const authKeys = Object.keys(AUTH_ROUTES);
   const kycKeys = Object.keys(deps.kyc);
   const reviewKeys = Object.keys(deps.review);
-  const dev = deps.stage === 'dev' ? (deps.devPartner ?? {}) : {};
+  const dev = servesDevPartner(deps.stage) ? (deps.devPartner ?? {}) : {};
   const devKeys = Object.keys(dev);
-  const authDeps: AuthRouteDeps = { ...deps.auth, appOrigins: deps.appOrigins ?? [] };
+  // The demo OTP source (answers `demoCode`) is dropped on every stage but exactly 'local'.
+  // ... and so are the local persona cookie names (x-wf-persona is never read online).
+  const { demo, personaIds, ...auth } = deps.auth;
+  const local = deps.stage === LOCAL_STAGE;
+  const authDeps: AuthRouteDeps = {
+    ...auth, appOrigins: deps.appOrigins ?? [],
+    ...(local && demo ? { demo } : {}),
+    ...(local && personaIds ? { personaIds } : {}),
+  };
 
   const respond = (req: HttpRequest, status: number, body: unknown, extra: Record<string, string> = {}, cookies: string[] = []): HttpResponse => {
     const headers: Record<string, string> = { ...SECURITY_HEADERS, ...extra };
@@ -196,7 +215,7 @@ export function createRouter(deps: RouterDeps): (req: HttpRequest) => Promise<Ht
       return { key: a.key, res: respond(req, r.status, r.body, {}, (r.cookies ?? []).map(serializeCookie)) };
     }
 
-    // Dev-only fake partner pages (DigiLocker / e-sign); never registered outside STAGE=dev.
+    // Fake partner pages (DigiLocker / e-sign); never registered outside STAGE=dev / STAGE=local.
     const d = devKeys.length ? matchRoute(devKeys, method, path) : null;
     if (d) {
       const r = await dev[d.key]!({ method, path, params: d.params, query: req.query ?? {}, headers: req.headers, body: req.body, ip: req.ip });

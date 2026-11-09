@@ -31,7 +31,7 @@ import type { KycPartner } from '../partner/types';
 import { reviewRoutes } from '../review/routes';
 import { S3DownloadSigner } from '../review/s3';
 import { reviewCaseStore } from '../store/views';
-import { createRouter, type HttpRequest, type HttpResponse } from '../router';
+import { createRouter, LOCAL_STAGE, type HttpRequest, type HttpResponse } from '../router';
 
 type Event = APIGatewayProxyEvent | APIGatewayProxyEventV2;
 type Result = APIGatewayProxyResult | APIGatewayProxyStructuredResultV2;
@@ -121,7 +121,18 @@ export function returnUrlPrefixes(env: Env): string[] {
   return returnUrlPrefixesFromEnv(env);
 }
 
+/**
+ * Local mode (demo OTP code, demo reviewer token, local files) runs only in the local Node server
+ * (services/kyc/local/server.ts). The Lambda refuses to start with STAGE=local.
+ */
+export function assertNotLocalStage(env: Env): void {
+  if ((env[ENV.stage] ?? '').trim().toLowerCase() === LOCAL_STAGE) {
+    throw new Error('STAGE=local runs only in the local server, never in Lambda');
+  }
+}
+
 export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promise<HttpResponse> {
+  assertNotLocalStage(env);
   const clock = systemClock;
   const doc = createDocClient();
   const kms = new KMSClient({});

@@ -1,6 +1,7 @@
 // Google sign-in for Gmail read-only, using Google Identity Services (browser-only token flow).
 // The access token lives in memory for this tab only and is never saved.
 import { GMAIL_SCOPE } from '@wealthfire/core';
+import { storageKey } from './localTest';
 
 interface TokenResponse { access_token?: string; expires_in?: number; error?: string; error_description?: string }
 interface TokenClient { requestAccessToken: (o?: { prompt?: string }) => void }
@@ -13,7 +14,8 @@ declare global {
   }
 }
 
-const CLIENT_ID_KEY = 'wealthfire.googleClientId';
+// prefixed per test user in the localkyc build (?persona=), unchanged otherwise
+const CLIENT_ID_KEY = storageKey('wealthfire.googleClientId');
 
 /** Build-time id (GitHub repo variable) wins; else one the user pasted in the app. */
 export function getClientId(): string {

@@ -14,7 +14,7 @@
 // If the browser blocks the cookie, the web app asks for a new OTP (no localStorage fallback).
 import { AUTH_ERROR_STATUS, AuthError, isAuthError } from '../lib/errors';
 import type { TokenPair, TokenService } from '../lib/tokens';
-import type { OtpService } from './otp';
+import { normalizeContact, type OtpService } from './otp';
 
 export const REFRESH_COOKIE = 'wf_rt';
 /** Path=/ so the cookie also matches the REST API's `/<stage>/auth/...` URLs. */
@@ -54,6 +54,22 @@ export interface AuthRouteDeps {
   clock: { now(): number };
   /** exact web APP origins allowed to use the refresh cookie (env APP_ORIGINS; not the CORS list) */
   appOrigins?: readonly string[];
+  /**
+   * LOCAL MODE ONLY (src/local/demo.ts LocalDemoSender): the last code sent to a contact, answered
+   * as `demoCode` by POST /auth/otp/send. The router drops it unless STAGE is exactly 'local'.
+   */
+  demo?: DemoCodeSource;
+  /**
+   * LOCAL MODE ONLY: LOCAL_PERSONAS ids. With these, `x-wf-persona: <id>` picks the refresh cookie
+   * `wf_rt_<id>`, so local test users in one browser keep separate sessions. The router drops
+   * them unless STAGE is exactly 'local'.
+   */
+  personaIds?: readonly string[];
+}
+
+/** Where the local demo reads the code it just "sent" (kind + normalised contact). */
+export interface DemoCodeSource {
+  codeFor(kind: 'email' | 'mobile', normalizedContact: string): string | undefined;
 }
 
 export type AuthHandler = (req: RouteRequest, deps: AuthRouteDeps) => Promise<RouteResponse>;
@@ -102,13 +118,29 @@ function readCookie(req: RouteRequest, name: string): string | undefined {
   return undefined;
 }
 
-export function refreshCookie(value: string, maxAgeSec: number): Cookie {
+/** LOCAL MODE ONLY: the header naming the local test user (LOCAL_PERSONAS id). */
+export const PERSONA_HEADER = 'x-wf-persona';
+
+/**
+ * The refresh cookie name for this request: `wf_rt_<id>` when the deps carry the local persona
+ * ids (the router sets them only on STAGE=local) and `x-wf-persona` names one of them; else `wf_rt`.
+ */
+export function refreshCookieName(req: RouteRequest, deps: AuthRouteDeps): string {
+  const ids = deps.personaIds;
+  if (!ids || ids.length === 0) return REFRESH_COOKIE;
+  const id = header(req, PERSONA_HEADER);
+  return id !== undefined && ids.includes(id) && /^[a-z0-9]{1,32}$/.test(id) ? `${REFRESH_COOKIE}_${id}` : REFRESH_COOKIE;
+}
+
+export function refreshCookie(value: string, maxAgeSec: number, name: string = REFRESH_COOKIE): Cookie {
   return {
-    name: REFRESH_COOKIE, value, httpOnly: true, secure: true, sameSite: 'None', partitioned: true, path: REFRESH_COOKIE_PATH, maxAge: maxAgeSec,
+    name, value, httpOnly: true, secure: true, sameSite: 'None', partitioned: true, path: REFRESH_COOKIE_PATH, maxAge: maxAgeSec,
   };
 }
 
-function tokenResponse(mode: Transport, deps: AuthRouteDeps, t: TokenPair, extra: Record<string, unknown> = {}): RouteResponse {
+function tokenResponse(
+  mode: Transport, deps: AuthRouteDeps, t: TokenPair, extra: Record<string, unknown> = {}, cookieName: string = REFRESH_COOKIE,
+): RouteResponse {
   const body: Record<string, unknown> = {
     userId: t.userId,
     accessToken: t.accessToken,
@@ -118,12 +150,14 @@ function tokenResponse(mode: Transport, deps: AuthRouteDeps, t: TokenPair, extra
   };
   if (mode === 'body') return { status: 200, body: { ...body, refreshToken: t.refreshToken } };
   const maxAge = Math.max(0, Math.floor((t.refreshExpiresAt - deps.clock.now()) / 1000));
-  return { status: 200, body, cookies: [refreshCookie(t.refreshToken, maxAge)] };
+  return { status: 200, body, cookies: [refreshCookie(t.refreshToken, maxAge, cookieName)] };
 }
 
 /** Cookie mode reads only the cookie; body mode reads only the body. */
-function refreshTokenFrom(mode: Transport, req: RouteRequest, body: Record<string, unknown>): string | undefined {
-  if (mode === 'cookie') return readCookie(req, REFRESH_COOKIE) || undefined;
+function refreshTokenFrom(
+  mode: Transport, req: RouteRequest, body: Record<string, unknown>, cookieName: string = REFRESH_COOKIE,
+): string | undefined {
+  if (mode === 'cookie') return readCookie(req, cookieName) || undefined;
   const fromBody = body.refreshToken;
   return typeof fromBody === 'string' && fromBody ? fromBody : undefined;
 }
@@ -151,11 +185,21 @@ function safe(handler: AuthHandler): AuthHandler {
 
 // ---------- handlers ----------
 
-/** POST /auth/otp/send  body {kind: 'email'|'mobile', contact} -> 200 {challengeId, expiresAt, resendAt} */
+/**
+ * POST /auth/otp/send  body {kind: 'email'|'mobile', contact} -> 200 {challengeId, expiresAt, resendAt}
+ * (+ `demoCode` in local mode only, when `deps.demo` is set: the router sets it only on STAGE=local)
+ */
 export const handleOtpSend: AuthHandler = safe(async (req, deps) => {
   const b = parseBody(req.body);
   const r = await deps.otp.send({ kind: b.kind as 'email' | 'mobile', contact: b.contact as string, ip: req.ip });
-  return { status: 200, body: { challengeId: r.challengeId, expiresAt: r.expiresAt, resendAt: r.resendAt } };
+  const body: Record<string, unknown> = { challengeId: r.challengeId, expiresAt: r.expiresAt, resendAt: r.resendAt };
+  if (deps.demo) {
+    // send() already validated the contact, so this cannot throw here
+    const c = normalizeContact(b.kind, b.contact);
+    const code = deps.demo.codeFor(c.kind, c.value);
+    if (code) body.demoCode = code;
+  }
+  return { status: 200, body };
 });
 
 /** POST /auth/otp/verify  body {challengeId, code, device?} -> 200 tokens */
@@ -168,18 +212,19 @@ export const handleOtpVerify: AuthHandler = safe(async (req, deps) => {
     device: typeof b.device === 'string' ? b.device : undefined,
     ip: req.ip,
   });
-  return tokenResponse(mode, deps, r.tokens, { isNewUser: r.isNewUser });
+  return tokenResponse(mode, deps, r.tokens, { isNewUser: r.isNewUser }, refreshCookieName(req, deps));
 });
 
 /** POST /auth/refresh  body {refreshToken} (phones) or the cookie (web) -> 200 new tokens; 401 on reuse/expiry */
 export const handleRefresh: AuthHandler = safe(async (req, deps) => {
   const mode = transport(req, deps);
+  const name = refreshCookieName(req, deps);
   const b = parseBody(req.body);
-  const token = refreshTokenFrom(mode, req, b);
-  const clear = mode === 'cookie' ? { cookies: [refreshCookie('', 0)] } : {};
+  const token = refreshTokenFrom(mode, req, b, name);
+  const clear = mode === 'cookie' ? { cookies: [refreshCookie('', 0, name)] } : {};
   if (!token) return { ...errorResponse(new AuthError('invalid_token')), ...clear };
   try {
-    return tokenResponse(mode, deps, await deps.tokens.refresh(token));
+    return tokenResponse(mode, deps, await deps.tokens.refresh(token), {}, name);
   } catch (e) {
     return { ...errorResponse(e), ...clear };
   }
@@ -188,10 +233,11 @@ export const handleRefresh: AuthHandler = safe(async (req, deps) => {
 /** POST /auth/logout  body {refreshToken} (phones) or the cookie (web) -> 200 always (idempotent) */
 export const handleLogout: AuthHandler = safe(async (req, deps) => {
   const mode = transport(req, deps);
+  const name = refreshCookieName(req, deps);
   const b = parseBody(req.body);
-  const token = refreshTokenFrom(mode, req, b);
+  const token = refreshTokenFrom(mode, req, b, name);
   if (token) await deps.tokens.revoke(token);
-  return { status: 200, body: { ok: true }, ...(mode === 'cookie' ? { cookies: [refreshCookie('', 0)] } : {}) };
+  return { status: 200, body: { ok: true }, ...(mode === 'cookie' ? { cookies: [refreshCookie('', 0, name)] } : {}) };
 });
 
 export const AUTH_ROUTES: Record<string, AuthHandler> = {

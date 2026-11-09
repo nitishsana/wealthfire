@@ -4,7 +4,10 @@
 // section can be checked without signing in first.
 // Safety: import.meta.env.DEV is false in `npm run build`, so this never runs on the live site,
 // and it never replaces data that is already stored in the browser.
-import { demoData, STORAGE_KEY, type AppData } from '@wealthfire/core';
+import { demoData, STORAGE_KEY as BASE_KEY, type AppData } from '@wealthfire/core';
+import { storageKey } from './localTest';
+
+const STORAGE_KEY = storageKey(BASE_KEY);
 
 export const PREVIEW_PARAM = 'preview';
 export const PREVIEW_VALUE = 'demo';

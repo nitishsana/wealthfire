@@ -11,3 +11,4 @@ apps/android/android/
 apps/ios/ios/
 apps/web/public/ocr/
 cdk.out/
+services/kyc/.local-data/

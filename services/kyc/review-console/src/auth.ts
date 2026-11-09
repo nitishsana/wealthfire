@@ -2,7 +2,13 @@
 // user pool. Tokens live in memory only (this module's variables): a reload means signing in
 // again, which the Hosted UI session makes quick. Only the one-time PKCE verifier and state are
 // kept in sessionStorage, because they must survive the redirect; both are removed on return.
-import { config } from './config';
+// Local test mode (config.localDemo, loopback only) skips Cognito: "Sign in as demo reviewer"
+// makes an in-memory session whose token is the fixed LOCAL_DEMO_TOKEN, which only the local KYC
+// server (STAGE=local) accepts.
+import { config, isLocalDemo } from './config';
+
+/** The bearer value the local KYC server accepts as reviewer `demo-reviewer`. */
+export const LOCAL_DEMO_TOKEN = 'local-demo-reviewer';
 
 export interface Session {
   idToken: string;
@@ -64,6 +70,7 @@ export async function signIn(): Promise<never> {
  * null when there is nothing to finish. Throws on a state mismatch or a failed exchange.
  */
 export async function completeSignIn(): Promise<Session | null> {
+  if (isLocalDemo()) return null;
   const params = new URLSearchParams(location.search);
   const code = params.get('code');
   const state = params.get('state');
@@ -117,9 +124,28 @@ export function forget(): void {
   session = null;
 }
 
-export function signOut(): void {
+/** Local test mode only: signs in as the demo reviewer, no password. */
+export function signInDemo(): Session {
+  if (!isLocalDemo()) throw new Error('Demo sign-in is only for local test mode.');
+  session = {
+    idToken: LOCAL_DEMO_TOKEN,
+    sub: 'demo-reviewer',
+    email: 'Demo reviewer',
+    groups: ['reviewer'],
+    expiresAt: Number.MAX_SAFE_INTEGER,
+  };
+  return session;
+}
+
+/**
+ * Ends the session. Online this redirects to the Cognito logout page; in local test mode it only
+ * clears the session (returns false) so the caller shows the sign-in button again.
+ */
+export function signOut(): boolean {
   session = null;
+  if (isLocalDemo()) return false;
   const url = new URL('/logout', config.cognitoDomain);
   url.search = new URLSearchParams({ client_id: config.clientId, logout_uri: config.logoutUri }).toString();
   location.assign(url.toString());
+  return true;
 }

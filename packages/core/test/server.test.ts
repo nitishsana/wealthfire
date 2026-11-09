@@ -7,6 +7,7 @@ import {
   emptyData,
   emptyOnboarding,
   isEligibleToInvest,
+  kycDemoCodeText,
   serverEligibleToInvest,
   toKycStatusView,
   type ServerFetchInit,
@@ -70,6 +71,40 @@ describe('ServerKycClient auth', () => {
     expect(f.calls[0]!.init.headers['x-wf-client']).toBe('web');
     expect(f.calls[0]!.init.credentials).toBe('include');
     expect(f.calls[0]!.init.headers.authorization).toBeUndefined();
+  });
+
+  it('sendOtp keeps a 6-digit demoCode from the local KYC server; HttpOtpProvider passes it on', async () => {
+    const f = fakeFetch({ 'POST /auth/otp/send': [{ status: 200, body: { challengeId: 'c'.repeat(22), expiresAt: 10, demoCode: '123456' } }] });
+    const c = new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens: memTokens(null) });
+    await expect(c.sendOtp('email', 'a@b.test')).resolves.toEqual({ challengeId: 'c'.repeat(22), expiresAt: 10, demoCode: '123456' });
+    const p = new HttpOtpProvider(c);
+    await expect(p.send({ channel: 'sms', target: '9876543210' }, 0)).resolves.toEqual({ ok: true, requestId: 'c'.repeat(22), expiresAt: 10, demoCode: '123456' });
+    expect(p.isDemo).toBe(false);
+    expect(kycDemoCodeText('123456')).toBe('DEMO code: 123456');
+  });
+
+  it('sendOtp has no demoCode when the server sends none or a value that is not 6 digits', async () => {
+    const f = fakeFetch({
+      'POST /auth/otp/send': [
+        { status: 200, body: { challengeId: 'c'.repeat(22), expiresAt: 10 } },
+        { status: 200, body: { challengeId: 'd'.repeat(22), expiresAt: 10, demoCode: 'a@b.test' } },
+        { status: 200, body: { challengeId: 'e'.repeat(22), expiresAt: 10, demoCode: 123456 } },
+        { status: 200, body: { challengeId: 'f'.repeat(22), expiresAt: 10, demoCode: '1234567' } },
+      ],
+    });
+    const c = new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens: memTokens(null) });
+    for (const ch of ['c', 'd', 'e', 'f']) {
+      const r = await c.sendOtp('email', 'a@b.test');
+      expect(r).toEqual({ challengeId: ch.repeat(22), expiresAt: 10 });
+      expect('demoCode' in r).toBe(false);
+    }
+    const p = new HttpOtpProvider(new ServerKycClient({
+      baseUrl: BASE, tokens: memTokens(null),
+      fetch: fakeFetch({ 'POST /auth/otp/send': [{ status: 200, body: { challengeId: 'g'.repeat(22), expiresAt: 10 } }] }).fetch,
+    }));
+    const sent = await p.send({ channel: 'email', target: 'a@b.test' }, 0);
+    expect(sent).toEqual({ ok: true, requestId: 'g'.repeat(22), expiresAt: 10 });
+    expect('demoCode' in sent).toBe(false);
   });
 
   it('verifyOtp stores the access token (web: refresh stays in the cookie)', async () => {
