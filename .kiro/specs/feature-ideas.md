@@ -153,6 +153,18 @@ Note: the sheet keeps the yearly expense flat after retirement and uses the low 
 
 **Golden test:** with the inputs above, the app must show exactly the sheet's outputs (to the rupee, and 17.98 years).
 
+**Everything depends on the user's current age and chosen retirement age** (Nitish, 2026-11-09). The years to retirement (Y) set how much today's spend inflates, how long the corpus must last (to the live-up-to age) and how many months of SIP there are. Change either age and the corpus and monthly SIP are worked out again at once. Same sheet inputs, only the ages changed:
+
+| Current age | Retire at | Years to go | Corpus needed | SIP per month |
+|---|---|---|---|---|
+| 38 | 50 | 12 | 6,15,69,812 | 2,05,087 |
+| 38 | 55 | 17 | 7,38,17,685 | 1,25,363 |
+| 38 | 60 | 22 | 8,61,12,691 | 79,147 |
+| 30 | 55 | 25 | 11,76,54,175 | 78,106 |
+| 45 | 55 | 10 | 4,90,92,976 | 2,19,247 |
+
+(Starting younger needs a bigger corpus, because today's spend inflates for longer, but a smaller SIP, because there are more months to invest.)
+
 **Lean / FIRE / Barista / Fat:** the sheet has one goal. Each FIRE type changes the expense used: today Lean = 70%, FIRE = 100%, Fat = 150%, Barista = expense minus part-time income. Then the same formulas run for each type, giving a corpus and SIP per type.
 
 ### Questions to settle in the spec (once the Excel sheet is in)
