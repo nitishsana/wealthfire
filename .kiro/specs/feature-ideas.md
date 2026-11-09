@@ -249,10 +249,12 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - **Choose:** show all the accounts found. The user can **untick any account** they don't want linked.
 - **Fetch the money data:** for the accounts kept, fetch the credits and debits (and balances or holdings).
 - **Fill Net worth:** put everything into the **Net worth** tab, sorted into **Assets** (bank balances, EPF, Demat holdings, NPS, deposits) and **Liabilities** (loans, credit card dues).
+- **Loans too (Nitish, 2026-11-09):** loans mapped to the phone number (home, car, personal, education, gold, loan against property, credit card dues) are also found and fetched, each with lender, outstanding amount, EMI and end date where available. Every loan is mapped to **Liabilities** in the Net worth tab, and its EMI feeds the "total EMIs" figure Net worth shows today.
 
 ### Notes for the spec
 
 - In India this is done through the RBI **Account Aggregator** framework: a licensed AA (for example Finvu, OneMoney, Setu, Anumati) finds accounts linked to the mobile number and shares data only after the user approves a **consent** on the AA's screen. Wealthfire would need an AA / FIU partner agreement and its sandbox, like the KYC partner. Already noted as a gap: "Bank links need an Account Aggregator partner and are not built".
+- Loan data: check which lenders share loans and credit cards through the AA (banks and NBFCs as data providers). For loans the AA does not cover, a credit bureau report (CIBIL, Experian, Equifax, CRIF, with the user's consent) lists all loans against the PAN; the spec decides whether to use it.
 - Coverage to check with the partner: banks and deposits are widely available; Demat (via NSDL / CDSL), mutual funds (CAS) and NPS (via the CRAs) are available through some AAs; **EPFO** may not be available through AAs yet and could need another route (for example the EPF passbook / UAN). Loans and credit cards: check which lenders share liabilities.
 - Consent rules: purpose, which data, how long, how often; the user can revoke. Data handling follows the same privacy and retention rules as KYC (adviser to confirm).
 - Today's app: Connect page has "Coming soon" placeholders for Bank, CAS, Stocks/broker and EPF/NPS; Net worth is typed in by hand; Expenses reads card statements and Gmail alerts. Fetched debits could also feed Expenses.
@@ -264,5 +266,7 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - How often are accounts refreshed (once, daily, on opening the app)?
 - Do fetched debits also go into Expenses, with categories?
 - Manual entries already in Net worth: keep beside the linked ones, replace, or ask?
+- Loans not found through the AA: add a credit bureau check, or let the user add them by hand?
+- Can the user untick a loan? (Unticking would hide a real liability, so Net worth would look higher.)
 - Which AA partner, and what happens on the local test mode (a fake AA like the fake KYC partner)?
 - Same flow on web, Android and iOS.
