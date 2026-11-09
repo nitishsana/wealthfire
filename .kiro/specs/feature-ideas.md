@@ -174,3 +174,30 @@ Note: the sheet keeps the yearly expense flat after retirement and uses the low 
 - Should the 4 suggestions show on Profile itself, or stay on FIRE plan with Profile linking to them?
 - Does this merge with Idea 2 (Risk inside Profile, locked name and age) into one Profile redesign?
 - Same on web, Android and iOS; numbers must match the sheet exactly for the same inputs (golden tests built from the sheet).
+
+---
+
+## Idea 4: Retirement planner flow, right after the risk profile (first time only)
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+- **Order for a new user:** onboarding → KYC → risk profile cards (Idea 2) → **Retirement planner** flow straight away.
+- **Retirement planner** asks, step by step, everything needed to work out the right **monthly SIP**: the Idea 3 inputs (current age, retirement age, live-up-to age, monthly spend excluding EMIs, inflation, returns before and after retirement, existing investments, EPF / gratuity / leave encashment / NPS, estate).
+- **At the end,** it shows the result (corpus and SIP per month for each FIRE type, from Idea 3) and **writes every answer into the Profile tab**, so the user does not type anything twice.
+- **Runs once:** only for first-time users who have not finished the Retirement planner. After that, the user changes the numbers in Profile.
+
+### Links to other ideas
+
+- Starts after Idea 2's risk cards; uses Idea 3's inputs and formulas (golden numbers from the sheet).
+- Ideas 2, 3 and 4 together reshape the first-run journey and Profile, so the spec may combine them.
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- Can the user leave the planner halfway and resume it later, or skip it? Does it block the rest of the app until done?
+- Existing users who already filled Profile: do they see the planner once, pre-filled, or never?
+- Which answers are pre-filled from onboarding (age from date of birth, spend from Expenses) and which are always asked?
+- One question per screen or grouped screens; a progress bar; a Back button?
+- Does the end screen pick one FIRE type as the goal (today's Profile "FIRE goal")?
+- Same flow on web, Android and iOS.
