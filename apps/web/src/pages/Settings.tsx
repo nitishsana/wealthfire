@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  DEFAULT_ASSUMPTIONS, demoData, showDemoReviewer, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewRowReasonText, serialize,
+  accountStatusNote, DEFAULT_ASSUMPTIONS, demoData, showDemoReviewer, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewRowReasonText, serialize,
   type Assumptions,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -57,6 +57,7 @@ export function SettingsPage() {
               {kycServer ? 'Device check: ' : 'Account status: '}<strong>{kycStatusLabel(ob.kyc.status)}</strong>
               {ob.kyc.status === 'rejected' && ob.kyc.review?.decision?.reason ? <> ({ob.kyc.review.decision.reason})</> : null}
             </p>
+            {accountStatusNote(ob.kyc.status) && <p className="muted">{accountStatusNote(ob.kyc.status)}</p>}
             {ob.kyc.status === 'rejected' && (
               <button className="btn primary" onClick={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'redo-documents' }) }))}>Redo documents</button>
             )}

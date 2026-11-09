@@ -16,7 +16,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { LOCAL_PERSONAS } from '@wealthfire/core/src/localPersonas';
-import { OtpService } from '../auth/otp';
+import { LOCAL_IP_LIMITS, OtpService } from '../auth/otp';
 import { PERSONA_HEADER } from '../auth/routes';
 import { loadConfig } from '../config';
 import { systemClock, type Clock } from '../lib/clock';
@@ -125,7 +125,10 @@ export function createLocalApp(o: LocalAppOptions): LocalApp {
   const seen = new MemorySeenEventStore();
   const tokens = new TokenService({ sessions: authRepos.sessions, signer: new LocalTokenSigner('local', keys.jwt), clock });
   const sender = new LocalDemoSender(stage, print, () => clock.now());
-  const otp = new OtpService({ repos: authRepos, clock, mac, encryptor, hasher: new Argon2Hasher(), sender, tokens, metrics: noMetrics });
+  // All local testers share 127.0.0.1, so only the per-IP caps are lifted here (STAGE=local is enforced above).
+  const otp = new OtpService({
+    repos: authRepos, clock, mac, encryptor, hasher: new Argon2Hasher(), sender, tokens, metrics: noMetrics, ipLimits: LOCAL_IP_LIMITS,
+  });
   const files = new LocalFileStore({ dir: join(dataDir, 'files'), baseUrl: api, key: keys.files, clock });
   const config = loadConfig(env);
   const secret = async (): Promise<string> => keys.webhook;

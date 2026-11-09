@@ -330,11 +330,13 @@ function aadhaarHolderWords(text: string): string[] {
     const kinds = (l: string) => [isBirthLine(l) && 'b', GENDER_EN.test(l) && 'e', GENDER_HI.test(l) && 'h'].filter(Boolean);
     const seen = new Set(kinds(lines[g]!));
     let b = g;
-    while (b > 0 && isBirthOrGenderLine(lines[b - 1]!)) {
-      const k = kinds(lines[b - 1]!);
+    // blank OCR lines inside the block (e.g. between DOB and MALE) are skipped, not a block end
+    const prevText = (i: number) => { let j = i - 1; while (j >= 0 && lines[j]!.trim() === '') j--; return j; };
+    for (let j = prevText(b); j >= 0 && isBirthOrGenderLine(lines[j]!); j = prevText(b)) {
+      const k = kinds(lines[j]!);
       if (k.some((x) => seen.has(x))) break;
       k.forEach((x) => seen.add(x));
-      b--;
+      b = j;
     }
     // the name sits between the previous card's DOB / gender line (if any) and this block
     let p = b - 1;

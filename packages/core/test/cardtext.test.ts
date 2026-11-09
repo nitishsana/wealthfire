@@ -772,3 +772,19 @@ describe('Pre-verified done message', () => {
     expect(DOC_MESSAGES.doneVerified).toBe('Your final KYC check is complete. Your account is verified.');
   });
 });
+
+describe('Aadhaar holder name with blank OCR lines inside the DOB / gender block', () => {
+  const text = (gap: string[]) => ['Government of India', 'Nitish Sana', 'DOB: 01/01/1990', ...gap, 'MALE', '2341 2341 2346'].join('\n');
+
+  it('a blank line between DOB and MALE keeps the holder name', () => {
+    expect(nameOnCard([text([''])], 'Nitish', 'Sana', 'aadhaar')).toBe(true);
+    expect(nameOnCard([text(['', '   '])], 'Nitish', 'Sana', 'aadhaar')).toBe(true);
+    expect(nameOnCard([text([''])], 'Ravi', 'Kumar', 'aadhaar')).toBe(false);
+  });
+
+  it('a second card above still never lends its name', () => {
+    const two = ['Asha Rao', 'DOB: 15/08/1990', '', 'FEMALE', 'Government of India', 'Nitish Sana', 'DOB: 01/01/1990', '', 'MALE', '2341 2341 2346'].join('\n');
+    expect(nameOnCard([two], 'Nitish', 'Sana', 'aadhaar')).toBe(true);
+    expect(nameOnCard([two], 'Asha', 'Rao', 'aadhaar')).toBe(false);
+  });
+});

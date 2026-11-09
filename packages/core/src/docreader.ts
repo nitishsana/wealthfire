@@ -1,7 +1,7 @@
 // Document reader slot. v1 ships DemoDocumentReader, which reads nothing and returns a number
 // based on the picked demo mode. A real partner reader (Digio / HyperVerge OCR) needs a backend
 // that uploads the file over HTTPS and returns only the number. Files are never stored or logged.
-import type { DocReaderId, KycField } from './types';
+import type { DocReaderId, KycField, KycStatus } from './types';
 import { normalizeAadhaar, normalizePan, validateAadhaar, validatePan, verhoeffCheckDigit } from './onboarding';
 import { cardBlock, hasMultipleCards, nameOnCard, parseAadhaarText, parsePanText, pickMajority } from './cardtext';
 
@@ -90,6 +90,17 @@ export const DOC_MESSAGES = {
   unreadable: (field: KycField) =>
     `We couldn't read your ${field === 'pan' ? 'PAN' : 'Aadhaar'} card. Upload a clearer photo or PDF.`,
 } as const;
+
+/** Line under 'Account status:' in Settings > Account (web and phones): only once the final KYC made it Verified. */
+export function accountStatusNote(status: KycStatus | null | undefined): string | undefined {
+  return status === 'verified' ? DOC_MESSAGES.doneVerified : undefined;
+}
+
+/** Reading progress that never goes down while one read runs (OCR passes can report a lower %). */
+export function monotonicProgress(prev: number | null, next: number): number {
+  const v = Math.max(0, Math.min(100, Math.round(next)));
+  return prev === null ? v : Math.max(prev, v);
+}
 
 /** Error text, or null when the file type and size are fine for the slot. */
 export function validateDocFile(f: Pick<DocFile, 'kind' | 'mime' | 'size'>): string | null {

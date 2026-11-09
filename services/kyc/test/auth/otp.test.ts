@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OTP_RULES } from '@wealthfire/core';
 import { AuthError } from '../../src/lib/errors';
-import { challengeContactContext, contactLookup, normalizeContact, OTP_LIMITS } from '../../src/auth/otp';
+import { challengeContactContext, contactLookup, LOCAL_IP_LIMITS, normalizeContact, OTP_LIMITS } from '../../src/auth/otp';
 import { otpFailureEmf } from '../../src/lib/metrics';
 import { EMAIL, MOBILE, setup } from './helpers';
 
@@ -259,6 +259,22 @@ describe('OTP abuse limits (S3)', () => {
       clock.advance(11 * 60_000);
     }
     expect((await errOf(otp.send({ kind: 'email', contact: EMAIL, ip: '192.0.2.77' }))).code).toBe('rate_limited');
+  });
+
+  it('online: the 21st send from one IP in an hour is refused; local test limits lift only the per-IP cap', async () => {
+    const mobileN = (i: number) => `98765${10000 + i}`;
+    const online = setup();
+    for (let i = 0; i < 20; i++) await online.otp.send({ kind: 'mobile', contact: mobileN(i), ip: IP });
+    expect((await errOf(online.otp.send({ kind: 'mobile', contact: mobileN(20), ip: IP }))).code).toBe('rate_limited');
+
+    const local = setup({ ipLimits: LOCAL_IP_LIMITS });
+    for (let i = 0; i < 25; i++) await local.otp.send({ kind: 'mobile', contact: mobileN(i), ip: '127.0.0.1' });
+    // the per-target caps still hold locally
+    for (let i = 0; i < 2; i++) {
+      local.clock.advance(11 * 60_000);
+      await local.otp.send({ kind: 'mobile', contact: MOBILE, ip: '127.0.0.1' });
+    }
+    expect(LOCAL_IP_LIMITS.maxSendsPerIp).toBeGreaterThan(OTP_LIMITS.maxSendsPerIp);
   });
 
   it('caps sends per target at 10 per 24 h', async () => {

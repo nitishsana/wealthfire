@@ -30,6 +30,9 @@ const NAV = [
   { to: '/settings', label: 'Settings', icon: '⚙️' },
 ];
 
+/** Route names a path link may use (e.g. /profile?preview=demo), turned into #/profile in main.tsx. */
+export const ROUTE_NAMES: readonly string[] = [...NAV.map((n) => n.to.slice(1)).filter(Boolean), 'gmail'];
+
 export function App() {
   const { data } = useStore();
   const navigate = useNavigate();

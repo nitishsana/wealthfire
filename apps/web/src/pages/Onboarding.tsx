@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   applyReread, canReread, normalizeDob, validateDob, canSend, canSendForHandCheck, checkOutcome, countsAsFailedRead, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
-  maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer, panSurnameWarning,
+  maskEmail, maskMobile, monotonicProgress, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer, panSurnameWarning,
   readBlocked, readsLeft, resendIn, reviewFields, sameDocument, takeDocumentNumber, validateAadhaar, validateEmail, validateMobile, validateName, validatePan,
   type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OnboardingEvent,
 } from '@wealthfire/core';
@@ -147,7 +147,7 @@ function useReadProgress(active: boolean): number | null {
     const off = sub((p) => {
       if (!Number.isFinite(p)) return;
       const v = p <= 1 ? p * 100 : p; // accept 0–1 or 0–100
-      setPct(Math.max(0, Math.min(100, Math.round(v))));
+      setPct((prev) => monotonicProgress(prev, v)); // never goes down during one read
     });
     return () => { if (typeof off === 'function') off(); };
   }, [active]);

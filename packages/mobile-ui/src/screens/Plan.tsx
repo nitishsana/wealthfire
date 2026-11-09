@@ -7,7 +7,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import {
   BUCKET_NAMES, categorize, DEFAULT_ASSUMPTIONS, DEFAULT_BARISTA_SHARE, demoData, emptyData, EXPENSE_CATEGORIES, inr, inrShort, makeSnapshot,
-  kycStatusLabel, maskAadhaar, showDemoReviewer, reviewRowReasonText, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
+  accountStatusNote, kycStatusLabel, maskAadhaar, showDemoReviewer, reviewRowReasonText, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
   type Assumptions, type BucketState, type ExpenseCategory,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -317,6 +317,7 @@ function AccountCard() {
             {server ? 'Device check: ' : 'Account status: '}<Text style={{ fontWeight: '800' }}>{kycStatusLabel(ob.kyc.status)}</Text>
             {ob.kyc.status === 'rejected' && ob.kyc.review?.decision?.reason ? ` (${ob.kyc.review.decision.reason})` : ''}
           </Text>
+          {accountStatusNote(ob.kyc.status) ? <Text style={s.small}>{accountStatusNote(ob.kyc.status)}</Text> : null}
           {ob.kyc.status === 'rejected' ? (
             <Btn primary title="Redo documents" onPress={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'redo-documents' }) }))} />
           ) : null}

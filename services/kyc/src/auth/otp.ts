@@ -87,7 +87,15 @@ export interface OtpDeps {
   metrics?: AuthMetrics;
   /** Injectable for tests; defaults to a uniform crypto-random 6-digit code. */
   generateCode?: () => string;
+  /**
+   * Local test server only: per-IP caps. Every tester on the laptop is 127.0.0.1, so the online
+   * per-IP caps would block a test run. Per-target caps and lockouts are never changed.
+   */
+  ipLimits?: { maxSendsPerIp: number; maxVerifiesPerIp: number };
 }
+
+/** Per-IP caps for the local test server (STAGE=local only; online keeps OTP_LIMITS). */
+export const LOCAL_IP_LIMITS = { maxSendsPerIp: 10_000, maxVerifiesPerIp: 10_000 } as const;
 
 export interface SendInput {
   kind: ContactKind;
@@ -164,7 +172,8 @@ export class OtpService {
 
     try {
       // Per-IP first, so a limited IP cannot use up a target's sends.
-      await this.reserve(`ip:${ipHash}`, [{ windowMs: OTP_LIMITS.ipWindowMs, max: OTP_LIMITS.maxSendsPerIp }], 0);
+      const maxSendsPerIp = this.deps.ipLimits?.maxSendsPerIp ?? OTP_LIMITS.maxSendsPerIp;
+      await this.reserve(`ip:${ipHash}`, [{ windowMs: OTP_LIMITS.ipWindowMs, max: maxSendsPerIp }], 0);
     } catch (e) {
       this.fail('send-limited', kind);
       throw e;
@@ -215,7 +224,8 @@ export class OtpService {
 
     const ipHash = await this.ipHash(input.ip);
     try {
-      await this.reserve(`v:${ipHash}`, [{ windowMs: OTP_LIMITS.verifyIpWindowMs, max: OTP_LIMITS.maxVerifiesPerIp }], 0);
+      const maxVerifiesPerIp = this.deps.ipLimits?.maxVerifiesPerIp ?? OTP_LIMITS.maxVerifiesPerIp;
+      await this.reserve(`v:${ipHash}`, [{ windowMs: OTP_LIMITS.verifyIpWindowMs, max: maxVerifiesPerIp }], 0);
     } catch (e) {
       this.fail('verify-limited');
       throw e;
