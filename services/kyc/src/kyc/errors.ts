@@ -12,7 +12,13 @@ export type KycErrorCode =
   | 'upload_missing'
   | 'conflict'
   | 'limit_reached'
-  | 'partner_unavailable';
+  | 'partner_unavailable'
+  /** S2: a paid partner call without a prior consent row for its purpose (contract code) */
+  | 'consent-required'
+  /** S14: the uploaded file's content does not match its declared type */
+  | 'upload_rejected'
+  /** R7: date of birth under 18 */
+  | 'under_age';
 
 export const KYC_ERROR_MESSAGES: Record<KycErrorCode, string> = {
   bad_request: 'Check the details and try again.',
@@ -27,6 +33,9 @@ export const KYC_ERROR_MESSAGES: Record<KycErrorCode, string> = {
   conflict: 'Your KYC changed meanwhile. Check your status and try again.',
   limit_reached: 'You have reached today\u2019s limit for KYC checks. Try again tomorrow.',
   partner_unavailable: 'The KYC service is not answering right now. Try again shortly.',
+  'consent-required': 'We need your consent for this step first.',
+  upload_rejected: 'That file is not the JPG, PNG or PDF it should be. Upload the file again.',
+  under_age: 'You must be 18 or older to invest.',
 };
 
 export const KYC_ERROR_STATUS: Record<KycErrorCode, number> = {
@@ -42,6 +51,9 @@ export const KYC_ERROR_STATUS: Record<KycErrorCode, number> = {
   conflict: 409,
   limit_reached: 429,
   partner_unavailable: 503,
+  'consent-required': 409,
+  upload_rejected: 400,
+  under_age: 400,
 };
 
 export class KycError extends Error {

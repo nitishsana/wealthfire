@@ -1,5 +1,6 @@
-// Thin client for the /review/* routes. Sends the Cognito ID token (the API's Cognito
-// authorizer validates ID tokens). A 401 drops the in-memory session.
+// Thin client for the /review/* routes. Sends the Cognito ID token as `Authorization: Bearer
+// <idToken>` (S8: the one format the gateway authorizer and the Lambda verifier both accept).
+// A 401 drops the in-memory session.
 import { current, forget } from './auth';
 import { config } from './config';
 
@@ -40,13 +41,18 @@ export class ApiError extends Error {
   }
 }
 
+/** S8: the staff Authorization header value. */
+export function authorizationHeader(idToken: string): string {
+  return `Bearer ${idToken}`;
+}
+
 async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
   const s = current();
   if (!s) throw new ApiError(401, 'Your session has ended. Sign in again.');
   const res = await fetch(`${config.apiUrl.replace(/\/$/, '')}${path}`, {
     method,
     headers: {
-      authorization: s.idToken,
+      authorization: authorizationHeader(s.idToken),
       ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -73,13 +79,19 @@ export function listCases(cursor?: string): Promise<{ items: CaseView[]; nextCur
   return call('GET', `/review/cases?${q.toString()}`);
 }
 
-export function getCase(id: string): Promise<{ case: CaseView; documents: DocumentLink[]; history: HistoryRow[] }> {
+export function getCase(id: string): Promise<{
+  case: CaseView;
+  documents: DocumentLink[];
+  /** false when the case is not Under review: no document links are signed (S16) */
+  documentsAvailable?: boolean;
+  history: HistoryRow[];
+}> {
   return call('GET', `/review/cases/${encodeURIComponent(id)}`);
 }
 
 export function decide(
   id: string,
   body: { action: 'approve'; note?: string; version: number } | { action: 'reject'; reason: string; version: number },
-): Promise<{ case: CaseView }> {
+): Promise<{ case: CaseView; next?: string }> {
   return call('POST', `/review/cases/${encodeURIComponent(id)}`, body);
 }

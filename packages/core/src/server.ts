@@ -3,8 +3,10 @@
 // they never carry a PAN, Aadhaar number, contact, OTP or token (not even if a server echoed one).
 //
 // Tokens: the access token lives in `tokens`. The refresh token is
-// - web (`client: 'web'`, default): an HttpOnly cookie on the API's /auth path; requests send
-//   `x-wf-client: web` and `credentials: 'include'`, so the app never sees it;
+// - web (`client: 'web'`, default): the HttpOnly cookie `wf_rt` (Path=/, SameSite=None, Partitioned);
+//   every request sends `x-wf-client: web`, /auth/* also `credentials: 'include'`, so the app never
+//   sees it. If the browser blocks the cookie, refresh fails and the app shows KYC_TEXT.signInAgain
+//   and asks for an OTP: the refresh token is never kept in localStorage or anywhere else;
 // - phones (`client: 'app'`): in the JSON body; kept through `tokens.getRefresh / setRefresh`
 //   (expo-secure-store).
 // On a 401 from a /kyc route the client refreshes once (or calls `opts.refresh`) and retries.
@@ -20,10 +22,11 @@ export type ServerStatus = KycStatus; // 'pre-verified' | 'under-review' | 'veri
 export interface ServerNext {
   /**
    * start: no case yet, call startKyc. digilocker: the Aadhaar step is open (call startAadhaar,
-   * 'digilocker' or 'otp'). documents: upload a selfie, then submitSelfie. esign: call startEsign.
-   * wait: the server or a reviewer is working. none: decided.
+   * 'digilocker' or 'otp'). documents: upload the selfie (plus Aadhaar and PAN cards), then submitSelfie.
+   * esign: call startEsign. retry: a partner timed out, offer Try again (retry). wait: the server or a
+   * reviewer is working. none: decided.
    */
-  type: 'start' | 'digilocker' | 'aadhaar-otp' | 'documents' | 'esign' | 'wait' | 'none';
+  type: 'start' | 'digilocker' | 'aadhaar-otp' | 'documents' | 'esign' | 'retry' | 'wait' | 'none';
   url?: string;
 }
 
@@ -32,6 +35,126 @@ export interface KycStatusView {
   /** server reason code, e.g. 'kra-validated', 'check-unclear', 'staff-rejected' */
   reason: string | null;
   next: ServerNext;
+  /** Document kinds the server already holds for this case, when the server says (else unknown). */
+  documents?: DocKind[];
+  /** The server's eligibleToInvest; false e.g. for a staff-approved case still waiting for e-sign. */
+  eligibleToInvest?: boolean;
+}
+
+// ---------- consent (DPDP, design 7) ----------
+
+/** One consent row per paid partner check. The server answers 409 consent-required without it. */
+export type ConsentPurpose = 'digilocker' | 'aadhaar-otp' | 'pan-check' | 'face-match' | 'esign' | 'kra-upload';
+export const CONSENT_PURPOSES: readonly ConsentPurpose[] = ['digilocker', 'aadhaar-otp', 'pan-check', 'face-match', 'esign', 'kra-upload'];
+
+/** Tick-box text per purpose. Same on web, Android and iOS. */
+export const CONSENT_TEXT: Record<ConsentPurpose, string> = {
+  'pan-check': 'I agree that Wealthfire checks my PAN and KYC record with the KRA and the Income Tax Department.',
+  digilocker: 'I agree that Wealthfire gets my Aadhaar details from DigiLocker for my KYC.',
+  'aadhaar-otp': 'I agree that Wealthfire checks my Aadhaar with an OTP for my KYC.',
+  'face-match': 'I agree that Wealthfire matches my selfie with my Aadhaar photo.',
+  esign: 'I agree to sign my KYC form with Aadhaar e-sign.',
+  'kra-upload': 'I agree that Wealthfire sends my KYC record to the KRA after it is approved.',
+};
+
+/** Purposes each user step needs (the e-sign screen asks two separate ticks). */
+export const STEP_CONSENT = {
+  start: ['pan-check'],
+  digilocker: ['digilocker'],
+  'aadhaar-otp': ['aadhaar-otp'],
+  documents: ['face-match'],
+  esign: ['esign', 'kra-upload'],
+  /** retry re-runs the KRA lookup / PAN check: only asked again when the server has no consent on record */
+  retry: ['pan-check'],
+} as const satisfies Record<string, readonly ConsentPurpose[]>;
+
+// ---------- shared texts (web, Android, iOS) ----------
+
+/**
+ * Short text for a server reason code. Unknown codes show nothing, so no server value is ever echoed.
+ * `hand-check` and `device-hand-check` show the same text.
+ */
+export const KYC_REASON_TEXT: Record<string, string> = {
+  'kra-validated': 'Your KYC record was confirmed.',
+  'full-kyc-passed': 'All checks passed.',
+  'in-progress': 'Checks are in progress.',
+  'check-unclear': 'Our team is taking a closer look.',
+  'partner-timeout': 'Our partner is slow. Tap Try again.',
+  'hand-check': 'We\u2019re checking your documents by hand.',
+  'device-hand-check': 'We\u2019re checking your documents by hand.',
+  'pan-in-use': 'We need to check your PAN by hand.',
+  'consent-withdrawn': 'You withdrew consent, so we stopped your KYC.',
+  'pan-invalid': 'Your PAN could not be verified.',
+  'pan-not-individual': 'This PAN is not for an individual.',
+  'aadhaar-mismatch': 'Your Aadhaar details did not match.',
+  'liveness-failed': 'The selfie check did not pass.',
+  'staff-approved': 'Approved by our team.',
+  'staff-rejected': 'Rejected by our team.',
+};
+
+/** Reason text, or undefined for an unknown / missing code. */
+export function kycReasonText(reason: string | null | undefined): string | undefined {
+  return reason && Object.prototype.hasOwnProperty.call(KYC_REASON_TEXT, reason) ? KYC_REASON_TEXT[reason] : undefined;
+}
+
+export const KYC_TEXT = {
+  tryAgain: 'Try again',
+  /** web refresh cookie blocked or the session ended: ask for an OTP (no localStorage fallback) */
+  signInAgain: 'Please sign in again.',
+  signInAgainHint: 'We will send a code to',
+  docsNeeded: 'Our team needs your selfie, Aadhaar card and PAN card to check your KYC.',
+  docsUnknownHint: 'Skip this if you already sent them.',
+  sendDocs: 'Send documents',
+  docsSent: 'Documents sent.',
+  uploadAll: 'Upload your selfie, Aadhaar card and PAN card',
+  uploadSelfieOnly: 'Upload a new selfie',
+  uploadContinue: 'Upload and continue',
+  pickAll: 'Choose every document first.',
+  uploadFailed: 'Could not upload your documents. Try again.',
+  consentNeeded: 'Tick the box to continue.',
+  withdrawButton: 'Withdraw consent',
+  withdrawTitle: 'Withdraw consent?',
+  withdrawBody: 'We will stop your KYC. You can\u2019t invest until you finish KYC again.',
+  withdrawConfirm: 'Withdraw',
+  withdrawDone: 'You withdrew consent, so we stopped your KYC.',
+  deleteButton: 'Delete my KYC data',
+  deleteTitle: 'Delete your KYC data?',
+  deleteBody: 'We delete your documents and details. Some records stay if the law needs them.',
+  deleteConfirm: 'Delete',
+  deleteDone: 'We deleted your KYC data.',
+  cancel: 'Cancel',
+  dataTitle: 'Your KYC data',
+} as const;
+
+/** True when the error means the session has ended (refresh cookie / token missing or refused). */
+export function needsSignIn(e: unknown): boolean {
+  return isServerError(e) && e.status === 401 && (e.code === 'unauthorized' || e.code === 'invalid_token');
+}
+
+/** True when the server refused a step for a missing consent row. */
+export function isConsentRequired(e: unknown): boolean {
+  return isServerError(e) && e.code === 'consent_required';
+}
+
+const ALL_DOCS: readonly DocKind[] = ['selfie', 'aadhaar', 'pan'];
+
+/**
+ * Documents the app should ask for now (R1). `sent`: kinds uploaded in this session.
+ * - selfie step: always a new selfie, plus the Aadhaar and PAN cards not yet held;
+ * - under review (hand check, PAN in use, unclear, timeout): every kind not yet held, for the reviewer;
+ * - otherwise nothing.
+ */
+export function kycDocsNeeded(view: KycStatusView | null, sent: ReadonlySet<DocKind> = new Set()): DocKind[] {
+  if (!view || view.status === null || view.status === 'verified' || view.status === 'rejected') return [];
+  const held = new Set<DocKind>([...(view.documents ?? []), ...sent]);
+  if (view.next.type === 'documents') return ALL_DOCS.filter((k) => k === 'selfie' || !held.has(k));
+  if (view.status === 'under-review') return ALL_DOCS.filter((k) => !held.has(k));
+  return [];
+}
+
+/** True when the Profile buttons (withdraw consent, delete data) apply: server mode and a case exists. */
+export function hasKycCase(view: KycStatusView | null): boolean {
+  return !!view && view.status !== null;
 }
 
 export interface TokenStore {
@@ -67,7 +190,7 @@ export interface StartKycInput {
 
 /** What the client needs from a request (subset of RequestInit). */
 export interface ServerFetchInit {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'DELETE';
   headers: Record<string, string>;
   body?: string;
   credentials?: 'include';
@@ -116,6 +239,9 @@ export const SERVER_ERROR_MESSAGES: Record<string, string> = {
   conflict: 'Your KYC changed meanwhile. Check your status and try again.',
   limit_reached: 'You have reached today\u2019s limit for KYC checks. Try again tomorrow.',
   partner_unavailable: 'The KYC service is not answering right now. Try again shortly.',
+  consent_required: 'Tick the box to continue.',
+  'consent-required': 'Tick the box to continue.',
+  upload_failed: 'Could not upload your documents. Try again.',
   payload_too_large: 'That request is too large.',
   forbidden: 'You do not have access to this.',
   internal: 'Something went wrong. Try again.',
@@ -131,7 +257,9 @@ export class ServerError extends Error {
   readonly retryAfterMs?: number;
   readonly triesLeft?: number;
 
-  constructor(status: number, code: string, extra: { retryAfterMs?: number; triesLeft?: number } = {}) {
+  constructor(status: number, rawCode: string, extra: { retryAfterMs?: number; triesLeft?: number } = {}) {
+    // the contract spells it 'consent-required'; codes are snake_case everywhere else
+    const code = rawCode === 'consent-required' ? 'consent_required' : rawCode;
     const known = Object.prototype.hasOwnProperty.call(SERVER_ERROR_MESSAGES, code);
     super(known ? SERVER_ERROR_MESSAGES[code]! : SERVER_ERROR_MESSAGES.internal!);
     this.name = 'ServerError';
@@ -149,7 +277,8 @@ export function isServerError(e: unknown): e is ServerError {
 
 /** Investing needs a server-confirmed 'verified' status. */
 export function serverEligibleToInvest(v: KycStatusView | null): boolean {
-  return v?.status === 'verified';
+  // a server that says eligibleToInvest: false (approved, e-sign still open) wins over the status
+  return v?.status === 'verified' && v.eligibleToInvest !== false;
 }
 
 const STATUSES: readonly ServerStatus[] = ['pre-verified', 'under-review', 'verified', 'rejected'];
@@ -159,13 +288,27 @@ export function toKycStatusView(body: unknown): KycStatusView {
   const b = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
   const status = STATUSES.includes(b.status as ServerStatus) ? (b.status as ServerStatus) : null;
   const reason = typeof b.reason === 'string' ? b.reason : null;
-  return { status, reason, next: { type: mapNext(status, b.next) } };
+  const view: KycStatusView = { status, reason, next: { type: mapNext(status, reason, b.next) } };
+  if (typeof b.eligibleToInvest === 'boolean') view.eligibleToInvest = b.eligibleToInvest;
+  if (Array.isArray(b.documents)) {
+    view.documents = ALL_DOCS.filter((k) => (b.documents as unknown[]).includes(k));
+  }
+  return view;
 }
 
-function mapNext(status: ServerStatus | null, next: unknown): ServerNext['type'] {
+function mapNext(status: ServerStatus | null, reason: string | null, next: unknown): ServerNext['type'] {
+  const t = mapStep(status, reason, next);
+  // R3: a partner timeout the user can retry (not a step the server already re-opened)
+  return t === 'wait' && reason === 'partner-timeout' && status === 'under-review' ? 'retry' : t;
+}
+
+function mapStep(status: ServerStatus | null, reason: string | null, next: unknown): ServerNext['type'] {
+  // R1: a staff approval before e-sign keeps the e-sign step open (KRA upload only after it)
+  if (status === 'verified' && next === 'esign') return 'esign';
   if (status === 'verified' || status === 'rejected') return 'none';
   switch (next) {
-    case 'start': return status === null ? 'start' : 'wait';
+    // after consent was withdrawn a new start is allowed (the old case stays stopped)
+    case 'start': return status === null || reason === 'consent-withdrawn' ? 'start' : 'wait';
     case 'aadhaar': return 'digilocker';
     case 'selfie': return 'documents';
     case 'esign': return 'esign';
@@ -184,7 +327,7 @@ function defaultKey(): string {
 }
 
 interface CallOpts {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'DELETE';
   path: string;
   body?: unknown;
   /** needs the access token (/kyc/*) */
@@ -201,6 +344,10 @@ export class ServerKycClient {
   private readonly web: boolean;
   private readonly newKey: () => string;
   private refreshing: Promise<string | null> | null = null;
+  /** consents recorded through this client (memory only) */
+  private readonly consents = new Set<ConsentPurpose>();
+  /** document kinds uploaded through this client (memory only) */
+  private readonly sent = new Set<DocKind>();
 
   constructor(opts: ServerKycClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
@@ -243,10 +390,52 @@ export class ServerKycClient {
     }
   }
 
+  // ----- consent and data (DPDP) -----
+
+  /** POST /kyc/consent for one purpose. Call only after the user ticked its box. */
+  async giveConsent(purpose: ConsentPurpose): Promise<void> {
+    await this.call({ method: 'POST', path: '/kyc/consent', body: { purpose }, auth: true });
+    this.consents.add(purpose);
+  }
+
+  /** True when this client recorded the purpose (this session only; the server is the record). */
+  hasConsent(purpose: ConsentPurpose): boolean {
+    return this.consents.has(purpose);
+  }
+
+  /** Records each purpose in turn (POST /kyc/consent), before the step that needs them. */
+  private async consentFor(purposes: readonly ConsentPurpose[]): Promise<void> {
+    for (const p of purposes) await this.giveConsent(p);
+  }
+
+  /**
+   * POST /kyc/consent/withdraw for each purpose (default: all of them, since the server holds the
+   * record). The server stops the KYC with reason 'consent-withdrawn'. A purpose with no row
+   * (404 not_found) counts as withdrawn.
+   */
+  async withdrawConsent(purposes: readonly ConsentPurpose[] = CONSENT_PURPOSES): Promise<void> {
+    for (const purpose of purposes) {
+      try {
+        await this.call({ method: 'POST', path: '/kyc/consent/withdraw', body: { purpose }, auth: true });
+      } catch (e) {
+        if (!(isServerError(e) && e.status === 404)) throw e;
+      }
+      this.consents.delete(purpose);
+    }
+  }
+
+  /** DELETE /kyc/data: deletes the documents and details the rules allow (the server keeps and audits the rest). */
+  async deleteKycData(): Promise<void> {
+    await this.call({ method: 'DELETE', path: '/kyc/data', auth: true });
+    this.sent.clear();
+    this.consents.clear();
+  }
+
   // ----- kyc -----
 
-  /** POST /kyc/start (paid). */
+  /** POST /kyc/start (paid). Records the 'pan-check' consent first. */
   async startKyc(input: StartKycInput): Promise<KycStatusView> {
+    await this.consentFor(STEP_CONSENT.start);
     const body = {
       firstName: input.firstName,
       lastName: input.lastName,
@@ -260,6 +449,7 @@ export class ServerKycClient {
 
   /** POST /kyc/aadhaar (paid). `next.url` is the partner page to open (DigiLocker; Aadhaar OTP when the partner gives one). */
   async startAadhaar(mode: 'digilocker' | 'otp', returnUrl: string): Promise<KycStatusView> {
+    await this.consentFor(mode === 'otp' ? STEP_CONSENT['aadhaar-otp'] : STEP_CONSENT.digilocker);
     const b = await this.call({ method: 'POST', path: '/kyc/aadhaar', body: { mode, returnUrl }, auth: true, idempotent: true });
     const view = toKycStatusView(b.kyc);
     if (view.status === 'verified' || view.status === 'rejected') return view;
@@ -286,17 +476,65 @@ export class ServerKycClient {
     return out;
   }
 
-  /** POST /kyc/selfie (paid): face match + liveness on an uploaded selfie. */
+  /**
+   * R1: one /kyc/documents call for these files, then `put` sends each file to its presigned URL
+   * (true = 2xx). Returns the uploadId per kind. Any failed PUT throws upload_failed; the kinds
+   * that did go through count as sent.
+   */
+  async uploadDocuments(
+    files: { kind: DocKind; contentType: DocContentType; size: number }[],
+    put: (upload: DocUploadUrl, kind: DocKind) => Promise<boolean>,
+  ): Promise<Partial<Record<DocKind, string>>> {
+    const urls = await this.documentUploadUrls(files);
+    const ids: Partial<Record<DocKind, string>> = {};
+    let failed = false;
+    for (const f of files) {
+      const u = urls[f.kind];
+      let ok = false;
+      if (u) {
+        try { ok = await put(u, f.kind); } catch { ok = false; }
+      }
+      if (ok && u) { ids[f.kind] = u.uploadId; this.sent.add(f.kind); } else failed = true;
+    }
+    if (failed) throw new ServerError(0, 'upload_failed');
+    return ids;
+  }
+
+  /** Document kinds uploaded through this client (this session). */
+  sentDocuments(): ReadonlySet<DocKind> {
+    return new Set(this.sent);
+  }
+
+  /** POST /kyc/selfie (paid): face match + liveness on an uploaded selfie. Records 'face-match' consent first. */
   async submitSelfie(uploadId: string): Promise<KycStatusView> {
+    await this.consentFor(STEP_CONSENT.documents);
     return toKycStatusView(await this.call({ method: 'POST', path: '/kyc/selfie', body: { uploadId }, auth: true, idempotent: true }));
   }
 
   /** POST /kyc/esign (paid). `next.url` is the e-sign page. */
   async startEsign(returnUrl: string): Promise<KycStatusView> {
+    // one screen, two separate ticks: e-sign now, KRA upload after approval
+    await this.consentFor(STEP_CONSENT.esign);
     const b = await this.call({ method: 'POST', path: '/kyc/esign', body: { returnUrl }, auth: true, idempotent: true });
     const view = toKycStatusView(b.kyc);
-    if (view.status === 'verified' || view.status === 'rejected') return view;
+    // a staff-approved case may still have e-sign open (verified, next 'esign')
+    if (view.next.type === 'none') return view;
     return { ...view, next: typeof b.redirectUrl === 'string' ? { type: 'esign', url: b.redirectUrl } : view.next };
+  }
+
+  /**
+   * POST /kyc/retry (paid, counts toward the daily cap): retries a partner-timeout step. No consent
+   * call while consent is on record; the server answers consent_required otherwise, and the app
+   * asks the tick again and calls retry(true), which records 'pan-check' first.
+   * `redo` in the answer opens that user step (Aadhaar, selfie or e-sign).
+   */
+  async retry(withConsent = false): Promise<KycStatusView> {
+    if (withConsent) await this.consentFor(STEP_CONSENT.retry);
+    const b = await this.call({ method: 'POST', path: '/kyc/retry', body: {}, auth: true, idempotent: true });
+    const view = toKycStatusView(b);
+    if (view.status === 'verified' || view.status === 'rejected') return view;
+    const redo = b.redo === 'aadhaar' ? 'digilocker' : b.redo === 'selfie' ? 'documents' : b.redo === 'esign' ? 'esign' : null;
+    return redo ? { ...view, next: { type: redo } } : view;
   }
 
   /** GET /kyc/status */
@@ -341,7 +579,9 @@ export class ServerKycClient {
     try {
       return await this.storeTokens(await this.call({ method: 'POST', path: '/auth/refresh', body }));
     } catch (e) {
-      if (isServerError(e) && e.status === 401) {
+      // 401: refused. Web 400/403: the browser blocked the cookie (no token reached the server) or the
+      // Origin / header check failed. Either way the user signs in again with an OTP; no other store.
+      if (isServerError(e) && (e.status === 401 || (this.web && (e.status === 400 || e.status === 403)))) {
         await this.tokens.set(null);
         await this.tokens.setRefresh?.(null);
         return null;

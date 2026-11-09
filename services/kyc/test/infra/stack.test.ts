@@ -1,7 +1,9 @@
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
-import { consoleCsp, DEV_PREVIEW_ORIGIN, KycStack, PROD_ORIGIN, type Stage } from '../../infra/stack.js';
+import {
+  consoleCsp, DEV_PREVIEW_ORIGIN, KYC_REGION, KycStack, PROD_ORIGIN, WAVE4_ENV, type Stage,
+} from '../../infra/stack.js';
 import { ENV, TABLE_ENV } from '../../src/lib/env.js';
 
 const env = { account: '000000000000', region: 'ap-south-1' };
@@ -25,11 +27,12 @@ describe.each<Stage>(['dev', 'prod'])('KycStack %s', (stage) => {
   const t = synth(stage);
   const retain = stage === 'prod' ? 'Retain' : 'Delete';
 
-  it('creates the seven tables, on-demand, PITR on, customer-managed KMS', () => {
+  it('creates the eight tables, on-demand, PITR on, customer-managed KMS', () => {
     const tables = t.findResources('AWS::DynamoDB::Table');
     const names = Object.values(tables).map((r) => (r as { Properties: { TableName: string } }).Properties.TableName);
     expect(names.sort()).toEqual(
-      ['audit', 'costs', 'kyc_cases', 'otp', 'sessions', 'users', 'webhook_events'].map((n) => `wealthfire-kyc-${stage}-${n}`).sort(),
+      ['audit', 'consents', 'costs', 'kyc_cases', 'otp', 'sessions', 'users', 'webhook_events']
+        .map((n) => `wealthfire-kyc-${stage}-${n}`).sort(),
     );
     for (const r of Object.values(tables)) {
       const res = r as { Properties: Record<string, unknown>; DeletionPolicy: string };
@@ -40,8 +43,8 @@ describe.each<Stage>(['dev', 'prod'])('KycStack %s', (stage) => {
     }
   });
 
-  it('sets TTL on sessions, otp and webhook_events', () => {
-    for (const n of ['sessions', 'otp', 'webhook_events']) {
+  it('sets TTL on sessions, otp, webhook_events and kyc_cases (idempotency rows, S18)', () => {
+    for (const n of ['sessions', 'otp', 'webhook_events', 'kyc_cases']) {
       t.hasResourceProperties('AWS::DynamoDB::Table', {
         TableName: `wealthfire-kyc-${stage}-${n}`,
         TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
@@ -170,13 +173,26 @@ describe.each<Stage>(['dev', 'prod'])('KycStack %s: wave 2.5 integration', (stag
   const t = synth(stage);
 
   it('Lambda env uses only the shared names from src/lib/env.ts', () => {
-    const allowed = new Set<string>([...Object.values(ENV), ...Object.values(TABLE_ENV), 'NODE_OPTIONS']);
+    const allowed = new Set<string>([
+      ...Object.values(ENV), ...Object.values(TABLE_ENV), ...Object.values(WAVE4_ENV), 'NODE_OPTIONS',
+    ]);
     for (const name of ['api', 'webhook']) {
       for (const k of Object.keys(fnEnv(t, name))) expect(allowed.has(k), `${name} env ${k}`).toBe(true);
     }
     const api = fnEnv(t, 'api');
-    for (const k of [TABLE_ENV.users, TABLE_ENV.sessions, TABLE_ENV.otp, TABLE_ENV.kycCases, TABLE_ENV.audit, TABLE_ENV.costs]) {
+    for (const k of [
+      TABLE_ENV.users, TABLE_ENV.sessions, TABLE_ENV.otp, TABLE_ENV.kycCases, TABLE_ENV.audit, TABLE_ENV.costs,
+      WAVE4_ENV.consentsTable, WAVE4_ENV.fieldKeyId,
+    ]) {
       expect(api[k], k).toBeDefined();
+    }
+    // dev partner pages: dev only
+    if (stage === 'dev') {
+      expect(api[ENV.webhookSecretArn]).toBeDefined();
+      expect(JSON.stringify(api[WAVE4_ENV.apiBaseUrl])).toMatch(/execute-api.*\/dev\//);
+    } else {
+      expect(api[ENV.webhookSecretArn]).toBeUndefined();
+      expect(api[WAVE4_ENV.apiBaseUrl]).toBeUndefined();
     }
     const webhook = fnEnv(t, 'webhook');
     expect(Object.keys(webhook).sort()).toEqual(
@@ -188,8 +204,8 @@ describe.each<Stage>(['dev', 'prod'])('KycStack %s: wave 2.5 integration', (stag
   it('return-URL allow-list: the app path and scheme (dev adds the local preview)', () => {
     const v = fnEnv(t, 'api')[ENV.returnUrlPrefixes];
     expect(v).toBe(stage === 'prod'
-      ? 'https://nitishsana.github.io/wealthfire/,wealthfire://'
-      : 'https://nitishsana.github.io/wealthfire/,wealthfire://,http://127.0.0.1:5180/');
+      ? 'https://nitishsana.github.io/wealthfire/,wealthfire://kyc-return'
+      : 'https://nitishsana.github.io/wealthfire/,wealthfire://kyc-return,http://127.0.0.1:5180/');
   });
 
   it('kyc_cases has the byStatus GSI (status + updatedAt)', () => {
@@ -355,5 +371,263 @@ describe('context', () => {
 
   it('rejects a bad DOC_RETENTION_DAYS', () => {
     expect(() => synth('dev', { DOC_RETENTION_DAYS: 'abc' })).toThrow(/DOC_RETENTION_DAYS/);
+  });
+});
+
+// ---------------- wave 4 (security review S1, S2, S5, S7, S9-S13, S18) ----------------
+
+type Res = { Properties: Record<string, any> };
+function byId(t: Template, type: string, idPrefix: string): Res {
+  const hit = Object.entries(t.findResources(type)).find(([id]) => id.startsWith(idPrefix));
+  expect(hit, `${type} ${idPrefix}`).toBeDefined();
+  return hit![1] as Res;
+}
+function policyOf(t: Template, fnPrefix: 'apiFunction' | 'webhookFunction'): (Statement & { Sid?: string; Condition?: any })[] {
+  return byId(t, 'AWS::IAM::Policy', fnPrefix).Properties.PolicyDocument.Statement;
+}
+const asList = (a: string | string[]) => (Array.isArray(a) ? a : [a]);
+
+describe('S1 region', () => {
+  it('the app pins both stacks to ap-south-1 even when the CLI region differs', async () => {
+    const { buildApp } = await import('../../infra/build.js');
+    const before = process.env.CDK_DEFAULT_REGION;
+    process.env.CDK_DEFAULT_REGION = 'us-east-1';
+    try {
+      const stacks = buildApp(new App({ context: { budgetEmail: 'alerts@example.com' } }), '000000000000');
+      expect(stacks.map((s) => s.stackName).sort()).toEqual(['WealthfireKyc-dev', 'WealthfireKyc-prod']);
+      for (const s of stacks) expect(s.region).toBe(KYC_REGION);
+    } finally {
+      if (before === undefined) delete process.env.CDK_DEFAULT_REGION;
+      else process.env.CDK_DEFAULT_REGION = before;
+    }
+  });
+
+  it('a stack in any other region, or with no region, fails synth', () => {
+    for (const region of ['us-east-1', 'ap-south-2', undefined]) {
+      expect(() => new KycStack(new App(), `R-${region}`, { stage: 'dev', env: { account: '000000000000', region }, distDir: '/nonexistent-dist' }))
+        .toThrow(/ap-south-1/);
+    }
+  });
+});
+
+describe.each<Stage>(['dev', 'prod'])('KycStack %s: wave 4', (stage) => {
+  const t = synth(stage);
+  const api = () => policyOf(t, 'apiFunction');
+  const webhook = () => policyOf(t, 'webhookFunction');
+
+  it('S2: consents table pk userId, sk sk; api env + read/write; webhook has none', () => {
+    t.hasResourceProperties('AWS::DynamoDB::Table', {
+      TableName: `wealthfire-kyc-${stage}-consents`,
+      KeySchema: [{ AttributeName: 'userId', KeyType: 'HASH' }, { AttributeName: 'sk', KeyType: 'RANGE' }],
+    });
+    expect(JSON.stringify(fnEnv(t, 'api')[WAVE4_ENV.consentsTable])).toContain('ConsentsTable');
+    expect(JSON.stringify(api().find((s) => s.Sid === 'TablesReadWrite')!.Resource)).toContain('ConsentsTable');
+    expect(JSON.stringify(webhook())).not.toContain('ConsentsTable');
+    expect(fnEnv(t, 'webhook')[WAVE4_ENV.consentsTable]).toBeUndefined();
+  });
+
+  it('S7: gateway preflight allows DELETE and the four headers, with credentials', () => {
+    const options = Object.values(t.findResources('AWS::ApiGateway::Method')).filter(
+      (m) => (m as Res).Properties.HttpMethod === 'OPTIONS',
+    ) as Res[];
+    expect(options.length).toBeGreaterThan(0);
+    for (const m of options) {
+      const params = m.Properties.Integration.IntegrationResponses[0].ResponseParameters;
+      expect(params['method.response.header.Access-Control-Allow-Headers'])
+        .toBe("'content-type,authorization,idempotency-key,x-wf-client'");
+      expect(params['method.response.header.Access-Control-Allow-Methods']).toBe("'GET,POST,DELETE,OPTIONS'");
+      expect(params['method.response.header.Access-Control-Allow-Credentials']).toBe("'true'");
+    }
+  });
+
+  it('S9: field key with explicit policy: api role only, purpose context required, webhook denied', () => {
+    const key = byId(t, 'AWS::KMS::Key', 'FieldKey');
+    expect(key.Properties.EnableKeyRotation).toBe(true);
+    const st = key.Properties.KeyPolicy.Statement as { Sid: string; Effect: string; Action: string | string[]; Principal: any; Condition?: any }[];
+    const sids = st.map((s) => s.Sid);
+    expect(sids).toEqual(['KeyAdministration', 'ApiRoleUseWithContext', 'ApiRoleDescribe', 'DenyWithoutContext', 'DenyWebhookRole']);
+    // the account can administer but IAM cannot grant data-plane use
+    const admin = asList(st[0]!.Action);
+    for (const a of ['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey', 'kms:*']) expect(admin).not.toContain(a);
+    const use = st[1]!;
+    expect(JSON.stringify(use.Principal)).toContain('apiFunctionServiceRole');
+    expect(use.Condition).toEqual({ StringEquals: { 'kms:EncryptionContext:purpose': ['pan', 'contact'] } });
+    expect(st[3]).toMatchObject({ Effect: 'Deny', Principal: { AWS: '*' }, Condition: { Null: { 'kms:EncryptionContext:purpose': 'true' } } });
+    expect(st[4]!.Effect).toBe('Deny');
+    expect(JSON.stringify(st[4]!.Principal)).toContain('webhookFunctionServiceRole');
+    expect(asList(st[4]!.Action)).toContain('kms:Decrypt');
+    // api env + IAM with the same context condition
+    expect(JSON.stringify(fnEnv(t, 'api')[WAVE4_ENV.fieldKeyId])).toContain('FieldKey');
+    expect(api().find((s) => s.Sid === 'FieldKey')).toMatchObject({
+      Effect: 'Allow', Condition: { StringEquals: { 'kms:EncryptionContext:purpose': ['pan', 'contact'] } },
+    });
+    // webhook: explicit Deny, no Allow on the field key, no env
+    const wh = webhook();
+    expect(wh.find((s) => s.Sid === 'NoFieldKey')).toMatchObject({ Effect: 'Deny' });
+    for (const s of wh.filter((x) => x.Effect === 'Allow')) expect(JSON.stringify(s.Resource)).not.toContain('FieldKey');
+    expect(fnEnv(t, 'webhook')[WAVE4_ENV.fieldKeyId]).toBeUndefined();
+  });
+
+  it('S9: every key has an explicit policy without kms:*; tables and docs stay on DataKey', () => {
+    for (const [id, k] of Object.entries(t.findResources('AWS::KMS::Key'))) {
+      const actions = ((k as Res).Properties.KeyPolicy.Statement as { Action: string | string[] }[]).flatMap((s) => asList(s.Action));
+      expect(actions, id).not.toContain('kms:*');
+    }
+    const data = JSON.stringify(byId(t, 'AWS::KMS::Key', 'DataKey').Properties.KeyPolicy);
+    expect(data).toContain('kms:GrantIsForAWSResource');
+    for (const r of Object.values(t.findResources('AWS::DynamoDB::Table'))) {
+      expect(JSON.stringify((r as Res).Properties.SSESpecification)).toContain('DataKey');
+    }
+    expect(JSON.stringify(t.findResources('AWS::S3::Bucket'))).toContain('DataKey');
+    expect(fnEnv(t, 'api')[ENV.dataKeyId]).toBeDefined();
+  });
+
+  it('S10: audit is PutItem + Query only for both roles, with explicit Deny on changes', () => {
+    for (const p of [api(), webhook()]) {
+      const allowsAudit = p.filter((s) => s.Effect === 'Allow' && JSON.stringify(s.Resource).includes('AuditTable'));
+      expect(allowsAudit).toHaveLength(1);
+      expect(asList(allowsAudit[0]!.Action).sort()).toEqual(['dynamodb:PutItem', 'dynamodb:Query']);
+      const deny = p.find((s) => s.Sid === 'AuditNoChange')!;
+      expect(deny.Effect).toBe('Deny');
+      expect(asList(deny.Action).sort()).toEqual(['dynamodb:BatchWriteItem', 'dynamodb:DeleteItem', 'dynamodb:UpdateItem']);
+      expect(JSON.stringify(deny.Resource)).toContain('AuditTable');
+    }
+  });
+
+  it('S11: pending uploads expire after a day; S3 CORS + IAM allow tagging', () => {
+    t.hasResourceProperties('AWS::S3::Bucket', {
+      LifecycleConfiguration: {
+        Rules: Match.arrayWith([Match.objectLike({
+          Id: 'delete-unlinked-uploads', Status: 'Enabled', ExpirationInDays: 1, TagFilters: [{ Key: 'state', Value: 'pending' }],
+        })]),
+      },
+      CorsConfiguration: {
+        CorsRules: Match.arrayWith([Match.objectLike({ Id: 'apps', AllowedHeaders: Match.arrayWith(['x-amz-tagging']) })]),
+      },
+    });
+    expect(asList(api().find((s) => s.Sid === 'DocsPrefix')!.Action)).toContain('s3:PutObjectTagging');
+  });
+
+  it('S12: WAF OTP rule (20 / 5 min / IP, /auth/otp/), general rate rule, two AWS managed groups', () => {
+    const acl = byId(t, 'AWS::WAFv2::WebACL', 'ApiWaf');
+    const rules = acl.Properties.Rules as any[];
+    const otp = rules.find((r) => r.Name === 'otp-rate-per-ip');
+    expect(otp.Action).toEqual({ Block: {} });
+    expect(otp.Statement.RateBasedStatement).toMatchObject({ AggregateKeyType: 'IP', Limit: 20, EvaluationWindowSec: 300 });
+    expect(otp.Statement.RateBasedStatement.ScopeDownStatement.ByteMatchStatement).toMatchObject({
+      SearchString: '/auth/otp/', FieldToMatch: { UriPath: {} }, PositionalConstraint: 'CONTAINS',
+    });
+    expect(rules.find((r) => r.Name === 'rate-per-ip')).toBeDefined();
+    const managed = rules.filter((r) => r.Statement.ManagedRuleGroupStatement).map((r) => r.Statement.ManagedRuleGroupStatement.Name);
+    expect(managed.sort()).toEqual(['AWSManagedRulesCommonRuleSet', 'AWSManagedRulesKnownBadInputsRuleSet']);
+    for (const r of rules.filter((x) => x.Statement.ManagedRuleGroupStatement)) expect(r.OverrideAction).toEqual({ None: {} });
+    expect(new Set(rules.map((r) => r.Priority)).size).toBe(rules.length);
+  });
+
+  it('S12: SMS spend alarm emails budgetEmail via SNS', () => {
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/SNS', MetricName: 'SMSMonthToDateSpentUSD', Threshold: 5, ComparisonOperator: 'GreaterThanThreshold',
+      AlarmActions: [Match.objectLike({ Ref: Match.stringLikeRegexp('CostAlarmTopic') })],
+    });
+    t.hasResourceProperties('AWS::SNS::Subscription', { Protocol: 'email', Endpoint: 'alerts@example.com' });
+  });
+
+  it('S18: DeleteObject is a separate api-only statement on kyc/*; webhook has no S3', () => {
+    const del = api().filter((s) => asList(s.Action).includes('s3:DeleteObject'));
+    expect(del).toHaveLength(1);
+    expect(del[0]).toMatchObject({ Sid: 'DocsDelete', Action: 's3:DeleteObject' });
+    expect(JSON.stringify(del[0]!.Resource)).toContain('/kyc/*');
+    expect(JSON.stringify(webhook())).not.toMatch(/"s3:/);
+  });
+
+  it('S13: no custom domains without context', () => {
+    t.resourceCountIs('AWS::ApiGateway::DomainName', 0);
+    const dist = byId(t, 'AWS::CloudFront::Distribution', 'ConsoleDistribution');
+    expect(dist.Properties.DistributionConfig.Aliases).toBeUndefined();
+  });
+});
+
+describe('wave 4 context', () => {
+  const API_CERT = 'arn:aws:acm:ap-south-1:000000000000:certificate/11111111-2222-3333-4444-555555555555';
+  const CF_CERT = 'arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555';
+  const base = { budgetEmail: 'alerts@example.com' };
+
+  it('S5: appOrigin replaces the default app origins in API and docs CORS', () => {
+    for (const stage of ['dev', 'prod'] as Stage[]) {
+      const t = synth(stage, { ...base, appOrigin: 'https://app.wealthfire.example' });
+      // a Fn::Join (the console origin is a token)
+      const origins = JSON.stringify(fnEnv(t, 'api')[ENV.allowedOrigins]);
+      expect(origins).toContain('"https://app.wealthfire.example,https://"');
+      expect(origins).not.toContain(PROD_ORIGIN);
+      expect(origins).not.toContain(DEV_PREVIEW_ORIGIN);
+      const docs = Object.values(t.findResources('AWS::S3::Bucket')).find((b) => (b as Res).Properties.CorsConfiguration) as Res;
+      expect(docs.Properties.CorsConfiguration.CorsRules[0].AllowedOrigins).toEqual(['https://app.wealthfire.example']);
+    }
+  });
+
+  it('S5: rejects a bad appOrigin (path, http on prod, junk)', () => {
+    expect(() => synth('prod', { ...base, appOrigin: 'https://app.example/path' })).toThrow(/appOrigin/);
+    expect(() => synth('prod', { ...base, appOrigin: 'http://127.0.0.1:5180' })).toThrow(/appOrigin/);
+    expect(() => synth('dev', { ...base, appOrigin: 'http://127.0.0.1:5180' })).not.toThrow();
+    expect(() => synth('dev', { ...base, appOrigin: 'not a url' })).toThrow(/appOrigin/);
+  });
+
+  it('S13: custom API domain (TLS_1_2, regional, mapped) and console domain (TLSv1.2_2021)', () => {
+    const t = synth('prod', {
+      ...base, apiDomain: 'api.wealthfire.example', apiCertArn: API_CERT,
+      consoleDomain: 'review.wealthfire.example', consoleCertArn: CF_CERT,
+    });
+    t.hasResourceProperties('AWS::ApiGateway::DomainName', {
+      DomainName: 'api.wealthfire.example', SecurityPolicy: 'TLS_1_2',
+      EndpointConfiguration: { Types: ['REGIONAL'] }, RegionalCertificateArn: API_CERT,
+    });
+    t.resourceCountIs('AWS::ApiGateway::BasePathMapping', 1);
+    t.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        Aliases: ['review.wealthfire.example'],
+        ViewerCertificate: Match.objectLike({ AcmCertificateArn: CF_CERT, MinimumProtocolVersion: 'TLSv1.2_2021' }),
+      }),
+    });
+    // console callback + CORS use the custom console domain; CSP allows the custom API origin
+    t.hasResourceProperties('AWS::Cognito::UserPoolClient', { CallbackURLs: ['https://review.wealthfire.example/'] });
+    expect(String(fnEnv(t, 'api')[ENV.allowedOrigins])).toBe(`${PROD_ORIGIN},https://review.wealthfire.example`);
+    expect(JSON.stringify(t.findResources('AWS::CloudFront::ResponseHeadersPolicy'))).toContain('https://api.wealthfire.example');
+  });
+
+  it('S13: domain and certificate must come together, certs in the right region', () => {
+    expect(() => synth('dev', { ...base, apiDomain: 'api.wealthfire.example' })).toThrow(/apiCertArn/);
+    expect(() => synth('dev', { ...base, consoleCertArn: CF_CERT })).toThrow(/consoleDomain/);
+    expect(() => synth('dev', { ...base, apiDomain: 'api.wealthfire.example', apiCertArn: CF_CERT })).toThrow(/apiCertArn/);
+    expect(() => synth('dev', { ...base, consoleDomain: 'review.wealthfire.example', consoleCertArn: API_CERT })).toThrow(/consoleCertArn/);
+    expect(() => synth('dev', { ...base, apiDomain: 'Not_A_Host', apiCertArn: API_CERT })).toThrow(/apiDomain/);
+  });
+
+  it('S18: synth without budgetEmail warns (no subscription); a bad one fails', () => {
+    const app = new App({ context: {} });
+    const stack = new KycStack(app, 'NoEmail', { stage: 'dev', env, distDir: '/nonexistent-dist' });
+    const t = Template.fromStack(stack);
+    t.resourceCountIs('AWS::SNS::Subscription', 0);
+    const warnings = app.synth().getStackArtifact(stack.artifactId).messages.filter((m) => m.level === 'warning');
+    expect(warnings.map((w) => String(w.entry.data)).join('\n')).toContain('budgetEmail');
+    expect(() => synth('dev', { budgetEmail: 'nope' })).toThrow(/budgetEmail/);
+  });
+
+  it('S12: smsSpendAlarmUsd sets the alarm threshold', () => {
+    synth('dev', { ...base, smsSpendAlarmUsd: '12' }).hasResourceProperties('AWS::CloudWatch::Alarm', { Threshold: 12 });
+  });
+});
+
+describe('S18 deploy guard', () => {
+  it('refuses without a valid budgetEmail, accepts each context form', async () => {
+    const { deployRefusal, contextArgs, ACCOUNT_STEPS } = await import('../../infra/deploy.js');
+    expect(deployRefusal(['WealthfireKyc-dev'])).toMatch(/budgetEmail/);
+    expect(deployRefusal(['-c', 'budgetEmail='])).toMatch(/budgetEmail/);
+    expect(deployRefusal(['-c', 'budgetEmail=nope'])).toMatch(/not a valid/);
+    expect(deployRefusal(['WealthfireKyc-dev', '-c', 'budgetEmail=a@example.com'])).toBeNull();
+    expect(deployRefusal(['--context', 'budgetEmail=a@example.com'])).toBeNull();
+    expect(deployRefusal(['--context=budgetEmail=a@example.com'])).toBeNull();
+    expect(contextArgs(['-c', 'a=1', '--context=b=2=3'])).toEqual({ a: '1', b: '2=3' });
+    expect(ACCOUNT_STEPS.join(' ')).toMatch(/SMS spend limit/);
+    expect(ACCOUNT_STEPS.join(' ')).toMatch(/GuardDuty/);
   });
 });

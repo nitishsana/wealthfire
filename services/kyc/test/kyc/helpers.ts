@@ -1,7 +1,7 @@
 import { expect } from 'vitest';
 import { DEFAULT_CONFIG, type KycConfig } from '../../src/config';
 import { MemoryLogger } from '../../src/kyc/log';
-import { memoryKycRepos } from '../../src/kyc/repo';
+import { CONSENT_PURPOSES, memoryKycRepos, type ConsentRepo } from '../../src/kyc/repo';
 import { kycRoutes } from '../../src/kyc/routes';
 import { KycService } from '../../src/kyc/service';
 import { FakeStaffVerifier } from '../../src/kyc/staff';
@@ -33,7 +33,19 @@ export const startBody = (pan: string, over: Record<string, unknown> = {}) => ({
   firstName: 'Asha', lastName: 'Rao', dob: '15/08/1990', pan, aadhaarLast4: AADHAAR_LAST4, deviceResult: 'pre-verified', ...over,
 });
 
-export function env(cfg: Partial<KycConfig> = {}) {
+/** Records a consent row for every purpose (what the apps do before each paid step). */
+export async function grantAllConsents(repos: { consents: ConsentRepo }, userId: string, at = '2026-01-01T00:00:00.000Z'): Promise<void> {
+  for (const purpose of CONSENT_PURPOSES) {
+    await repos.consents.record({ userId, sk: `${purpose}#${at}#seed`, purpose, action: 'given', at });
+  }
+}
+
+/**
+ * `consents: false` signs users in without any consent rows (S2 tests).
+ * `documents: 'uploaded'` makes the review routes list only what was really uploaded (default: a
+ * stub that always has the selfie, Aadhaar and PAN).
+ */
+export function env(cfg: Partial<KycConfig> = {}, opts: { consents?: boolean; documents?: 'stub' | 'uploaded' } = {}) {
   const a = authSetup();
   const repos = memoryKycRepos();
   const partner = new FakePartner();
@@ -49,7 +61,16 @@ export function env(cfg: Partial<KycConfig> = {}) {
   const review = reviewRoutes({
     cases: reviewCaseStore(repos.cases),
     audit: repos.audit,
-    documents: { list: async () => [] },
+    documents: {
+      list: async (id: string) => opts.documents === 'uploaded'
+        // what the fake S3 holds under kyc/<userId>/ (the review console's S3DocumentStore layout)
+        ? uploads.keys().filter((k) => k.startsWith(`kyc/${id}/`)).map((key) => {
+          const file = key.slice(`kyc/${id}/`.length);
+          return { kind: file.slice(0, file.indexOf('-')) as 'selfie' | 'aadhaar' | 'pan', key };
+        })
+        // default stub: all three documents present, so staff Approve is allowed (R1)
+        : (['selfie', 'aadhaar', 'pan'] as const).map((kind) => ({ kind, key: `kyc/${id}/${kind}-stub.jpg` })),
+    },
     signer: { sign: async () => 'https://signed.invalid/x' },
     clock: a.clock,
     onApproved: async (userId) => void (await svc.uploadToKra(userId)),
@@ -73,7 +94,7 @@ export function env(cfg: Partial<KycConfig> = {}) {
   async function call(method: string, path: string, opts: { body?: unknown; token?: string; idem?: string | null; headers?: Record<string, string> } = {}): Promise<HttpResponse & { json: Record<string, any> }> {
     const headers: Record<string, string> = { origin: ORIGIN, ...(opts.headers ?? {}) };
     if (opts.token) headers.authorization = `Bearer ${opts.token}`;
-    if (opts.idem !== null && method === 'POST' && path.startsWith('/kyc/') && path !== '/kyc/documents') {
+    if (opts.idem !== null && method === 'POST' && path.startsWith('/kyc/') && path !== '/kyc/documents' && !path.startsWith('/kyc/consent')) {
       headers['Idempotency-Key'] = opts.idem ?? `idem-key-${++n}`;
     }
     const req: HttpRequest = {
@@ -93,7 +114,9 @@ export function env(cfg: Partial<KycConfig> = {}) {
     expect(v.statusCode).toBe(200);
     // the next sign-in for another user must not hit the resend cooldown
     a.clock.advance(60_000);
-    return v.json.accessToken as string;
+    const token = v.json.accessToken as string;
+    if (opts.consents !== false) await grantAllConsents(repos, (await a.tokens.authenticate(token)).sub);
+    return token;
   }
   async function userIdOf(token: string): Promise<string> {
     return (await a.tokens.authenticate(token)).sub;
@@ -101,13 +124,21 @@ export function env(cfg: Partial<KycConfig> = {}) {
   /** Upload a selfie (presign + simulated PUT) and return its uploadId. */
   async function uploadSelfie(token: string): Promise<string> {
     const r = await call('POST', '/kyc/documents', { token, body: { files: [{ kind: 'selfie', contentType: 'image/jpeg', size: 200_000 }] } });
-    expect(r.statusCode).toBe(200);
+    expect(r.statusCode, JSON.stringify(r.json)).toBe(200);
     const up = r.json.uploads[0];
     uploads.markUploaded(uploads.signed[uploads.signed.length - 1]!.key);
     return up.uploadId as string;
   }
+  /** Upload one document of `kind` (presign + simulated PUT, optional raw first bytes); returns its uploadId and key. */
+  async function uploadDoc(token: string, kind: 'selfie' | 'aadhaar' | 'pan', contentType = 'image/jpeg', bytes?: Uint8Array) {
+    const r = await call('POST', '/kyc/documents', { token, body: { files: [{ kind, contentType, size: 200_000 }] } });
+    expect(r.statusCode).toBe(200);
+    const key = uploads.signed[uploads.signed.length - 1]!.key;
+    uploads.markUploaded(key, bytes);
+    return { uploadId: r.json.uploads[0].uploadId as string, key, response: r };
+  }
   return {
-    ...a, repos, partner, uploads, logger, staff, svc, router, call, signIn, userIdOf, uploadSelfie, seen, config, reviewAudit,
+    ...a, repos, partner, uploads, logger, staff, svc, router, call, signIn, userIdOf, uploadSelfie, uploadDoc, seen, config, reviewAudit,
     webhookCases,
   };
 }

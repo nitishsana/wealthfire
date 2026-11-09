@@ -146,7 +146,10 @@ export async function handleWebhook(req: WebhookRequest, deps: WebhookDeps): Pro
   try {
     const outcome = await applyClaimed(e, deps, now);
     await deps.seen.complete(e.id, deps.clock.now(), SEEN_TTL_MS);
-    log({ msg: 'webhook.done', eventId: e.id, type: e.type, outcome, status: 200 });
+    // S17: a ref mismatch is refused (case unchanged, audited); answered 200 so the partner stops
+    // retrying an event that can never apply.
+    const msg = outcome === 'ignored-ref-mismatch' ? 'webhook.refused' : 'webhook.done';
+    log({ msg, eventId: e.id, type: e.type, outcome, status: 200 });
     return { status: 200, body: { ok: true, outcome } };
   } catch (err) {
     try {

@@ -118,7 +118,8 @@ function checksList(c: CaseView): HTMLElement {
   );
 }
 
-function documentsList(docs: DocumentLink[]): HTMLElement {
+function documentsList(docs: DocumentLink[], available = true): HTMLElement {
+  if (!available) return h('p', {}, 'Documents are only shown for Under-review cases.');
   if (docs.length === 0) return h('p', {}, 'No documents uploaded.');
   return h('ul', {},
     ...docs.map((d) =>
@@ -222,6 +223,9 @@ function decisionForm(c: CaseView): HTMLElement {
         show(
           h('h1', {}, r.case.status === 'verified' ? 'Case approved' : 'Case rejected'),
           h('p', {}, `Case ${c.id.slice(0, 8)} is now ${r.case.status === 'verified' ? 'Verified' : 'Rejected'}. This was recorded in the audit trail.`),
+          ...(r.next === 'esign'
+            ? [h('p', {}, 'The user has not e-signed yet. The KRA upload runs after they e-sign.')]
+            : []),
           h('a', { href: '#/' }, 'Back to the list'),
         );
       })
@@ -229,7 +233,9 @@ function decisionForm(c: CaseView): HTMLElement {
         submit.disabled = false;
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) return handleError(e, () => {});
         const msg = e instanceof Error ? e.message : 'Something went wrong. Try again.';
-        fail(e instanceof ApiError && e.status === 409 ? `${msg} Use Reload case below.` : msg, submit);
+        // documents_missing: reloading does not help until the user uploads them
+        const reload = e instanceof ApiError && e.status === 409 && e.code !== 'documents_missing';
+        fail(reload ? `${msg} Use Reload case below.` : msg, submit);
       });
   });
 
@@ -256,7 +262,7 @@ async function detailView(id: string): Promise<void> {
       h('h2', {}, 'Check results'),
       checksList(c),
       h('h2', {}, 'Documents'),
-      documentsList(d.documents),
+      documentsList(d.documents, d.documentsAvailable !== false),
       c.status === 'under-review' ? decisionForm(c) : h('p', {}, 'This case is no longer Under review, so it cannot be changed here.'),
       h('h2', {}, 'History'),
       historyTable(d.history),

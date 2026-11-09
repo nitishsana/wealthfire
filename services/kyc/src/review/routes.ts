@@ -8,15 +8,17 @@
 import { randomUUID } from 'node:crypto';
 import { KycTransitionError, staffDecide, type StaffAction } from '../decide';
 import type { Clock } from '../lib/clock';
-import type { CheckName, CheckResult, KycCase } from '../types';
+import type { CheckName, CheckResult, KycCase, NextStep } from '../types';
 import { looksLikeIdNumber, maskAadhaar, maskPan } from './mask';
 import {
   BadCursorError,
   type AuditEntry,
   type AuditLog,
   type CaseSnapshot,
+  type DocumentKind,
   type DocumentStore,
   type DownloadSigner,
+  type ReviewCase,
   type ReviewCaseStore,
 } from './ports';
 
@@ -66,7 +68,7 @@ export interface ReviewDeps {
   onApproved?: (userId: string) => Promise<void>;
 }
 
-type ErrorCode = 'bad_request' | 'forbidden' | 'not_found' | 'conflict' | 'illegal_transition' | 'internal';
+type ErrorCode = 'bad_request' | 'forbidden' | 'not_found' | 'conflict' | 'illegal_transition' | 'documents_missing' | 'internal';
 
 const MESSAGES: Record<ErrorCode, string> = {
   bad_request: 'Check the details and try again.',
@@ -74,10 +76,11 @@ const MESSAGES: Record<ErrorCode, string> = {
   not_found: 'Case not found.',
   conflict: 'This case changed while you were looking at it. Reload and try again.',
   illegal_transition: 'Only an Under-review case can be approved or rejected.',
+  documents_missing: 'Approve needs the selfie, Aadhaar and PAN documents.',
   internal: 'Something went wrong. Try again.',
 };
 const STATUS: Record<ErrorCode, number> = {
-  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, illegal_transition: 409, internal: 500,
+  bad_request: 400, forbidden: 403, not_found: 404, conflict: 409, illegal_transition: 409, documents_missing: 409, internal: 500,
 };
 
 class ReviewError extends Error {
@@ -192,7 +195,20 @@ function listCases(deps: ReviewDeps): Handler {
   });
 }
 
-/** GET /review/cases/{id} -> 200 {case, documents, history}; audited as review.view. */
+/** The documents staff need before an Approve (R1). */
+export const REQUIRED_DOCUMENTS: readonly DocumentKind[] = ['selfie', 'aadhaar', 'pan'];
+const DOC_NAMES: Record<string, string> = { selfie: 'selfie', aadhaar: 'Aadhaar', pan: 'PAN' };
+
+/** R1: e-signed before staff decided (the webhook / KYC routes record it). */
+function isEsigned(c: ReviewCase): boolean {
+  return c.evidence?.esign === 'done' || c.checks?.esign === 'pass';
+}
+
+/**
+ * GET /review/cases/{id} -> 200 {case, documents, documentsAvailable, history}; audited as
+ * review.view. S16: document links are signed only for an Under-review case; for any other
+ * status `documents` is empty and `documentsAvailable` is false.
+ */
 function getCase(deps: ReviewDeps): Handler {
   return guarded(async (req) => {
     const id = caseId(req);
@@ -203,7 +219,8 @@ function getCase(deps: ReviewDeps): Handler {
     await deps.audit.write({
       userId: id, ts: auditTs(deps), actor: staffActor(req), action: 'review.view', before: snapshot(c), after: null,
     });
-    const docs = await deps.documents.list(id);
+    const documentsAvailable = c.status === 'under-review';
+    const docs = documentsAvailable ? await deps.documents.list(id) : [];
     const expiresAt = new Date(now + DOC_URL_TTL_SEC * 1000).toISOString();
     const documents = await Promise.all(
       docs.map(async (d, i) => ({
@@ -222,7 +239,7 @@ function getCase(deps: ReviewDeps): Handler {
       to: h.after?.status ?? null,
       ...(h.note ? { note: h.note } : {}),
     }));
-    return { status: 200, body: { case: caseView(c), documents, history } };
+    return { status: 200, body: { case: caseView(c), documents, documentsAvailable, history } };
   });
 }
 
@@ -269,7 +286,29 @@ function decideCase(deps: ReviewDeps): Handler {
     if (!before) throw new ReviewError('not_found');
     if (expected !== undefined && expected !== before.version) throw new ReviewError('conflict');
 
-    const d = staffDecide({ status: before.status, path: before.path }, action); // throws on illegal moves
+    // throws on illegal moves. R1: KRA upload only once the case is e-signed, so an unsigned
+    // approval waits with next 'esign' (the user e-signs, then the upload runs).
+    const d = staffDecide({ status: before.status, path: before.path, esigned: isEsigned(before) }, action);
+    const next: NextStep = action.kind === 'approve' && !isEsigned(before) ? 'esign' : d.next;
+    // R1: Approve needs all three documents.
+    if (action.kind === 'approve') {
+      // A document whose content failed the S14 type check does not count.
+      const refused = new Set(
+        Object.entries(before.documents ?? {})
+          .filter(([, link]) => link?.state === 'rejected')
+          .map(([kind]) => kind),
+      );
+      const kinds = new Set(
+        (await deps.documents.list(id)).map((x) => x.kind).filter((k) => !refused.has(k)),
+      );
+      const missing = REQUIRED_DOCUMENTS.filter((k) => !kinds.has(k));
+      if (missing.length > 0) {
+        throw new ReviewError(
+          'documents_missing',
+          `Approve needs the selfie, Aadhaar and PAN documents. Missing: ${missing.map((k) => DOC_NAMES[k]).join(', ')}.`,
+        );
+      }
+    }
     const after: KycCase = {
       ...before,
       status: d.status,
@@ -291,10 +330,10 @@ function decideCase(deps: ReviewDeps): Handler {
       after: snapshot(after),
       ...(d.note ? { note: d.note } : {}),
     };
-    const r = await deps.cases.saveDecision({ before, after, next: d.next, audit });
+    const r = await deps.cases.saveDecision({ before, after, next, audit });
     if (r === 'conflict') throw new ReviewError('conflict');
     let view = caseView(after);
-    if (action.kind === 'approve' && deps.onApproved) {
+    if (action.kind === 'approve' && next === 'kra-upload' && deps.onApproved) {
       try {
         await deps.onApproved(id);
         const fresh = await deps.cases.get(id);
@@ -303,7 +342,7 @@ function decideCase(deps: ReviewDeps): Handler {
         // retried by GET /kyc/status; the approval itself is stored and audited
       }
     }
-    return { status: 200, body: { case: view } };
+    return { status: 200, body: { case: view, next } };
   });
 }
 

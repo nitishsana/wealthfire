@@ -48,6 +48,20 @@ export interface KycCaseRecord extends KycCase {
   /** last decided next step */
   next: NextStep;
   unclear?: CheckName[];
+  /** epoch ms of the last automatic partner retry by GET /kyc/status (R3: at most one per 10 min) */
+  autoRetryAt?: number;
+  /** S11: uploads signed by /kyc/documents and not yet linked (newest last) */
+  pendingUploads?: { uploadId: string; signedAt: number }[];
+  /** S11: the upload linked per document kind (tagged state=linked); a newer upload replaces it */
+  documents?: Partial<Record<DocumentKind, DocumentLink>>;
+}
+
+export type DocumentKind = 'selfie' | 'aadhaar' | 'pan';
+
+export interface DocumentLink {
+  uploadId: string;
+  /** 'linked' = checked (S14 magic bytes) and kept; 'rejected' = content did not match its type */
+  state: 'linked' | 'rejected';
 }
 
 /** The part of a case an audit row records before / after a change. */
@@ -139,6 +153,16 @@ export interface CaseStore {
    * user's; false when another account holds it. Never reveals which account.
    */
   claimPan(panHash: string, userId: string): Promise<boolean>;
+  /** Drops this user's claim on a PAN (R9: start failed after claiming). A claim held by another account is left alone. */
+  releasePan(panHash: string, userId: string): Promise<void>;
+  /**
+   * Moves the stored case (at `expectedVersion`) to an archive item `arch#<userId>#<archivedAt>` and
+   * removes it from `userId`, with the audit row, in one transaction, so the user can start a NEW
+   * case. False on a concurrent change.
+   */
+  archive(userId: string, expectedVersion: number, archivedAt: string, audit: AuditRow): Promise<boolean>;
+  /** Deletes the case item (DELETE /kyc/data on a case the retention rule does not keep), audited. */
+  remove(userId: string, expectedVersion: number, audit: AuditRow): Promise<boolean>;
 }
 
 export interface AuditStore {
@@ -154,5 +178,17 @@ export function snapshotOf(c: KycCase): CaseSnapshot {
 
 export const PAN_PREFIX = 'pan#';
 export const IDEM_PREFIX = 'idem#';
-/** Keys that are not cases (pointer / idempotency items share the table). */
-export const isCaseKey = (userId: string): boolean => !userId.startsWith(PAN_PREFIX) && !userId.startsWith(IDEM_PREFIX);
+/** Archived (stopped) cases kept after the user started a new one: `arch#<userId>#<iso time>`. */
+export const ARCHIVE_PREFIX = 'arch#';
+/** Keys that are not live cases (pointer / idempotency / archive items share the table). */
+export const isCaseKey = (userId: string): boolean =>
+  !userId.startsWith(PAN_PREFIX) && !userId.startsWith(IDEM_PREFIX) && !userId.startsWith(ARCHIVE_PREFIX);
+export const archiveKey = (userId: string, archivedAt: string): string => `${ARCHIVE_PREFIX}${userId}#${archivedAt}`;
+
+/** What an archived (stopped) case keeps: the outcome, masks and refs, never the encrypted PAN or typed details. */
+export type ArchivedCase = Omit<KycCaseRecord, 'panEnc' | 'evidence' | 'pendingUploads'>;
+
+export function archivedRecord(c: KycCaseRecord): ArchivedCase {
+  const { panEnc: _p, evidence: _e, pendingUploads: _u, ...kept } = structuredClone(c);
+  return kept;
+}

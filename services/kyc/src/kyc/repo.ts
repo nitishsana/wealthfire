@@ -1,30 +1,38 @@
 // Storage the KYC routes use. Cases and audit rows live in the ONE shared store (src/store, also
-// used by the webhook and the review routes); this file adds idempotency records and paid-check
-// costs. In-memory implementations for tests, DynamoDB for Lambda.
+// used by the webhook and the review routes); this file adds idempotency records, paid-check
+// costs, the upload-signing counter and consent records. In-memory implementations for tests,
+// DynamoDB for Lambda.
 //
 // DynamoDB layout (tables from the CDK stack; case / audit layout in src/store/types.ts):
 //   kyc_cases pk userId        `idem#<hash>` items hold idempotency records (no `status`
-//                               attribute, so they stay out of the byStatus GSI)
+//                               attribute, so they stay out of the byStatus GSI); `expiresAt`
+//                               (epoch seconds) is the table TTL attribute (S18: 24 h)
 //   costs     pk month, sk checkId
 //                               one row per paid check (month = yyyy-mm); `cap#<yyyy-mm-dd>` /
-//                               `<userId>` rows hold the per-user daily paid-check counter
-import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { requireEnv, TABLE_ENV, type Env } from '../lib/env';
+//                               `<userId>` rows hold the per-user daily paid-check counter;
+//                               `sign#<yyyy-mm-dd>` / `<userId>` rows the daily upload-signing counter (S11)
+//   consents  pk userId, sk `<purpose>#<iso time>#<nonce>` (CONSENTS_TABLE, S2)
+//                               append-only: a 'given' or 'withdrawn' row per user action
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { ENV, requireEnv, TABLE_ENV, type Env } from '../lib/env';
 import type { DocClient } from '../lib/repo';
 import type { PaidCheck } from '../partner/types';
 import { DynamoAuditStore, DynamoCaseStore, isConditionFailure } from '../store/dynamo';
 import { MemoryAuditStore, MemoryCaseStore } from '../store/memory';
 import { IDEM_PREFIX, type AuditRow, type AuditStore, type CaseEvidence, type CaseStore } from '../store/types';
 
-export type { CaseSnapshot, KycCaseRecord, Timeout } from '../store/types';
+export type { CaseSnapshot, DocumentKind, DocumentLink, KycCaseRecord, Timeout } from '../store/types';
 
 /** The case evidence (one shape for the KYC routes and the webhook). */
 export type KycEvidence = CaseEvidence;
 /** One audit row (shared shape). */
 export type KycAuditRow = AuditRow;
 /** The part of the shared case store the KYC routes use. */
-export type KycCaseRepo = Pick<CaseStore, 'get' | 'save' | 'claimPan'>;
+export type KycCaseRepo = Pick<CaseStore, 'get' | 'save' | 'claimPan' | 'releasePan' | 'archive' | 'remove'>;
 export type KycAuditRepo = AuditStore;
+
+/** S18: idempotency records live 24 h. */
+export const IDEMPOTENCY_TTL_SEC = 24 * 60 * 60;
 
 /** Stored result of a request made with an Idempotency-Key. */
 export interface IdempotencyRecord {
@@ -35,14 +43,17 @@ export interface IdempotencyRecord {
   state: 'pending' | 'done';
   response?: { status: number; body: Record<string, unknown> };
   createdAt: number;
+  /** epoch SECONDS after which the record is gone (DynamoDB TTL attribute) */
+  expiresAt: number;
 }
 
 export interface IdempotencyRepo {
-  get(id: string): Promise<IdempotencyRecord | null>;
-  /** Creates a pending record. False if one already exists. */
-  claim(rec: IdempotencyRecord): Promise<boolean>;
+  /** The record, or null when there is none or it has expired at `nowSec`. */
+  get(id: string, nowSec: number): Promise<IdempotencyRecord | null>;
+  /** Creates a pending record (replacing an expired one). False if a live one already exists. */
+  claim(rec: IdempotencyRecord, nowSec: number): Promise<boolean>;
   complete(id: string, response: { status: number; body: Record<string, unknown> }): Promise<void>;
-  /** Drops a pending record (the request failed before any paid call). */
+  /** Drops a pending record (the request failed). */
   release(id: string): Promise<void>;
 }
 
@@ -62,6 +73,29 @@ export interface CostRepo {
   /** Paid checks counted today. */
   used(userId: string, day: string): Promise<number>;
   record(row: CostRow): Promise<void>;
+  /** S11: atomically counts `n` upload signings for user on day while the total stays <= max. */
+  reserveSignings(userId: string, day: string, n: number, max: number): Promise<boolean>;
+}
+
+/** What each consent covers (S2). Every paid partner call needs a prior consent for its purpose. */
+export const CONSENT_PURPOSES = ['digilocker', 'aadhaar-otp', 'pan-check', 'face-match', 'esign', 'kra-upload'] as const;
+export type ConsentPurpose = (typeof CONSENT_PURPOSES)[number];
+
+export interface ConsentRow {
+  userId: string;
+  /** `<purpose>#<iso time>#<nonce>` */
+  sk: string;
+  purpose: ConsentPurpose;
+  action: 'given' | 'withdrawn';
+  at: string;
+  ip?: string;
+}
+
+export interface ConsentRepo {
+  /** Appends one row (rows are never changed or deleted by the app). */
+  record(row: ConsentRow): Promise<void>;
+  /** The newest row for this purpose, or null. */
+  latest(userId: string, purpose: ConsentPurpose): Promise<ConsentRow | null>;
 }
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -70,12 +104,13 @@ const clone = <T>(v: T): T => structuredClone(v);
 
 export class MemoryIdempotencyRepo implements IdempotencyRepo {
   readonly items = new Map<string, IdempotencyRecord>();
-  async get(id: string): Promise<IdempotencyRecord | null> {
+  async get(id: string, nowSec: number): Promise<IdempotencyRecord | null> {
     const r = this.items.get(id);
-    return r ? clone(r) : null;
+    return r && r.expiresAt > nowSec ? clone(r) : null;
   }
-  async claim(rec: IdempotencyRecord): Promise<boolean> {
-    if (this.items.has(rec.id)) return false;
+  async claim(rec: IdempotencyRecord, nowSec: number): Promise<boolean> {
+    const cur = this.items.get(rec.id);
+    if (cur && cur.expiresAt > nowSec) return false;
     this.items.set(rec.id, clone(rec));
     return true;
   }
@@ -107,6 +142,25 @@ export class MemoryCostRepo implements CostRepo {
   async record(row: CostRow): Promise<void> {
     this.rows.push(clone(row));
   }
+  async reserveSignings(userId: string, day: string, n: number, max: number): Promise<boolean> {
+    const k = `sign#${day}#${userId}`;
+    const used = this.counters.get(k) ?? 0;
+    if (used + n > max) return false;
+    this.counters.set(k, used + n);
+    return true;
+  }
+}
+
+export class MemoryConsentRepo implements ConsentRepo {
+  readonly rows: ConsentRow[] = [];
+  async record(row: ConsentRow): Promise<void> {
+    this.rows.push(clone(row));
+  }
+  async latest(userId: string, purpose: ConsentPurpose): Promise<ConsentRow | null> {
+    const mine = this.rows.filter((r) => r.userId === userId && r.purpose === purpose).sort((a, b) => (a.sk < b.sk ? -1 : a.sk > b.sk ? 1 : 0));
+    const r = mine[mine.length - 1];
+    return r ? clone(r) : null;
+  }
 }
 
 export interface KycRepos {
@@ -114,13 +168,17 @@ export interface KycRepos {
   audit: KycAuditRepo;
   idempotency: IdempotencyRepo;
   costs: CostRepo;
+  consents: ConsentRepo;
 }
 
 export function memoryKycRepos(): {
-  cases: MemoryCaseStore; audit: MemoryAuditStore; idempotency: MemoryIdempotencyRepo; costs: MemoryCostRepo;
+  cases: MemoryCaseStore; audit: MemoryAuditStore; idempotency: MemoryIdempotencyRepo; costs: MemoryCostRepo; consents: MemoryConsentRepo;
 } {
   const audit = new MemoryAuditStore();
-  return { cases: new MemoryCaseStore(audit), audit, idempotency: new MemoryIdempotencyRepo(), costs: new MemoryCostRepo() };
+  return {
+    cases: new MemoryCaseStore(audit), audit, idempotency: new MemoryIdempotencyRepo(), costs: new MemoryCostRepo(),
+    consents: new MemoryConsentRepo(),
+  };
 }
 
 // ---------- DynamoDB ----------
@@ -129,36 +187,42 @@ export interface KycTableNames {
   cases: string;
   audit: string;
   costs: string;
+  consents: string;
 }
 
-/** Table names from env (TABLE_KYC_CASES / TABLE_AUDIT / TABLE_COSTS, set by the CDK stack). */
+/** Table names from env (TABLE_KYC_CASES / TABLE_AUDIT / TABLE_COSTS / CONSENTS_TABLE, set by the CDK stack). */
 export function kycTablesFromEnv(env: Env = process.env): KycTableNames {
   return {
     cases: requireEnv(env, TABLE_ENV.kycCases),
     audit: requireEnv(env, TABLE_ENV.audit),
     costs: requireEnv(env, TABLE_ENV.costs),
+    consents: requireEnv(env, ENV.consentsTable),
   };
 }
 
 const CAP_PREFIX = 'cap#';
+const SIGN_PREFIX = 'sign#';
 
 export class DynamoIdempotencyRepo implements IdempotencyRepo {
   constructor(private readonly doc: DocClient, private readonly table: string) {}
 
-  async get(id: string): Promise<IdempotencyRecord | null> {
+  async get(id: string, nowSec: number): Promise<IdempotencyRecord | null> {
     const out = await this.doc.send(new GetCommand({ TableName: this.table, Key: { userId: IDEM_PREFIX + id }, ConsistentRead: true }));
     if (!out.Item) return null;
     const { userId: _k, ...rest } = out.Item;
-    return { ...(rest as Omit<IdempotencyRecord, 'id'>), id };
+    const rec = { ...(rest as Omit<IdempotencyRecord, 'id'>), id };
+    // TTL deletion is lazy: an expired row may still be there for a while
+    return typeof rec.expiresAt === 'number' && rec.expiresAt <= nowSec ? null : rec;
   }
 
-  async claim(rec: IdempotencyRecord): Promise<boolean> {
+  async claim(rec: IdempotencyRecord, nowSec: number): Promise<boolean> {
     const { id, ...rest } = rec;
     try {
       await this.doc.send(new PutCommand({
         TableName: this.table,
         Item: { userId: IDEM_PREFIX + id, ...rest },
-        ConditionExpression: 'attribute_not_exists(userId)',
+        ConditionExpression: 'attribute_not_exists(userId) OR expiresAt <= :now',
+        ExpressionAttributeValues: { ':now': nowSec },
       }));
       return true;
     } catch (e) {
@@ -222,16 +286,55 @@ export class DynamoCostRepo implements CostRepo {
   async record(row: CostRow): Promise<void> {
     await this.doc.send(new PutCommand({ TableName: this.table, Item: { ...row } }));
   }
+
+  async reserveSignings(userId: string, day: string, n: number, max: number): Promise<boolean> {
+    if (n < 1 || n > max) return false;
+    try {
+      await this.doc.send(new UpdateCommand({
+        TableName: this.table,
+        Key: { month: SIGN_PREFIX + day, checkId: userId },
+        UpdateExpression: 'ADD #n :n',
+        ConditionExpression: 'attribute_not_exists(#n) OR #n <= :room',
+        ExpressionAttributeNames: { '#n': 'count' },
+        ExpressionAttributeValues: { ':n': n, ':room': max - n },
+      }));
+      return true;
+    } catch (e) {
+      if (isConditionFailure(e)) return false;
+      throw e;
+    }
+  }
+}
+
+export class DynamoConsentRepo implements ConsentRepo {
+  constructor(private readonly doc: DocClient, private readonly table: string) {}
+
+  async record(row: ConsentRow): Promise<void> {
+    await this.doc.send(new PutCommand({ TableName: this.table, Item: { ...row }, ConditionExpression: 'attribute_not_exists(sk)' }));
+  }
+
+  async latest(userId: string, purpose: ConsentPurpose): Promise<ConsentRow | null> {
+    const out = await this.doc.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'userId = :u AND begins_with(sk, :p)',
+      ExpressionAttributeValues: { ':u': userId, ':p': `${purpose}#` },
+      ScanIndexForward: false,
+      Limit: 1,
+      ConsistentRead: true,
+    }));
+    return (out.Items?.[0] as ConsentRow | undefined) ?? null;
+  }
 }
 
 /** KYC repos over DynamoDB; `cases` / `audit` are the shared store. */
 export function dynamoKycRepos(tables: KycTableNames, doc: DocClient): {
-  cases: DynamoCaseStore; audit: DynamoAuditStore; idempotency: DynamoIdempotencyRepo; costs: DynamoCostRepo;
+  cases: DynamoCaseStore; audit: DynamoAuditStore; idempotency: DynamoIdempotencyRepo; costs: DynamoCostRepo; consents: DynamoConsentRepo;
 } {
   return {
     cases: new DynamoCaseStore(doc, tables.cases, tables.audit),
     audit: new DynamoAuditStore(doc, tables.audit),
     idempotency: new DynamoIdempotencyRepo(doc, tables.cases),
     costs: new DynamoCostRepo(doc, tables.costs),
+    consents: new DynamoConsentRepo(doc, tables.consents),
   };
 }

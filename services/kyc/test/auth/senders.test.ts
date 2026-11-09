@@ -127,7 +127,7 @@ describe('senderFromEnv', () => {
 
   it('wired into OtpService: a send failure is send_failed (503) and leaves no live challenge', async () => {
     const a = setup();
-    const deps = { repos: a.repos, clock: a.clock, mac: a.mac, encryptor: a.encryptor, hasher: new Argon2Hasher(FAST_ARGON2), tokens: a.tokens };
+    const deps = { repos: a.repos, clock: a.clock, mac: a.mac, encryptor: a.encryptor, hasher: new Argon2Hasher(FAST_ARGON2), tokens: a.tokens, metrics: a.metrics };
     const otp = new OtpService({ ...deps, sender: new UnconfiguredSender() });
     await expect(otp.send({ kind: 'mobile', contact: '+91 98765 43210', ip: '1' })).rejects.toMatchObject({ code: 'send_failed' });
     expect(a.repos.otp.challengeCount()).toBe(0);

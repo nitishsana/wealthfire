@@ -5,6 +5,7 @@ import {
   canSystemTransition,
   decide,
   KycTransitionError,
+  staffChecks,
   staffDecide,
   type DecideInput,
 } from '../../src/decide';
@@ -125,7 +126,28 @@ describe('decide: fail vs unclear / hand check precedence', () => {
 describe('decide: row 3, device hand check → under-review', () => {
   it('goes to a person even when KRA would validate', () => {
     const d = decide(base({ deviceHandCheck: true, kra: kraOk }), cfg);
-    expect(d).toEqual({ status: 'under-review', path: 'hand-check', reason: 'device-hand-check', next: 'wait', checks: {} });
+    // R1: the KRA result the system fetched shows for the reviewer; the case still waits for staff
+    expect(d).toEqual({
+      status: 'under-review', path: 'hand-check', reason: 'device-hand-check', next: 'wait',
+      checks: { kra: 'pass', 'kra-name': 'pass', 'kra-dob': 'pass' },
+    });
+  });
+  it('R1: shows the PAN check and a KRA timeout for the reviewer; a clear PAN fail still rejects', () => {
+    const d = decide(base({ deviceHandCheck: true, kra: 'timeout', pan: { valid: true, nameMatch: false, aadhaarLinked: true } }), cfg);
+    expect(d).toMatchObject({ status: 'under-review', reason: 'device-hand-check', next: 'wait' });
+    expect(d.checks).toEqual({ kra: 'unclear', pan: 'pass', 'pan-name': 'unclear', 'pan-aadhaar-link': 'pass' });
+    expect(decide(base({ deviceHandCheck: true, pan: { valid: false, nameMatch: false, aadhaarLinked: false } }), cfg).reason).toBe('pan-invalid');
+  });
+  it('R1: a pan-in-use case keeps waiting for staff with the KRA + PAN results, even when KRA would validate', () => {
+    const d = decide({
+      ...base({ kra: kraOk, pan: { valid: true, nameMatch: true, aadhaarLinked: true } }), current: 'under-review', currentReason: 'pan-in-use',
+    }, cfg);
+    expect(d).toMatchObject({ status: 'under-review', reason: 'pan-in-use', next: 'wait' });
+    expect(d.checks).toMatchObject({ kra: 'pass', 'kra-name': 'pass', 'kra-dob': 'pass', pan: 'pass', 'pan-name': 'pass' });
+  });
+  it('staffChecks: nothing for missing results; a non-validated KRA status is not a fail', () => {
+    expect(staffChecks({ typed: { firstName: 'A', lastName: 'B', dob: '1990-01-01' } })).toEqual({});
+    expect(staffChecks({ typed: { firstName: 'A', lastName: 'B', dob: '1990-01-01' }, kra: { status: 'not-found' } })).toEqual({});
   });
   it('goes to a person before the KRA lookup', () => {
     expect(decide(base({ deviceHandCheck: true, kra: undefined }), cfg).reason).toBe('device-hand-check');
@@ -382,10 +404,14 @@ describe('decide: under-review cases (system vs staff)', () => {
 describe('staffDecide: row 5', () => {
   const review = { status: 'under-review' as const, path: 'full-kyc' as const };
 
-  it('approve → verified, then KRA upload, note trimmed', () => {
-    expect(staffDecide(review, { kind: 'approve', staffId: 's1', note: '  docs ok  ' })).toEqual({
+  it('approve of an e-signed case → verified, then KRA upload, note trimmed', () => {
+    expect(staffDecide({ ...review, esigned: true }, { kind: 'approve', staffId: 's1', note: '  docs ok  ' })).toEqual({
       status: 'verified', path: 'full-kyc', reason: 'staff-approved', next: 'kra-upload', checks: {}, note: 'docs ok',
     });
+  });
+  it('R1: approve without e-sign (false or not given) → verified, next esign (KRA upload only after e-sign)', () => {
+    expect(staffDecide({ ...review, esigned: false }, { kind: 'approve', staffId: 's1' }).next).toBe('esign');
+    expect(staffDecide(review, { kind: 'approve', staffId: 's1' })).toMatchObject({ status: 'verified', next: 'esign' });
   });
   it('approve without a note (or blank note) has no note', () => {
     expect(staffDecide(review, { kind: 'approve', staffId: 's1' })).not.toHaveProperty('note');

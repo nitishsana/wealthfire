@@ -11,6 +11,7 @@
 // that user's calls time out. failNext(op, n) makes the next n calls of one operation time out.
 // The fake keeps no PAN or Aadhaar number: scenarios are keyed by an internal hash.
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { linkPayload, type DevStep } from './devPages';
 import { PartnerTimeoutError, type KycPartner } from './types';
 
 export type FakeScenario = 'kra-validated' | 'full-kyc-pass' | 'unclear' | 'reject' | 'timeout';
@@ -35,8 +36,16 @@ export interface FakePartnerOptions {
   person?: { name: string; dob: string };
   /** HMAC key for verifyWebhook */
   webhookSecret?: string;
-  /** base of the fake redirect URLs */
+  /**
+   * Base of the fake redirect URLs; the step name is appended to its path. On the dev stack this
+   * is `${API_BASE_URL}/dev-partner` (src/partner/devPages.ts serves the pages).
+   */
   baseUrl?: string;
+  /**
+   * Dev stack: tags each redirect link (adds `u` = userId and `t` = signer(linkPayload(...))) so the
+   * dev pages only complete steps the API started. Without it links carry only ref + return.
+   */
+  linkSigner?: (payload: string) => Promise<string>;
 }
 
 export class FakePartner implements KycPartner {
@@ -56,7 +65,22 @@ export class FakePartner implements KycPartner {
   constructor(opts: FakePartnerOptions = {}) {
     this.person = opts.person ?? { name: 'ASHA RAO', dob: '1990-08-15' };
     this.secret = opts.webhookSecret ?? 'fake-webhook-secret';
-    this.baseUrl = opts.baseUrl ?? 'https://fake-partner.invalid';
+    this.baseUrl = (opts.baseUrl ?? 'https://fake-partner.invalid').replace(/\/+$/, '');
+    this.linkSigner = opts.linkSigner;
+  }
+
+  private readonly linkSigner: ((payload: string) => Promise<string>) | undefined;
+
+  /** `${baseUrl}/${step}?ref=&return=` (+ `u`, `t` when links are tagged for the dev pages). */
+  private async link(step: DevStep, ref: string, userId: string, returnUrl: string): Promise<string> {
+    const url = new URL(`${this.baseUrl}/${step}`);
+    url.searchParams.set('ref', ref);
+    url.searchParams.set('return', returnUrl);
+    if (this.linkSigner) {
+      url.searchParams.set('u', userId);
+      url.searchParams.set('t', await this.linkSigner(linkPayload(step, ref, userId, returnUrl)));
+    }
+    return url.toString();
   }
 
   // ---------- test hooks ----------
@@ -130,10 +154,7 @@ export class FakePartner implements KycPartner {
     const challengeRef = this.ref('aad');
     this.refOwner.set(challengeRef, userId);
     if (mode === 'otp') return { challengeRef };
-    const url = new URL('/digilocker', this.baseUrl);
-    url.searchParams.set('ref', challengeRef);
-    url.searchParams.set('return', returnUrl);
-    return { redirectUrl: url.toString(), challengeRef };
+    return { redirectUrl: await this.link('digilocker', challengeRef, userId, returnUrl), challengeRef };
   }
 
   async verifyPan(pan: string, _name: string): Promise<{ valid: boolean; nameMatch: boolean; aadhaarLinked: boolean }> {
@@ -153,10 +174,7 @@ export class FakePartner implements KycPartner {
     this.enter('startEsign', this.scenarioForUser(userId));
     const ref = this.ref('esign');
     this.refOwner.set(ref, userId);
-    const url = new URL('/esign', this.baseUrl);
-    url.searchParams.set('ref', ref);
-    url.searchParams.set('return', returnUrl);
-    return { redirectUrl: url.toString(), ref };
+    return { redirectUrl: await this.link('esign', ref, userId, returnUrl), ref };
   }
 
   async uploadToKra(userId: string): Promise<{ ref: string }> {

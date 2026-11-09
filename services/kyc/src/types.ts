@@ -46,7 +46,9 @@ export type ReasonCode =
   | 'aadhaar-mismatch'
   | 'liveness-failed'
   | 'staff-approved'
-  | 'staff-rejected';
+  | 'staff-rejected'
+  /** the user withdrew a consent; the case is stopped (status 'rejected', terminal) */
+  | 'consent-withdrawn';
 
 /** One `kyc_cases` item (design §2). Masks only. */
 export interface KycCase {

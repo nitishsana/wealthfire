@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DecryptCommand, GenerateDataKeyCommand, GenerateMacCommand } from '@aws-sdk/client-kms';
 import { createHmac, randomBytes } from 'node:crypto';
 import {
-  ARGON2_DEFAULTS, Argon2Hasher, fromBase64Url, hmacLookup, KmsEnvelopeEncryptor, KmsMacSigner, LocalEncryptor,
+  ARGON2_DEFAULTS, Argon2Hasher, assertFieldContext, FIELD_PURPOSES, fromBase64Url, hmacLookup, KmsEnvelopeEncryptor, KmsMacSigner, LocalEncryptor,
   LocalMacSigner, randomToken, safeEqual, sha256, toBase64Url,
 } from '../../src/lib/crypto';
 import { FAST_ARGON2 } from './helpers';
@@ -78,17 +78,17 @@ describe('Argon2Hasher', () => {
 describe('LocalEncryptor', () => {
   it('round-trips and binds context', async () => {
     const e = new LocalEncryptor();
-    const ct = await e.encrypt('9876543210', { userId: 'u1' });
+    const ct = await e.encrypt('9876543210', { purpose: 'contact', userId: 'u1' });
     expect(ct.startsWith('l1.')).toBe(true);
     expect(ct).not.toContain('9876543210');
-    expect(await e.decrypt(ct, { userId: 'u1' })).toBe('9876543210');
-    await expect(e.decrypt(ct, { userId: 'u2' })).rejects.toThrow();
-    await expect(new LocalEncryptor().decrypt(ct, { userId: 'u1' })).rejects.toThrow();
-    await expect(e.decrypt('garbage', {})).rejects.toThrow();
+    expect(await e.decrypt(ct, { purpose: 'contact', userId: 'u1' })).toBe('9876543210');
+    await expect(e.decrypt(ct, { purpose: 'contact', userId: 'u2' })).rejects.toThrow();
+    await expect(new LocalEncryptor().decrypt(ct, { purpose: 'contact', userId: 'u1' })).rejects.toThrow();
+    await expect(e.decrypt('garbage', { purpose: 'pan' })).rejects.toThrow();
   });
   it('fresh IV per encryption', async () => {
     const e = new LocalEncryptor();
-    expect(await e.encrypt('x', {})).not.toBe(await e.encrypt('x', {}));
+    expect(await e.encrypt('x', { purpose: 'pan' })).not.toBe(await e.encrypt('x', { purpose: 'pan' }));
   });
   it('rejects wrong key size', () => {
     expect(() => new LocalEncryptor(new Uint8Array(16))).toThrow();
@@ -103,24 +103,79 @@ describe('KmsEnvelopeEncryptor', () => {
       send: async (cmd: unknown) => {
         if (cmd instanceof GenerateDataKeyCommand) {
           expect(cmd.input.KeySpec).toBe('AES_256');
-          expect(cmd.input.EncryptionContext).toEqual({ userId: 'u1' });
+          expect(cmd.input.EncryptionContext).toEqual({ purpose: 'contact', userId: 'u1' });
           const pt = randomBytes(32);
           const blob = new TextEncoder().encode(`wrapped-${n++}`);
           wrapped.set(toBase64Url(blob), new Uint8Array(pt));
           return { Plaintext: new Uint8Array(pt), CiphertextBlob: blob };
         }
         if (cmd instanceof DecryptCommand) {
-          expect(cmd.input.EncryptionContext).toEqual({ userId: 'u1' });
+          expect(cmd.input.EncryptionContext).toEqual({ purpose: 'contact', userId: 'u1' });
           return { Plaintext: new Uint8Array(wrapped.get(toBase64Url(cmd.input.CiphertextBlob!))!) };
         }
         throw new Error('unexpected command');
       },
     };
     const e = new KmsEnvelopeEncryptor(kms as never, 'key');
-    const a = await e.encrypt('ABCPE1234F', { userId: 'u1' });
-    const b = await e.encrypt('ABCPE1234F', { userId: 'u1' });
+    const a = await e.encrypt('ABCPE1234F', { purpose: 'contact', userId: 'u1' });
+    const b = await e.encrypt('ABCPE1234F', { purpose: 'contact', userId: 'u1' });
     expect(a.startsWith('k1.')).toBe(true);
     expect(a.split('.')[1]).not.toBe(b.split('.')[1]);
-    expect(await e.decrypt(a, { userId: 'u1' })).toBe('ABCPE1234F');
+    expect(await e.decrypt(a, { purpose: 'contact', userId: 'u1' })).toBe('ABCPE1234F');
+  });
+});
+
+describe('field encryption context (S9)', () => {
+  it('every GenerateDataKey and Decrypt on the field key carries the purpose context', async () => {
+    const seen: { cmd: string; keyId?: string; ctx?: Record<string, string> }[] = [];
+    const wrapped = new Map<string, Uint8Array>();
+    const kms = {
+      send: async (cmd: unknown) => {
+        if (cmd instanceof GenerateDataKeyCommand) {
+          seen.push({ cmd: 'GenerateDataKey', keyId: cmd.input.KeyId, ctx: cmd.input.EncryptionContext });
+          const pt = randomBytes(32);
+          const blob = randomBytes(8);
+          wrapped.set(toBase64Url(blob), new Uint8Array(pt));
+          return { Plaintext: new Uint8Array(pt), CiphertextBlob: new Uint8Array(blob) };
+        }
+        if (cmd instanceof DecryptCommand) {
+          seen.push({ cmd: 'Decrypt', keyId: cmd.input.KeyId, ctx: cmd.input.EncryptionContext });
+          return { Plaintext: new Uint8Array(wrapped.get(toBase64Url(cmd.input.CiphertextBlob!))!) };
+        }
+        throw new Error('unexpected command');
+      },
+    };
+    const e = new KmsEnvelopeEncryptor(kms as never, 'field-key-arn');
+    const pan = await e.encrypt('ABCPE1234F', { purpose: 'pan', userId: 'u1' });
+    const contact = await e.encrypt('9876543210', { purpose: 'contact', userId: 'u1' });
+    expect(await e.decrypt(pan, { purpose: 'pan', userId: 'u1' })).toBe('ABCPE1234F');
+    expect(await e.decrypt(contact, { purpose: 'contact', userId: 'u1' })).toBe('9876543210');
+    // a PAN envelope cannot be opened as a contact (AAD bound to the context)
+    await expect(e.decrypt(pan, { purpose: 'contact', userId: 'u1' })).rejects.toThrow();
+    expect(seen).toHaveLength(5);
+    for (const s of seen) {
+      expect(s.keyId).toBe('field-key-arn');
+      expect(['pan', 'contact']).toContain(s.ctx?.purpose);
+    }
+    expect(seen.map((s) => s.ctx?.purpose)).toEqual(['pan', 'contact', 'pan', 'contact', 'contact']);
+  });
+
+  it('needs purpose pan or contact on both encryptors, before any KMS call', async () => {
+    let calls = 0;
+    const kms = { send: async () => { calls += 1; return {}; } };
+    for (const e of [new LocalEncryptor(), new KmsEnvelopeEncryptor(kms as never, 'field-key')]) {
+      const contexts: Record<string, string>[] = [{}, { userId: 'u1' }, { purpose: 'otp' }, { purpose: 'PAN' }];
+      for (const ctx of contexts) {
+        await expect(e.encrypt('ABCPE1234F', ctx)).rejects.toThrow(/purpose pan or contact/);
+        await expect(e.decrypt('l1.a.b.c', ctx)).rejects.toThrow(/purpose pan or contact/);
+      }
+    }
+    expect(calls).toBe(0);
+    expect(FIELD_PURPOSES).toEqual(['pan', 'contact']);
+    expect(() => assertFieldContext({ purpose: 'pan', userId: 'u1' })).not.toThrow();
+  });
+  it('the error never echoes the value or context', async () => {
+    const err = await new LocalEncryptor().encrypt('ABCPE1234F', { purpose: 'x9876543210' }).catch((e: Error) => e);
+    expect(String((err as Error).message)).not.toMatch(/ABCPE1234F|9876543210/);
   });
 });

@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { DOC_URL_TTL_SEC, type Handler } from '../../src/review/routes';
+import { S3Client } from '@aws-sdk/client-s3';
+import { DOC_URL_TTL_SEC, reviewRoutes, type Handler } from '../../src/review/routes';
+import { contentDispositionFor, S3DownloadSigner } from '../../src/review/s3';
 import { FULL_AADHAAR, FULL_PAN, makeCase, REVIEWER, req, setup } from './fakes';
+import type { ReviewCase } from '../../src/review/ports';
+import type { KycCase } from '../../src/types';
 
 const ID = '11111111-1111-4111-8111-111111111111';
+
+/** The three documents R1 requires before an Approve. */
+function withDocs(s: ReturnType<typeof setup>, kinds: readonly ('selfie' | 'aadhaar' | 'pan')[] = ['selfie', 'aadhaar', 'pan']) {
+  s.documents.docs.set(ID, kinds.map((k) => ({ kind: k, key: `kyc/${ID}/${k}-1.${k === 'selfie' ? 'jpg' : 'pdf'}` })));
+}
 
 function route(s: ReturnType<typeof setup>, key: string): Handler {
   const h = s.routes[key];
@@ -135,6 +144,7 @@ describe('POST /review/cases/{id}', () => {
   it('approve -> verified, keeps checks, bumps version, writes audit with before/after', async () => {
     const s = setup();
     s.cases.put(makeCase());
+    withDocs(s);
     const r = await post(s, { action: 'approve', note: 'Selfie checked by hand', version: 3 });
     expect(r.status).toBe(200);
     const stored = s.cases.map.get(ID);
@@ -202,6 +212,7 @@ describe('POST /review/cases/{id}', () => {
     const s = setup();
     s.cases.put(makeCase());
     expect((await post(s, { action: 'approve', version: 2 })).status).toBe(409);
+    withDocs(s);
     s.cases.forceConflict = true;
     const r = await post(s, { action: 'approve' });
     expect(r.status).toBe(409);
@@ -224,11 +235,142 @@ describe('POST /review/cases/{id}', () => {
   it('500 without leaking the store error', async () => {
     const s = setup();
     s.cases.put(makeCase());
+    withDocs(s);
     s.cases.saveDecision = async () => {
       throw new Error(`db exploded ${FULL_PAN}`);
     };
     const r = await post(s, { action: 'approve' });
     expect(r.status).toBe(500);
     noFullIds(r.body);
+  });
+});
+
+describe('R1: staff Approve needs documents; KRA upload only after e-sign', () => {
+  const post = (s: ReturnType<typeof setup>, body: unknown) =>
+    route(s, 'POST /review/cases/{id}')(req({ params: { id: ID }, body }));
+  const withUpload = () => {
+    const s = setup();
+    const uploads: string[] = [];
+    const routes = reviewRoutes({
+      cases: s.cases, audit: s.audit, documents: s.documents, signer: s.signer, clock: s.clock,
+      onApproved: async (userId) => void uploads.push(userId),
+    });
+    return { ...s, routes, uploads };
+  };
+
+  it.each([
+    [[], 'selfie, Aadhaar, PAN'],
+    [['selfie'], 'Aadhaar, PAN'],
+    [['selfie', 'aadhaar'], 'PAN'],
+    [['aadhaar', 'pan'], 'selfie'],
+  ] as const)('approve with documents %j -> 409 documents_missing, nothing written', async (kinds, missing) => {
+    const s = setup();
+    s.cases.put(makeCase());
+    withDocs(s, kinds);
+    const r = await post(s, { action: 'approve' });
+    expect(r.status).toBe(409);
+    expect(r.body).toEqual({ error: 'documents_missing', message: `Approve needs the selfie, Aadhaar and PAN documents. Missing: ${missing}.` });
+    expect(s.cases.map.get(ID)?.status).toBe('under-review');
+    expect(s.audit.rows).toHaveLength(0);
+  });
+
+  it('a document refused by the type check does not count for approve', async () => {
+    const s = setup();
+    const refused: ReviewCase = { ...makeCase(), documents: { pan: { uploadId: 'u-pan', state: 'rejected' } } };
+    s.cases.put(refused as KycCase);
+    withDocs(s, ['selfie', 'aadhaar', 'pan']);
+    const r = await post(s, { action: 'approve' });
+    expect(r.status).toBe(409);
+    expect(r.body).toEqual({ error: 'documents_missing', message: 'Approve needs the selfie, Aadhaar and PAN documents. Missing: PAN.' });
+    expect(s.cases.map.get(ID)?.status).toBe('under-review');
+  });
+
+  it('an "other" file does not count as a required document', async () => {
+    const s = setup();
+    s.cases.put(makeCase());
+    s.documents.docs.set(ID, [
+      { kind: 'selfie', key: 'k1' }, { kind: 'aadhaar', key: 'k2' }, { kind: 'other', key: 'k3' },
+    ]);
+    expect((await post(s, { action: 'approve' })).status).toBe(409);
+  });
+
+  it('reject does not need documents', async () => {
+    const s = setup();
+    s.cases.put(makeCase());
+    expect((await post(s, { action: 'reject', reason: 'No documents sent' })).status).toBe(200);
+  });
+
+  it('approve on a case that was not e-signed -> verified with next esign; no KRA upload', async () => {
+    const s = withUpload();
+    s.cases.put(makeCase({ path: 'hand-check', reason: 'device-hand-check', checks: {} }));
+    withDocs(s);
+    const r = await post(s, { action: 'approve' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ case: { status: 'verified' }, next: 'esign' });
+    expect(s.cases.map.get(ID)).toMatchObject({ status: 'verified', reason: 'staff-approved', next: 'esign' });
+    expect(s.uploads).toEqual([]);
+  });
+
+  it.each([
+    ['evidence.esign done', { evidence: { esign: 'done' } }],
+    ['checks.esign pass', { checks: { esign: 'pass' as const } }],
+  ])('approve on an e-signed case (%s) -> next kra-upload and the upload runs', async (_label, over) => {
+    const s = withUpload();
+    s.cases.put({ ...makeCase(), ...over } as never);
+    withDocs(s);
+    const r = await post(s, { action: 'approve' });
+    expect(r.body).toMatchObject({ next: 'kra-upload' });
+    expect(s.cases.map.get(ID)).toMatchObject({ status: 'verified', next: 'kra-upload' });
+    expect(s.uploads).toEqual([ID]);
+  });
+
+  it('an illegal move is reported before missing documents', async () => {
+    const s = setup();
+    s.cases.put(makeCase({ status: 'verified' }));
+    expect((await post(s, { action: 'approve' })).body).toMatchObject({ error: 'illegal_transition' });
+  });
+});
+
+describe('S16: document links only for Under-review cases', () => {
+  it.each(['verified', 'rejected', 'pre-verified'] as const)('a %s case shows no document links (still audited)', async (status) => {
+    const s = setup();
+    s.cases.put(makeCase({ status }));
+    withDocs(s);
+    const r = await route(s, 'GET /review/cases/{id}')(req({ params: { id: ID } }));
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ documents: [], documentsAvailable: false });
+    expect(s.signer.calls).toHaveLength(0);
+    expect(s.audit.rows[0]).toMatchObject({ action: 'review.view' });
+  });
+
+  it('an Under-review case gets signed links', async () => {
+    const s = setup();
+    s.cases.put(makeCase());
+    withDocs(s);
+    const r = await route(s, 'GET /review/cases/{id}')(req({ params: { id: ID } }));
+    expect(r.body).toMatchObject({ documentsAvailable: true });
+    expect((r.body as { documents: unknown[] }).documents).toHaveLength(3);
+    expect(s.signer.calls).toHaveLength(3);
+  });
+});
+
+describe('S14: PDFs are served as attachments', () => {
+  it('contentDispositionFor: attachment with a fixed name for PDFs only', () => {
+    expect(contentDispositionFor(`kyc/${ID}/pan-abc123.pdf`)).toBe('attachment; filename="pan.pdf"');
+    expect(contentDispositionFor(`kyc/${ID}/aadhaar-x.PDF`)).toBe('attachment; filename="aadhaar.pdf"');
+    expect(contentDispositionFor(`kyc/${ID}/weird"name.pdf`)).toBe('attachment; filename="other.pdf"');
+    expect(contentDispositionFor(`kyc/${ID}/selfie-1.jpg`)).toBeUndefined();
+    expect(contentDispositionFor(`kyc/${ID}/pan-1.png`)).toBeUndefined();
+  });
+
+  it('S3DownloadSigner puts response-content-disposition=attachment in signed PDF URLs only', async () => {
+    const s3 = new S3Client({ region: 'ap-south-1', credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret' } });
+    const signer = new S3DownloadSigner(s3, 'docs-bucket');
+    const pdf = new URL(await signer.sign(`kyc/${ID}/pan-1.pdf`, 300));
+    expect(pdf.searchParams.get('response-content-disposition')).toBe('attachment; filename="pan.pdf"');
+    expect(pdf.searchParams.get('response-cache-control')).toBe('no-store');
+    expect(pdf.searchParams.get('X-Amz-Expires')).toBe('300');
+    const jpg = new URL(await signer.sign(`kyc/${ID}/selfie-1.jpg`, 300));
+    expect(jpg.searchParams.get('response-content-disposition')).toBeNull();
   });
 });

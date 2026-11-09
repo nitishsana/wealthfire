@@ -43,7 +43,8 @@ describe('one store for KYC routes, webhook and review', () => {
 
     await e.call('POST', '/kyc/selfie', { token, body: { uploadId: await e.uploadSelfie(token) } });
     await e.call('POST', '/kyc/esign', { token, body: { returnUrl: RETURN_URL } });
-    expect((await send(userId, 'esign.completed', { status: 'done' })).body.outcome).toBe('applied');
+    const esignRef = (await e.repos.cases.get(userId))!.partnerRefs.esign;
+    expect((await send(userId, 'esign.completed', { status: 'done' }, { ref: esignRef })).body.outcome).toBe('applied');
     const rec = (await e.repos.cases.get(userId))!;
     expect(rec).toMatchObject({ status: 'verified', path: 'full-kyc', next: 'kra-upload' });
     expect(rec.panEnc).toMatch(/./); // the webhook kept the attributes it does not own
@@ -55,7 +56,7 @@ describe('one store for KYC routes, webhook and review', () => {
     // one audit trail, in write order, from all writers
     const actions = e.repos.audit.all().filter((r) => r.userId === userId).map((r) => r.action);
     expect(actions).toEqual([
-      'kyc.start', 'kyc.aadhaar-start', 'webhook.kyc-result', 'kyc.pan-check', 'kyc.selfie', 'kyc.esign-start',
+      'kyc.start', 'kyc.aadhaar-start', 'webhook.kyc-result', 'kyc.pan-check', 'kyc.documents-signed', 'kyc.selfie', 'kyc.esign-start',
       'webhook.esign', 'kyc.kra-upload',
     ]);
     // versions line up across writers: every write +1
@@ -69,7 +70,8 @@ describe('one store for KYC routes, webhook and review', () => {
     const userId = await e.userIdOf(token);
     await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
     await e.call('POST', '/kyc/aadhaar', { token, body: { mode: 'digilocker', returnUrl: RETURN_URL } });
-    await send(userId, 'kyc.result', { check: 'aadhaar', verified: false });
+    const ref = (await e.repos.cases.get(userId))!.partnerRefs.aadhaar;
+    await send(userId, 'kyc.result', { check: 'aadhaar', verified: false }, { ref });
     expect((await e.call('GET', '/kyc/status', { token })).json).toMatchObject({ status: 'under-review', reason: 'check-unclear', next: 'wait' });
 
     const list = await e.call('GET', '/review/cases', { headers: REVIEWER });
@@ -79,7 +81,8 @@ describe('one store for KYC routes, webhook and review', () => {
     const historyActions = detail.json.history.map((h: { action: string }) => h.action).sort();
     expect(historyActions).toEqual(['kyc.aadhaar-start', 'kyc.start', 'review.view', 'webhook.kyc-result'].sort());
 
-    // staff approve wins; a late webhook for a terminal case is ignored and audited
+    // staff approve wins (with the three documents, R1); a late webhook for a terminal case is ignored and audited
+    for (const kind of ['selfie', 'aadhaar', 'pan'] as const) await e.uploadDoc(token, kind);
     expect((await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve' } })).statusCode).toBe(200);
     expect((await send(userId, 'kyc.result', { check: 'pan', valid: false, nameMatch: false, aadhaarLinked: false })).body.outcome)
       .toBe('ignored-terminal');

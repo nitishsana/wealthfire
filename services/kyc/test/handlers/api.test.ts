@@ -67,7 +67,7 @@ describe('router: auth wiring', () => {
     });
     expect(v.statusCode).toBe(200);
     expect(v.json.refreshToken).toBeUndefined();
-    expect(v.cookies[0]).toMatch(/^wf_refresh=[A-Za-z0-9_-]{43}; Max-Age=\d+; Path=\/auth; HttpOnly; Secure; SameSite=None$/);
+    expect(v.cookies[0]).toMatch(/^wf_rt=[A-Za-z0-9_-]{43}; Max-Age=\d+; Path=\/; HttpOnly; Secure; SameSite=None; Partitioned$/);
   });
 
   it('/review/* needs a staff token in group reviewer', async () => {
@@ -147,6 +147,8 @@ describe('router: HTTP behaviour', () => {
   it('serializeCookie', () => {
     expect(serializeCookie({ name: 'a', value: 'b', httpOnly: true, secure: true, sameSite: 'Strict', path: '/', maxAge: 0 }))
       .toBe('a=b; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Strict');
+    expect(serializeCookie({ name: 'wf_rt', value: 'v', httpOnly: true, secure: true, sameSite: 'None', partitioned: true, path: '/', maxAge: 5 }))
+      .toBe('wf_rt=v; Max-Age=5; Path=/; HttpOnly; Secure; SameSite=None; Partitioned');
   });
 });
 
@@ -200,8 +202,12 @@ describe('Lambda adapter (handlers/api.ts)', () => {
   });
 
   it('return URL prefixes come from RETURN_URL_PREFIXES (never from the CORS origins), else the default', () => {
+    // R10: the built-in default has no loopback entry; the app deep link is pinned (S15)
+    expect(APP_RETURN_SCHEME).toBe('wealthfire://kyc-return');
     expect(returnUrlPrefixes({ ALLOWED_ORIGINS: 'https://nitishsana.github.io' }))
-      .toEqual(['https://nitishsana.github.io/wealthfire/', 'http://127.0.0.1:5180/', APP_RETURN_SCHEME]);
+      .toEqual(['https://nitishsana.github.io/wealthfire/', APP_RETURN_SCHEME]);
+    expect(returnUrlPrefixes({ RETURN_URL_PREFIXES: 'https://nitishsana.github.io/wealthfire/,http://127.0.0.1:5180/' }))
+      .toEqual(['https://nitishsana.github.io/wealthfire/', 'http://127.0.0.1:5180/']);
     expect(returnUrlPrefixes({ RETURN_URL_PREFIXES: 'https://nitishsana.github.io/wealthfire/, wealthfire://' }))
       .toEqual(['https://nitishsana.github.io/wealthfire/', APP_RETURN_SCHEME]);
     // a bare origin (no trailing slash) or a non-https entry would open too much

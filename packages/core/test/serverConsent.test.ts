@@ -1,0 +1,397 @@
+// Wave 4 client behaviour: consent before each paid step, retry after a partner timeout, all three
+// documents, withdraw consent / delete data, the shared reason texts and the web session rules.
+import { describe, expect, it } from 'vitest';
+import {
+  CONSENT_PURPOSES,
+  CONSENT_TEXT,
+  FEATURES,
+  KYC_REASON_TEXT,
+  KYC_TEXT,
+  ServerError,
+  ServerKycClient,
+  STEP_CONSENT,
+  hasKycCase,
+  isConsentRequired,
+  kycDocsNeeded,
+  kycReasonText,
+  needsSignIn,
+  serverEligibleToInvest,
+  toKycStatusView,
+  type DocKind,
+  type KycStatusView,
+  type ServerFetchInit,
+  type TokenStore,
+} from '../src';
+
+const BASE = 'https://api.example.test';
+interface Call { url: string; init: ServerFetchInit }
+type Reply = { status: number; body?: unknown } | 'network-error';
+
+/** Fake fetch: replies in order per "METHOD path" (the last reply repeats), records every call. */
+function fakeFetch(routes: Record<string, Reply[]>) {
+  const calls: Call[] = [];
+  const fetch = async (url: string, init: ServerFetchInit) => {
+    calls.push({ url, init });
+    const q = routes[`${init.method} ${url.slice(BASE.length)}`];
+    const r = q && q.length > 1 ? q.shift()! : q?.[0];
+    if (!r) return { status: 404, text: async () => JSON.stringify({ error: 'not_found' }) };
+    if (r === 'network-error') throw new TypeError('failed');
+    return { status: r.status, text: async () => (r.body === undefined ? '' : JSON.stringify(r.body)) };
+  };
+  const paths = () => calls.map((c) => `${c.init.method} ${c.url.slice(BASE.length)}`);
+  const bodies = (path: string) => calls.filter((c) => c.url.endsWith(path)).map((c) => JSON.parse(c.init.body ?? '{}'));
+  return { fetch, calls, paths, bodies };
+}
+
+function memTokens(access: string | null = 'A1'): TokenStore & { access: string | null } {
+  const s = { access, async get() { return s.access; }, async set(v: string | null) { s.access = v; } };
+  return s;
+}
+
+const ok = { status: 200, body: { ok: true } };
+const view = (over: Record<string, unknown> = {}) => ({ status: 'pre-verified', path: null, reason: 'in-progress', next: 'aadhaar', eligibleToInvest: false, ...over });
+let n = 0;
+const newKey = () => `k-${++n}`;
+const client = (f: ReturnType<typeof fakeFetch>, tokens = memTokens()) => new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens, newKey });
+const input = { firstName: 'Asha', lastName: 'Rao', dob: '1990-01-31', pan: 'ABCPE1234F', aadhaarLast4: '2346', deviceStatus: 'pre-verified' as const };
+
+describe('R6 reason texts (shared in core)', () => {
+  it('match the contract exactly', () => {
+    expect(KYC_REASON_TEXT['pan-in-use']).toBe('We need to check your PAN by hand.');
+    expect(KYC_REASON_TEXT['partner-timeout']).toBe('Our partner is slow. Tap Try again.');
+    expect(KYC_REASON_TEXT['hand-check']).toBe('We\u2019re checking your documents by hand.');
+    expect(KYC_REASON_TEXT['consent-withdrawn']).toBe('You withdrew consent, so we stopped your KYC.');
+  });
+
+  it('device-hand-check shows the same text as hand-check', () => {
+    expect(kycReasonText('device-hand-check')).toBe(kycReasonText('hand-check'));
+  });
+
+  it('unknown or missing codes show nothing (no server value is echoed)', () => {
+    expect(kycReasonText('ABCPE1234F')).toBeUndefined();
+    expect(kycReasonText('toString')).toBeUndefined();
+    expect(kycReasonText(null)).toBeUndefined();
+    expect(kycReasonText('')).toBeUndefined();
+  });
+});
+
+describe('consent before each paid step', () => {
+  it('startKyc posts pan-check consent, then /kyc/start', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent': [ok], 'POST /kyc/start': [{ status: 200, body: view() }] });
+    const c = client(f);
+    await c.startKyc(input);
+    expect(f.paths()).toEqual(['POST /kyc/consent', 'POST /kyc/start']);
+    expect(f.bodies('/kyc/consent')).toEqual([{ purpose: 'pan-check' }]);
+    expect(f.calls[0]!.init.headers.authorization).toBe('Bearer A1');
+    expect(f.calls[0]!.init.headers['idempotency-key']).toBeUndefined();
+    expect(c.hasConsent('pan-check')).toBe(true);
+  });
+
+  it('startAadhaar: digilocker or aadhaar-otp consent by mode', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent': [ok], 'POST /kyc/aadhaar': [{ status: 200, body: { redirectUrl: 'https://p.test/d', kyc: view() } }] });
+    const c = client(f);
+    await c.startAadhaar('digilocker', 'https://app.test/r');
+    await c.startAadhaar('otp', 'https://app.test/r');
+    expect(f.bodies('/kyc/consent')).toEqual([{ purpose: 'digilocker' }, { purpose: 'aadhaar-otp' }]);
+    expect(f.paths()).toEqual(['POST /kyc/consent', 'POST /kyc/aadhaar', 'POST /kyc/consent', 'POST /kyc/aadhaar']);
+  });
+
+  it('submitSelfie: face-match consent first', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent': [ok], 'POST /kyc/selfie': [{ status: 200, body: view({ next: 'esign' }) }] });
+    await client(f).submitSelfie('selfie-x.jpg');
+    expect(f.paths()).toEqual(['POST /kyc/consent', 'POST /kyc/selfie']);
+    expect(f.bodies('/kyc/consent')).toEqual([{ purpose: 'face-match' }]);
+  });
+
+  it('startEsign: esign and kra-upload as two separate consents (one screen, two ticks)', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent': [ok], 'POST /kyc/esign': [{ status: 200, body: { redirectUrl: 'https://p.test/e', kyc: view({ next: 'esign' }) } }] });
+    await client(f).startEsign('https://app.test/r');
+    expect(f.bodies('/kyc/consent')).toEqual([{ purpose: 'esign' }, { purpose: 'kra-upload' }]);
+    expect(f.paths().at(-1)).toBe('POST /kyc/esign');
+    expect(STEP_CONSENT.esign).toEqual(['esign', 'kra-upload']);
+  });
+
+  it('a failed consent call stops the step (no paid call)', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent': [{ status: 503, body: { error: 'internal' } }], 'POST /kyc/start': [{ status: 200, body: view() }] });
+    await expect(client(f).startKyc(input)).rejects.toBeInstanceOf(ServerError);
+    expect(f.paths()).toEqual(['POST /kyc/consent']);
+  });
+
+  it('409 consent-required (either spelling) is ServerError consent_required with a fixed text', async () => {
+    const f = fakeFetch({
+      'POST /kyc/consent': [ok],
+      'POST /kyc/start': [{ status: 409, body: { error: 'consent-required', message: 'ABCPE1234F' } }, { status: 409, body: { error: 'consent_required' } }],
+    });
+    const c = client(f);
+    for (let i = 0; i < 2; i++) {
+      const e = await c.startKyc(input).catch((x) => x);
+      expect(e).toMatchObject({ status: 409, code: 'consent_required', message: KYC_TEXT.consentNeeded });
+      expect(isConsentRequired(e)).toBe(true);
+    }
+  });
+
+  it('every purpose has a tick text', () => {
+    for (const p of CONSENT_PURPOSES) expect(CONSENT_TEXT[p].length).toBeGreaterThan(10);
+  });
+});
+
+describe('R3 retry after a partner timeout', () => {
+  it('maps an under-review partner-timeout wait to next "retry"', () => {
+    expect(toKycStatusView({ status: 'under-review', reason: 'partner-timeout', next: 'wait' }).next.type).toBe('retry');
+    expect(toKycStatusView({ status: 'under-review', reason: 'partner-timeout', next: 'kra-lookup' }).next.type).toBe('retry');
+    expect(toKycStatusView({ status: 'under-review', reason: 'check-unclear', next: 'wait' }).next.type).toBe('wait');
+    // a step the server re-opened after a timeout stays that step
+    expect(toKycStatusView({ status: 'under-review', reason: 'partner-timeout', next: 'aadhaar' }).next.type).toBe('digilocker');
+    expect(toKycStatusView({ status: 'verified', reason: 'partner-timeout', next: 'wait' }).next.type).toBe('none');
+  });
+
+  it('retry() posts /kyc/retry with an Idempotency-Key and skips the consent call (consent on record)', async () => {
+    const f = fakeFetch({ 'POST /kyc/retry': [{ status: 200, body: view({ status: 'pre-verified', reason: 'in-progress', next: 'aadhaar' }) }] });
+    const v = await client(f).retry();
+    expect(f.paths()).toEqual(['POST /kyc/retry']);
+    expect(f.calls[0]!.init.headers['idempotency-key']).toMatch(/^k-/);
+    expect(v.next.type).toBe('digilocker');
+  });
+
+  it('consent_required on retry -> retry(true) records pan-check first, then retries', async () => {
+    const f = fakeFetch({
+      'POST /kyc/consent': [ok],
+      'POST /kyc/retry': [{ status: 409, body: { error: 'consent-required' } }, { status: 200, body: view({ status: 'under-review', reason: 'partner-timeout', next: 'wait' }) }],
+    });
+    const c = client(f);
+    const e = await c.retry().catch((x) => x);
+    expect(isConsentRequired(e)).toBe(true);
+    expect(f.paths()).toEqual(['POST /kyc/retry']);
+    await c.retry(true);
+    expect(f.paths()).toEqual(['POST /kyc/retry', 'POST /kyc/consent', 'POST /kyc/retry']);
+    expect(f.bodies('/kyc/consent')).toEqual([{ purpose: 'pan-check' }]);
+  });
+
+  it('retry() never calls consent, even when this session has none recorded', async () => {
+    const f = fakeFetch({ 'POST /kyc/retry': [{ status: 200, body: view() }] });
+    const c = client(f);
+    expect(c.hasConsent('pan-check')).toBe(false);
+    await c.retry();
+    expect(f.paths()).toEqual(['POST /kyc/retry']);
+  });
+
+  it('redo opens the user step', async () => {
+    const f = fakeFetch({ 'POST /kyc/retry': [
+      { status: 200, body: { ...view({ next: 'wait' }), redo: 'aadhaar' } },
+      { status: 200, body: { ...view({ next: 'wait' }), redo: 'selfie' } },
+      { status: 200, body: { ...view({ next: 'wait' }), redo: 'esign' } },
+      { status: 200, body: { ...view({ status: 'verified', next: 'none' }), redo: 'esign' } },
+    ] });
+    const c = client(f);
+    expect((await c.retry()).next.type).toBe('digilocker');
+    expect((await c.retry()).next.type).toBe('documents');
+    expect((await c.retry()).next.type).toBe('esign');
+    expect((await c.retry()).next.type).toBe('none');
+  });
+
+  it('retry limit reached keeps the fixed limit text', async () => {
+    const f = fakeFetch({ 'POST /kyc/retry': [{ status: 429, body: { error: 'limit_reached' } }] });
+    await expect(client(f).retry()).rejects.toMatchObject({ code: 'limit_reached' });
+  });
+});
+
+describe('R1 all three documents', () => {
+  const uploads = { status: 200, body: { uploads: [
+    { kind: 'selfie', uploadId: 'selfie-1.jpg', url: 'https://s3.test/s', headers: { 'content-type': 'image/jpeg' } },
+    { kind: 'aadhaar', uploadId: 'aadhaar-1.pdf', url: 'https://s3.test/a', headers: { 'content-type': 'application/pdf' } },
+    { kind: 'pan', uploadId: 'pan-1.png', url: 'https://s3.test/p', headers: { 'content-type': 'image/png' } },
+  ] } };
+  const files = [
+    { kind: 'selfie' as const, contentType: 'image/jpeg' as const, size: 10 },
+    { kind: 'aadhaar' as const, contentType: 'application/pdf' as const, size: 20 },
+    { kind: 'pan' as const, contentType: 'image/png' as const, size: 30 },
+  ];
+
+  it('uploadDocuments: one /kyc/documents call, a PUT per file, uploadIds by kind', async () => {
+    const f = fakeFetch({ 'POST /kyc/documents': [uploads] });
+    const c = client(f);
+    const put: string[] = [];
+    const ids = await c.uploadDocuments(files, async (u, kind) => { put.push(`${kind} ${u.url}`); return true; });
+    expect(ids).toEqual({ selfie: 'selfie-1.jpg', aadhaar: 'aadhaar-1.pdf', pan: 'pan-1.png' });
+    expect(f.bodies('/kyc/documents')).toEqual([{ files }]);
+    expect(put).toEqual(['selfie https://s3.test/s', 'aadhaar https://s3.test/a', 'pan https://s3.test/p']);
+    expect([...c.sentDocuments()].sort()).toEqual(['aadhaar', 'pan', 'selfie']);
+  });
+
+  it('a failed PUT throws upload_failed; the others still count as sent', async () => {
+    const f = fakeFetch({ 'POST /kyc/documents': [uploads] });
+    const c = client(f);
+    const e = await c.uploadDocuments(files, async (_u, kind) => kind !== 'pan').catch((x) => x);
+    expect(e).toMatchObject({ code: 'upload_failed', message: KYC_TEXT.uploadFailed });
+    expect([...c.sentDocuments()].sort()).toEqual(['aadhaar', 'selfie']);
+  });
+
+  it('a throwing PUT counts as failed', async () => {
+    const f = fakeFetch({ 'POST /kyc/documents': [uploads] });
+    await expect(client(f).uploadDocuments(files, async () => { throw new Error('x'); })).rejects.toMatchObject({ code: 'upload_failed' });
+  });
+
+  const v = (status: KycStatusView['status'], next: KycStatusView['next']['type'], documents?: DocKind[]): KycStatusView =>
+    ({ status, reason: null, next: { type: next }, ...(documents ? { documents } : {}) });
+
+  it('kycDocsNeeded: selfie step asks the selfie plus the cards not held', () => {
+    expect(kycDocsNeeded(v('pre-verified', 'documents'))).toEqual(['selfie', 'aadhaar', 'pan']);
+    expect(kycDocsNeeded(v('pre-verified', 'documents'), new Set<DocKind>(['aadhaar', 'pan', 'selfie']))).toEqual(['selfie']);
+    expect(kycDocsNeeded(v('pre-verified', 'documents', ['pan']))).toEqual(['selfie', 'aadhaar']);
+  });
+
+  it('kycDocsNeeded: hand-check / pan-in-use (under review) asks every kind not held', () => {
+    expect(kycDocsNeeded(v('under-review', 'wait'))).toEqual(['selfie', 'aadhaar', 'pan']);
+    expect(kycDocsNeeded(v('under-review', 'retry'), new Set<DocKind>(['selfie']))).toEqual(['aadhaar', 'pan']);
+    expect(kycDocsNeeded(v('under-review', 'wait', ['selfie', 'aadhaar', 'pan']))).toEqual([]);
+  });
+
+  it('kycDocsNeeded: nothing before a case, on other steps or once decided', () => {
+    expect(kycDocsNeeded(null)).toEqual([]);
+    expect(kycDocsNeeded(v(null, 'start'))).toEqual([]);
+    expect(kycDocsNeeded(v('pre-verified', 'digilocker'))).toEqual([]);
+    expect(kycDocsNeeded(v('verified', 'none'))).toEqual([]);
+    expect(kycDocsNeeded(v('rejected', 'none'))).toEqual([]);
+  });
+
+  it('status documents are parsed (known kinds only)', () => {
+    expect(toKycStatusView({ status: 'under-review', next: 'wait', documents: ['pan', 'x', 'selfie'] }).documents).toEqual(['selfie', 'pan']);
+    expect(toKycStatusView({ status: 'under-review', next: 'wait' }).documents).toBeUndefined();
+  });
+});
+
+describe('withdraw consent and delete data', () => {
+  it('withdrawConsent posts /kyc/consent/withdraw for every purpose; 404 counts as withdrawn', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent/withdraw': [ok, { status: 404, body: { error: 'not_found' } }, ok] });
+    const c = client(f);
+    await c.withdrawConsent();
+    expect(f.bodies('/kyc/consent/withdraw')).toEqual(CONSENT_PURPOSES.map((purpose) => ({ purpose })));
+    expect(f.calls.every((x) => x.init.headers.authorization === 'Bearer A1')).toBe(true);
+  });
+
+  it('withdrawConsent forgets recorded consents, so the next step records again', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent': [ok], 'POST /kyc/consent/withdraw': [ok], 'POST /kyc/retry': [{ status: 200, body: view() }] });
+    const c = client(f);
+    await c.giveConsent('pan-check');
+    await c.withdrawConsent(['pan-check']);
+    expect(c.hasConsent('pan-check')).toBe(false);
+    await c.retry(true);
+    expect(f.paths()).toEqual(['POST /kyc/consent', 'POST /kyc/consent/withdraw', 'POST /kyc/consent', 'POST /kyc/retry']);
+  });
+
+  it('withdrawConsent stops on other errors', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent/withdraw': [{ status: 503, body: { error: 'internal' } }] });
+    await expect(client(f).withdrawConsent()).rejects.toMatchObject({ status: 503 });
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('deleteKycData sends DELETE /kyc/data with the access token and no body', async () => {
+    const f = fakeFetch({ 'DELETE /kyc/data': [ok] });
+    await client(f).deleteKycData();
+    expect(f.paths()).toEqual(['DELETE /kyc/data']);
+    expect(f.calls[0]!.init.body).toBeUndefined();
+    expect(f.calls[0]!.init.headers.authorization).toBe('Bearer A1');
+    expect(f.calls[0]!.init.headers['x-wf-client']).toBe('web');
+  });
+
+  it('hasKycCase: only when the server has a case', () => {
+    expect(hasKycCase(null)).toBe(false);
+    expect(hasKycCase(toKycStatusView({ status: null, next: 'start' }))).toBe(false);
+    expect(hasKycCase(toKycStatusView({ status: 'under-review', next: 'wait' }))).toBe(true);
+  });
+
+  it('after a withdraw the server may offer a new start', () => {
+    expect(toKycStatusView({ status: 'under-review', reason: 'consent-withdrawn', next: 'start' }).next.type).toBe('start');
+    expect(toKycStatusView({ status: 'under-review', reason: 'in-progress', next: 'start' }).next.type).toBe('wait');
+  });
+
+  it('staff-approved before e-sign: verified with next esign shows the e-sign step and is not eligible yet', async () => {
+    const body = { status: 'verified', reason: 'staff-approved', next: 'esign', eligibleToInvest: false };
+    const v = toKycStatusView(body);
+    expect(v.next.type).toBe('esign');
+    expect(serverEligibleToInvest(v)).toBe(false);
+    expect(serverEligibleToInvest(toKycStatusView({ ...body, next: 'none', eligibleToInvest: true }))).toBe(true);
+    const f = fakeFetch({ 'POST /kyc/consent': [ok], 'POST /kyc/esign': [{ status: 200, body: { redirectUrl: 'https://p.test/e', kyc: body } }] });
+    await expect(client(f).startEsign('wealthfire://kyc-return')).resolves.toMatchObject({ next: { type: 'esign', url: 'https://p.test/e' } });
+    expect(f.bodies('/kyc/esign')).toEqual([{ returnUrl: 'wealthfire://kyc-return' }]);
+  });
+
+  it('confirm texts', () => {
+    expect(`${KYC_TEXT.withdrawTitle} ${KYC_TEXT.withdrawBody}`).toBe('Withdraw consent? We will stop your KYC. You can\u2019t invest until you finish KYC again.');
+    expect(`${KYC_TEXT.deleteTitle} ${KYC_TEXT.deleteBody}`).toBe('Delete your KYC data? We delete your documents and details. Some records stay if the law needs them.');
+  });
+
+  it('feature id is registered', () => {
+    expect(FEATURES.some((x) => x.id === 'kyc-data-controls')).toBe(true);
+  });
+});
+
+describe('web session: x-wf-client and the refresh cookie', () => {
+  it('sends x-wf-client: web on every request (auth and kyc); cookie only on /auth', async () => {
+    const f = fakeFetch({
+      'POST /auth/otp/send': [{ status: 200, body: { challengeId: 'c'.repeat(22) } }],
+      'POST /kyc/consent': [ok],
+      'POST /kyc/start': [{ status: 200, body: view() }],
+      'GET /kyc/status': [{ status: 200, body: view() }],
+      'DELETE /kyc/data': [ok],
+    });
+    const c = client(f);
+    await c.sendOtp('email', 'a@b.test');
+    await c.startKyc(input);
+    await c.getStatus();
+    await c.deleteKycData();
+    expect(f.calls.every((x) => x.init.headers['x-wf-client'] === 'web')).toBe(true);
+    expect(f.calls.filter((x) => x.init.credentials === 'include').map((x) => x.url)).toEqual([`${BASE}/auth/otp/send`]);
+  });
+
+  it('a blocked cookie (refresh 400 / 401 / 403) ends the session: needsSignIn, no token kept', async () => {
+    for (const status of [400, 401, 403]) {
+      const t = memTokens(null);
+      const f = fakeFetch({ 'POST /auth/refresh': [{ status, body: { error: status === 401 ? 'invalid_token' : 'bad_request' } }] });
+      const e = await client(f, t).getStatus().catch((x) => x);
+      expect(needsSignIn(e)).toBe(true);
+      expect(e.message).toBe('Sign in to continue.');
+      expect(t.access).toBeNull();
+      expect(f.calls[0]!.init.body).toBe('{}'); // no refresh token from any store
+    }
+    expect(KYC_TEXT.signInAgain).toBe('Please sign in again.');
+  });
+
+  it('the app client does not treat refresh 400 as signed out', async () => {
+    const f = fakeFetch({ 'POST /auth/refresh': [{ status: 400, body: { error: 'bad_request' } }] });
+    const tokens = { ...memTokens(null), getRefresh: async () => 'R1', setRefresh: async () => {} };
+    const e = await new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens, client: 'app' }).getStatus().catch((x) => x);
+    expect(e).toMatchObject({ status: 400, code: 'bad_request' });
+    expect(needsSignIn(e)).toBe(false);
+  });
+
+  it('web refresh 403 forbidden (cookie without the header / Origin) asks for sign-in; refreshToken in a body is ignored', async () => {
+    const t = memTokens(null);
+    const f = fakeFetch({ 'POST /auth/refresh': [{ status: 403, body: { error: 'forbidden' } }] });
+    expect(needsSignIn(await client(f, t).getStatus().catch((x) => x))).toBe(true);
+    expect(f.calls[0]!.init.credentials).toBe('include');
+    expect(f.calls[0]!.init.headers['x-wf-client']).toBe('web');
+    const stored: string[] = [];
+    const t2 = { ...memTokens(null), getRefresh: async () => null, setRefresh: async (v: string | null) => { if (v) stored.push(v); } };
+    const f2 = fakeFetch({
+      'POST /auth/refresh': [{ status: 200, body: { accessToken: 'A9', refreshToken: 'LEAK' } }],
+      'GET /kyc/status': [{ status: 200, body: view() }],
+    });
+    await new ServerKycClient({ baseUrl: BASE, fetch: f2.fetch, tokens: t2 }).getStatus();
+    expect(stored).toEqual([]);
+  });
+
+  it('phones: no x-wf-client header, no cookie mode, refresh token in the body', async () => {
+    const f = fakeFetch({ 'POST /auth/refresh': [{ status: 200, body: { accessToken: 'A2', refreshToken: 'R2' } }], 'GET /kyc/status': [{ status: 200, body: view() }] });
+    const tokens = { ...memTokens(null), getRefresh: async () => 'R1', setRefresh: async () => {} };
+    await new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens, client: 'app' }).getStatus();
+    expect(f.calls.every((x) => x.init.headers['x-wf-client'] === undefined && x.init.credentials === undefined)).toBe(true);
+    expect(JSON.parse(f.calls[0]!.init.body!)).toEqual({ refreshToken: 'R1' });
+  });
+
+  it('needsSignIn is false for other errors', () => {
+    expect(needsSignIn(new ServerError(409, 'wrong_step'))).toBe(false);
+    expect(needsSignIn(new ServerError(0, 'network'))).toBe(false);
+    expect(needsSignIn(new Error('x'))).toBe(false);
+  });
+});

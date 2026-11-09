@@ -3,18 +3,21 @@
 //
 // Tokens: the access token stays in memory only. The refresh token is kept in expo-secure-store (iOS Keychain /
 // Android Keystore). expo-secure-store is loaded through a guarded require: without its native module the refresh
-// token is kept in memory only (signed out on restart), never in AsyncStorage.
+// token is kept in memory only (signed out on restart), never in AsyncStorage. A dead session shows
+// 'Please sign in again.' and asks for an OTP to the onboarding contact (same as web).
 // DigiLocker / Aadhaar OTP / e-sign pages open in an auth session (expo-web-browser) that returns to KYC_RETURN_URL;
 // only HTTPS pages on the API origin or extra.kycRedirectOrigins are opened.
-// Same steps and texts as apps/web/src/components/ServerKyc.tsx. Sends names, PAN, Aadhaar last 4, date of birth and the
-// device result only; the full Aadhaar never leaves the phone and the selfie goes straight to its presigned upload URL.
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ActivityIndicator, Text, View } from 'react-native';
+// Same steps, consent ticks and texts as apps/web/src/components/ServerKyc.tsx (texts from @wealthfire/core). Sends
+// names, PAN, Aadhaar last 4, date of birth and the device result only; the full Aadhaar never leaves the phone and the
+// documents (selfie, Aadhaar card, PAN card) go straight to their presigned upload URLs.
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
+import { AccessibilityInfo, ActivityIndicator, findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { File, UploadType } from 'expo-file-system';
 import {
-  DOB_HINT, DOB_LABEL, isServerError, kycStatusLabel, normalizeDob, onboardingReducer, ServerKycClient, validateDob,
-  type DocFile, type KycStatusView, type OnboardingState, type StartKycInput, type TokenStore,
+  CONSENT_TEXT, DOB_HINT, DOB_LABEL, hasKycCase, HttpOtpProvider, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycReasonText,
+  kycStatusLabel, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
+  type ConsentPurpose, type DocFile, type DocKind, type KycStatusView, type OnboardingState, type StartKycInput, type TokenStore,
 } from '@wealthfire/core';
 import { useBlockBackWhile } from './shell';
 import { useStore } from './store';
@@ -37,25 +40,7 @@ export const KYC_RETURN_URL = 'wealthfire://kyc-return';
 export const WAIT_TEXT = "We're checking your details. This can take a few minutes.";
 export const REDIRECT_BLOCKED = 'Could not open the next step. Try again later.';
 export const LOAD_FAILED = 'Could not get your KYC status. Try again.';
-export const SELFIE_TOO_BIG = 'Choose a JPG or PNG photo up to 10 MB.';
-const UPLOAD_FAILED = 'Could not upload your selfie. Try again.';
-const MAX_UPLOAD = 10 * 1024 * 1024;
-
-/** Short text for a server reason code (unknown codes show nothing, so no server value is ever echoed). Same as web. */
-export const REASON_TEXT: Record<string, string> = {
-  'kra-validated': 'Your KYC record was confirmed.',
-  'full-kyc-passed': 'All checks passed.',
-  'in-progress': 'Checks are in progress.',
-  'check-unclear': 'Our team is taking a closer look.',
-  'partner-timeout': 'The KYC service did not answer. We will try again.',
-  'device-hand-check': 'Our team is checking your documents by hand.',
-  'pan-invalid': 'Your PAN could not be verified.',
-  'pan-not-individual': 'This PAN is not for an individual.',
-  'aadhaar-mismatch': 'Your Aadhaar details did not match.',
-  'liveness-failed': 'The selfie check did not pass.',
-  'staff-approved': 'Approved by our team.',
-  'staff-rejected': 'Rejected by our team.',
-};
+const FAILED = 'Something went wrong. Try again.';
 
 // ---------- URL checks (no URL class: React Native's is incomplete) ----------
 
@@ -138,7 +123,10 @@ export function phoneTokens(store: SecureStoreLike | null = loadSecureStore()): 
   };
 }
 
+
 // ---------- context: one client and one status for the app's life ----------
+
+type Docs = Partial<Record<DocKind, DocFile>>;
 
 export interface KycServer {
   client: ServerKycClient;
@@ -146,16 +134,34 @@ export interface KycServer {
   view: KycStatusView | null;
   busy: boolean;
   error: string;
+  /** Short success text ('Documents sent.'). */
+  notice: string;
+  /** Document kinds uploaded this session. */
+  sent: ReadonlySet<DocKind>;
+  /** The session ended (refresh token missing or refused): 'Please sign in again.' with an OTP. */
+  signIn: boolean;
+  /** POST /kyc/retry answered consent_required: the pan-check tick shows again. */
+  retryConsent: boolean;
   /** GET /kyc/status */
   refresh(): Promise<void>;
-  /** POST /kyc/start, then follows `next` (DigiLocker / e-sign open at once, like web). */
+  /** POST /kyc/start (after the pan-check tick). */
   start(input: StartKycInput): Promise<void>;
   /** The Aadhaar step (DigiLocker or partner OTP) in an auth session, then the status again. */
   aadhaar(mode: 'digilocker' | 'otp'): Promise<void>;
-  /** e-sign in an auth session, then the status again. */
+  /** e-sign (after the esign and kra-upload ticks) in an auth session, then the status again. */
   esign(): Promise<void>;
-  /** PUT the selfie to its presigned URL, then POST /kyc/selfie and follow `next`. True when both worked. */
-  uploadSelfie(doc: DocFile): Promise<boolean>;
+  /** R3: POST /kyc/retry after a partner timeout. */
+  retry(): Promise<void>;
+  /** Selfie step: upload the chosen documents, then POST /kyc/selfie. True when both worked. */
+  submitDocuments(docs: Docs, kinds: DocKind[]): Promise<boolean>;
+  /** Under review: upload the documents for the reviewer. True when every upload worked. */
+  sendForReview(docs: Docs, kinds: DocKind[]): Promise<boolean>;
+  /** POST /kyc/consent/withdraw for every purpose, then the status again. */
+  withdrawConsent(): Promise<boolean>;
+  /** DELETE /kyc/data, then the status again. */
+  deleteData(): Promise<boolean>;
+  /** After an OTP sign-in: read the status again. */
+  signedIn(): Promise<void>;
   /** POST /auth/logout and clear the tokens (also when offline). */
   signOut(): Promise<void>;
 }
@@ -183,6 +189,10 @@ function ServerProvider({ client, origins, children }: { client: ServerKycClient
   const [view, setView] = useState<KycStatusView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [sent, setSent] = useState<ReadonlySet<DocKind>>(() => client.sentDocuments());
+  const [signIn, setSignIn] = useState(false);
+  const [retryConsent, setRetryConsent] = useState(false);
   const alive = useRef(true);
   const running = useRef(false);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -192,12 +202,17 @@ function ServerProvider({ client, origins, children }: { client: ServerKycClient
   const run = useCallback(async (task: () => Promise<void>, fallback: string, quiet = false): Promise<boolean> => {
     if (running.current) return false;
     running.current = true;
-    setBusy(true); setError('');
+    setBusy(true); setError(''); setNotice('');
     try {
       await task();
       return true;
     } catch (e) {
-      if (isServerError(e) && e.status === 401) show(null);
+      if (needsSignIn(e)) {
+        show(null);
+        // the launch read before onboarding's sign-in stays quiet; later a dead session asks for an OTP
+        if (alive.current && !quiet) setSignIn(true);
+        return false;
+      }
       if (alive.current && !quiet) setError(message(e, fallback));
       return false;
     } finally {
@@ -227,46 +242,81 @@ function ServerProvider({ client, origins, children }: { client: ServerKycClient
     if (v.next.type === 'esign') await open(v.next.url);
   }, [client, open]);
 
-  /** After a user action (start / selfie): DigiLocker and e-sign open at once, same as web. */
-  const follow = useCallback(async (v: KycStatusView) => {
-    show(v);
-    if (v.next.type === 'digilocker') await aadhaarStep('digilocker');
-    else if (v.next.type === 'esign') await esignStep();
-  }, [aadhaarStep, esignStep]);
+  /** R1: one /kyc/documents call, then a binary PUT of each cache file straight to S3 (never through the API). */
+  const uploadDocs = useCallback(async (docs: Docs, kinds: DocKind[]) => {
+    if (kinds.some((k) => !docs[k])) throw new LocalError(KYC_TEXT.pickAll);
+    const files = kinds.map((k) => docs[k]!);
+    try {
+      return await client.uploadDocuments(files.map((f) => ({ kind: f.kind, contentType: f.mime, size: f.size })), async (u, kind) => {
+        const d = docs[kind];
+        if (!d) return false;
+        const r = await new File(d.uri).upload(u.url, { httpMethod: 'PUT', uploadType: UploadType.BINARY_CONTENT, headers: u.headers });
+        return r.status >= 200 && r.status < 300;
+      });
+    } finally {
+      if (alive.current) setSent(client.sentDocuments());
+    }
+  }, [client]);
 
   const refresh = useCallback(async () => { await run(async () => show(await client.getStatus()), LOAD_FAILED); }, [client, run]);
+  // DigiLocker and e-sign need their own ticks, so after start / selfie / retry the panel shows the next step.
   const start = useCallback(async (input: StartKycInput) => {
-    await run(async () => follow(await client.startKyc(input)), LOAD_FAILED);
-  }, [client, follow, run]);
+    await run(async () => show(await client.startKyc(input)), LOAD_FAILED);
+  }, [client, run]);
   const aadhaar = useCallback(async (mode: 'digilocker' | 'otp') => { await run(() => aadhaarStep(mode), LOAD_FAILED); }, [aadhaarStep, run]);
   const esign = useCallback(async () => { await run(esignStep, LOAD_FAILED); }, [esignStep, run]);
+  const retry = useCallback(async () => {
+    await run(async () => {
+      try {
+        show(await client.retry(retryConsent));
+        if (alive.current) setRetryConsent(false);
+      } catch (e) {
+        if (isConsentRequired(e) && alive.current) setRetryConsent(true);
+        throw e;
+      }
+    }, LOAD_FAILED);
+  }, [client, retryConsent, run]);
 
-  const uploadSelfie = useCallback((doc: DocFile) => run(async () => {
-    if ((doc.mime !== 'image/jpeg' && doc.mime !== 'image/png') || doc.size <= 0 || doc.size > MAX_UPLOAD) throw new LocalError(SELFIE_TOO_BIG);
-    const u = (await client.documentUploadUrls([{ kind: 'selfie', contentType: doc.mime, size: doc.size }])).selfie;
-    if (!u) throw new LocalError(LOAD_FAILED);
-    let ok = false;
-    try {
-      // Binary PUT of the cache file straight to S3 (expo-file-system upload; the file never goes through the API).
-      const r = await new File(doc.uri).upload(u.url, { httpMethod: 'PUT', uploadType: UploadType.BINARY_CONTENT, headers: u.headers });
-      ok = r.status >= 200 && r.status < 300;
-    } catch {
-      ok = false;
-    }
-    if (!ok) throw new LocalError(UPLOAD_FAILED);
-    await follow(await client.submitSelfie(u.uploadId));
-  }, UPLOAD_FAILED), [client, follow, run]);
+  const submitDocuments = useCallback((docs: Docs, kinds: DocKind[]) => run(async () => {
+    const ids = await uploadDocs(docs, kinds);
+    if (!ids.selfie) throw new LocalError(KYC_TEXT.uploadFailed);
+    show(await client.submitSelfie(ids.selfie));
+  }, KYC_TEXT.uploadFailed), [client, run, uploadDocs]);
+
+  const sendForReview = useCallback((docs: Docs, kinds: DocKind[]) => run(async () => {
+    await uploadDocs(docs, kinds);
+    if (alive.current) setNotice(KYC_TEXT.docsSent);
+  }, KYC_TEXT.uploadFailed), [run, uploadDocs]);
+
+  const withdrawConsent = useCallback(() => run(async () => {
+    await client.withdrawConsent();
+    show(await client.getStatus());
+  }, FAILED), [client, run]);
+
+  const deleteData = useCallback(() => run(async () => {
+    await client.deleteKycData();
+    if (alive.current) setSent(client.sentDocuments());
+    show(await client.getStatus());
+  }, FAILED), [client, run]);
+
+  const signedIn = useCallback(async () => {
+    setSignIn(false);
+    await run(async () => show(await client.getStatus()), LOAD_FAILED);
+  }, [client, run]);
 
   const signOut = useCallback(async () => {
-    show(null); setError('');
+    show(null); setError(''); setSignIn(false);
     try { await client.logout(); } catch { /* local tokens are cleared anyway */ }
   }, [client]);
 
   // First read after launch: quiet when there is no session yet (the user signs in during onboarding).
   useEffect(() => { void run(async () => show(await client.getStatus()), LOAD_FAILED, true); }, [client, run]);
 
-  const value = useMemo<KycServer>(() => ({ client, view, busy, error, refresh, start, aadhaar, esign, uploadSelfie, signOut }),
-    [client, view, busy, error, refresh, start, aadhaar, esign, uploadSelfie, signOut]);
+  const value = useMemo<KycServer>(() => ({
+    client, view, busy, error, notice, sent, signIn, retryConsent,
+    refresh, start, aadhaar, esign, retry, submitDocuments, sendForReview, withdrawConsent, deleteData, signedIn, signOut,
+  }), [client, view, busy, error, notice, sent, signIn, retryConsent,
+    refresh, start, aadhaar, esign, retry, submitDocuments, sendForReview, withdrawConsent, deleteData, signedIn, signOut]);
   return <KycServerCtx.Provider value={value}>{children}</KycServerCtx.Provider>;
 }
 
@@ -292,28 +342,131 @@ export function formatDobInput(v: string): string {
   return [d.slice(0, 2), d.slice(2, 4), d.slice(4)].filter(Boolean).join('/');
 }
 
+// ---------- consent ticks ----------
+
+type Ticks = Partial<Record<ConsentPurpose, boolean>>;
+
+/** One tick box per purpose (the e-sign screen shows two). Same texts as web. */
+function ConsentTicks({ purposes, ticks, setTicks, disabled }: {
+  purposes: readonly ConsentPurpose[]; ticks: Ticks; setTicks: (t: Ticks) => void; disabled: boolean;
+}) {
+  return (
+    <>
+      {purposes.map((p) => {
+        const on = !!ticks[p];
+        return (
+          <Pressable key={p} accessibilityRole="checkbox" accessibilityState={{ checked: on, disabled }} accessibilityLabel={CONSENT_TEXT[p]}
+            disabled={disabled} onPress={() => setTicks({ ...ticks, [p]: !on })} style={st.check}>
+            <View style={[st.box, on && st.boxOn]}>{on ? <Text style={st.tick}>✓</Text> : null}</View>
+            <Text style={[s.text, { flex: 1 }]}>{CONSENT_TEXT[p]}</Text>
+          </Pressable>
+        );
+      })}
+    </>
+  );
+}
+
+// ---------- sign in again (session ended) ----------
+
+/** 'Please sign in again.': an OTP to the onboarding contact through the server. Same labels as web (OtpStep). */
+function SignInAgain({ client, onDone }: { client: ServerKycClient; onDone: () => void }) {
+  const { data } = useStore();
+  const c = data.onboarding.contact;
+  const provider = useMemo(() => new HttpOtpProvider(client), [client]);
+  const [req, setReq] = useState<string | null>(null);
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  useBlockBackWhile(busy);
+
+  async function send() {
+    if (!c) return;
+    setBusy(true); setError('');
+    const r = await provider.send({ channel: c.kind === 'email' ? 'email' : 'sms', target: c.value }, Date.now());
+    if (!alive.current) return;
+    setBusy(false);
+    if (r.ok) { setReq(r.requestId); setCode(''); } else setError(r.message);
+  }
+
+  async function verify() {
+    if (!req) return;
+    setBusy(true); setError('');
+    const r = await provider.verify(req, code, Date.now());
+    if (!alive.current) return;
+    setBusy(false);
+    setCode('');
+    if (r.ok) { setReq(null); onDone(); return; }
+    if (r.reason === 'void' || r.reason === 'expired') setReq(null);
+    setError(r.message);
+  }
+
+  return (
+    <View>
+      <Text style={[s.text, { color: theme.bad, marginVertical: 6 }]} accessibilityRole="alert">{KYC_TEXT.signInAgain}</Text>
+      {c ? (
+        <>
+          <Text style={s.small}>{KYC_TEXT.signInAgainHint} {c.kind === 'email' ? maskEmail(c.value) : maskMobile(c.value)}.</Text>
+          {req ? (
+            <>
+              <Input label="6-digit code" value={code} onChangeText={(t) => setCode(t.replace(/\D/g, '').slice(0, OTP_RULES.length))}
+                keyboardType="number-pad" textContentType="oneTimeCode" autoComplete="sms-otp" maxLength={OTP_RULES.length + 6}
+                placeholder="123456" error={error || null} />
+              <Btn primary title="Sign in" disabled={busy || code.length !== OTP_RULES.length} onPress={() => void verify()} />
+              <Btn title="Resend OTP" disabled={busy} onPress={() => void send()} />
+            </>
+          ) : (
+            <>
+              {error ? <Msg text={error} /> : null}
+              <Btn primary title="Send OTP" disabled={busy} onPress={() => void send()} />
+            </>
+          )}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
 // ---------- status panel (Done screen and Settings → Account) ----------
 
-/** Server status, reason and the next step: start (date of birth), DigiLocker, selfie upload, e-sign or wait. */
+/** Server status, reason and the next step: start (date of birth), DigiLocker, documents, e-sign, Try again or wait. */
 export function ServerKycPanel({ details }: { details: StartDetails | null }) {
   const server = useKycServer();
   const [dob, setDob] = useState('');
   const [dobTouched, setDobTouched] = useState(false);
-  const [selfie, setSelfie] = useState<DocFile | undefined>(undefined);
-  // The selfie sits in the app cache: delete it when this panel goes away (design B6).
-  const selfieRef = useRef<DocFile | undefined>(undefined);
-  selfieRef.current = selfie;
-  useEffect(() => () => deleteDoc(selfieRef.current), []);
+  const [ticks, setTicks] = useState<Ticks>({});
+  const [docs, setDocs] = useState<Docs>({});
+  // Picked files sit in the app cache: delete them when this panel goes away (design B6).
+  const docsRef = useRef<Docs>({});
+  docsRef.current = docs;
+  useEffect(() => () => { for (const d of Object.values(docsRef.current)) deleteDoc(d); }, []);
   useBlockBackWhile(!!server?.busy);
   const { update } = useStore();
   // The launch read ran before sign-in (no session yet): read the status once when the panel opens without one.
   const hasView = !!server?.view;
   useEffect(() => { if (server && !hasView) void server.refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const next = server?.view?.next.type;
+  // A new step starts with its boxes unticked.
+  useEffect(() => { setTicks({}); }, [next, server?.retryConsent]);
   if (!server) return null;
-  const { view, busy, error } = server;
-  const next = view?.next.type;
-  const reason = view?.reason ? REASON_TEXT[view.reason] : undefined;
+  const { view, busy, error, notice } = server;
+  const reason = kycReasonText(view?.reason);
   const dobErr = validateDob(dob);
+  const needed = kycDocsNeeded(view, server.sent);
+  const ticked = (ps: readonly ConsentPurpose[]) => ps.every((p) => ticks[p]);
+  const setDoc = (k: DocKind, d: DocFile | undefined) => setDocs((cur) => {
+    const old = cur[k];
+    if (old && old !== d) deleteDoc(old);
+    const nextDocs = { ...cur };
+    if (d) nextDocs[k] = d; else delete nextDocs[k];
+    return nextDocs;
+  });
+  /** After an upload: drop the files that went through. */
+  const dropSent = () => { for (const k of server.client.sentDocuments()) setDoc(k, undefined); };
+  const docLabel = next === 'documents' && needed.length === 1 ? KYC_TEXT.uploadSelfieOnly : KYC_TEXT.uploadAll;
+  const slots = needed.map((k) => <DocSlot key={k} kind={k} doc={docs[k]} onChange={(d) => setDoc(k, d)} disabled={busy} />);
+  const allPicked = needed.every((k) => !!docs[k]);
   return (
     <View style={{ marginTop: 10 }} accessibilityState={{ busy }}>
       {view ? (
@@ -322,8 +475,13 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
         </Text>
       ) : null}
       {busy ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}
+      {server.signIn ? <SignInAgain client={server.client} onDone={() => void server.signedIn()} /> : null}
       {next === 'start' && details?.dob ? (
-        <Btn primary title="Start final KYC" disabled={busy} onPress={() => void server.start({ ...details, dob: details.dob! })} />
+        <>
+          <Text style={[s.small, { marginVertical: 6 }]}>Your details are checked with the KYC records.</Text>
+          <ConsentTicks purposes={STEP_CONSENT.start} ticks={ticks} setTicks={setTicks} disabled={busy} />
+          <Btn primary title="Start final KYC" disabled={busy || !ticked(STEP_CONSENT.start)} onPress={() => void server.start({ ...details, dob: details.dob! })} />
+        </>
       ) : null}
       {/* Onboarded before Date of birth was asked (needsDob): same field and errors as Your details, saved with
           'dob-added', then /kyc/start. startKyc is never called without a date of birth. */}
@@ -334,7 +492,8 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
             autoComplete="birthdate-full" editable={!busy} onBlur={() => setDobTouched(true)}
             onChangeText={(t) => setDob(formatDobInput(t))}
             error={dobTouched ? dobErr : null} />
-          <Btn primary title="Start final KYC" disabled={busy || !!dobErr} onPress={() => {
+          <ConsentTicks purposes={STEP_CONSENT.start} ticks={ticks} setTicks={setTicks} disabled={busy} />
+          <Btn primary title="Start final KYC" disabled={busy || !!dobErr || !ticked(STEP_CONSENT.start)} onPress={() => {
             const iso = normalizeDob(dob);
             update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'dob-added', dob: iso, at: new Date().toISOString() }) }));
             setDob(''); setDobTouched(false);
@@ -345,22 +504,36 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
       {next === 'digilocker' ? (
         <>
           <Text style={[s.small, { marginVertical: 6 }]}>Verify your Aadhaar with DigiLocker. You will come back here after.</Text>
-          <Btn primary title="Continue with DigiLocker" disabled={busy} onPress={() => void server.aadhaar('digilocker')} />
+          <ConsentTicks purposes={STEP_CONSENT.digilocker} ticks={ticks} setTicks={setTicks} disabled={busy} />
+          <Btn primary title="Continue with DigiLocker" disabled={busy || !ticked(STEP_CONSENT.digilocker)} onPress={() => void server.aadhaar('digilocker')} />
         </>
       ) : null}
-      {next === 'aadhaar-otp' ? <Btn primary title="Continue to Aadhaar OTP" disabled={busy} onPress={() => void server.aadhaar('otp')} /> : null}
+      {next === 'aadhaar-otp' ? (
+        <>
+          <ConsentTicks purposes={STEP_CONSENT['aadhaar-otp']} ticks={ticks} setTicks={setTicks} disabled={busy} />
+          <Btn primary title="Continue to Aadhaar OTP" disabled={busy || !ticked(STEP_CONSENT['aadhaar-otp'])} onPress={() => void server.aadhaar('otp')} />
+        </>
+      ) : null}
       {next === 'documents' ? (
         <>
-          <Text style={[s.small, { marginVertical: 6 }]}>Upload a selfie (JPG or PNG, up to 10 MB)</Text>
-          <DocSlot kind="selfie" doc={selfie} onChange={setSelfie} disabled={busy} />
-          <Btn primary title="Upload selfie" disabled={busy || !selfie}
-            onPress={() => { const d = selfie; if (d) void server.uploadSelfie(d).then((ok) => { if (ok) { deleteDoc(d); setSelfie(undefined); } }); }} />
+          <Text style={[s.small, { marginVertical: 6 }]}>{docLabel} (JPG, PNG or PDF; selfie JPG or PNG; up to 10 MB each).</Text>
+          {slots}
+          <ConsentTicks purposes={STEP_CONSENT.documents} ticks={ticks} setTicks={setTicks} disabled={busy} />
+          <Btn primary title={KYC_TEXT.uploadContinue} disabled={busy || !allPicked || !ticked(STEP_CONSENT.documents)}
+            onPress={() => void server.submitDocuments(docs, needed).finally(dropSent)} />
         </>
       ) : null}
       {next === 'esign' ? (
         <>
           <Text style={[s.small, { marginVertical: 6 }]}>Sign your KYC form with Aadhaar e-sign. You will come back here after.</Text>
-          <Btn primary title="Continue to e-sign" disabled={busy} onPress={() => void server.esign()} />
+          <ConsentTicks purposes={STEP_CONSENT.esign} ticks={ticks} setTicks={setTicks} disabled={busy} />
+          <Btn primary title="Continue to e-sign" disabled={busy || !ticked(STEP_CONSENT.esign)} onPress={() => void server.esign()} />
+        </>
+      ) : null}
+      {next === 'retry' ? (
+        <>
+          {server.retryConsent ? <ConsentTicks purposes={STEP_CONSENT.retry} ticks={ticks} setTicks={setTicks} disabled={busy} /> : null}
+          <Btn primary title={KYC_TEXT.tryAgain} disabled={busy || (server.retryConsent && !ticked(STEP_CONSENT.retry))} onPress={() => void server.retry()} />
         </>
       ) : null}
       {next === 'wait' ? (
@@ -369,12 +542,83 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
           <Btn title="Refresh" disabled={busy} onPress={() => void server.refresh()} />
         </>
       ) : null}
+      {view?.status === 'under-review' && needed.length > 0 ? (
+        <View style={{ marginTop: 8 }}>
+          <Text style={[s.small, { marginVertical: 6 }]}>{KYC_TEXT.docsNeeded}{view.documents ? '' : ` ${KYC_TEXT.docsUnknownHint}`}</Text>
+          {slots}
+          <Btn title={KYC_TEXT.sendDocs} disabled={busy || !allPicked} onPress={() => void server.sendForReview(docs, needed).finally(dropSent)} />
+        </View>
+      ) : null}
+      {notice ? <Msg text={notice} tone="muted" /> : null}
       {error ? (
         <>
           <Msg text={error} />
-          {!view ? <Btn title="Try again" disabled={busy} onPress={() => void server.refresh()} /> : null}
+          {!view && !server.signIn ? <Btn title="Try again" disabled={busy} onPress={() => void server.refresh()} /> : null}
         </>
       ) : null}
     </View>
   );
 }
+
+// ---------- Profile: withdraw consent and delete my KYC data ----------
+
+type Ask = 'withdraw' | 'delete' | null;
+
+/**
+ * Server mode only, and only when a KYC case exists. Each button opens a confirm step first (title,
+ * one-line effect, Cancel + a red confirm button). Same texts and order as apps/web/src/components/KycDataControls.tsx.
+ */
+export function KycDataControls() {
+  const server = useKycServer();
+  const [ask, setAsk] = useState<Ask>(null);
+  const [done, setDone] = useState('');
+  const titleRef = useRef<ComponentRef<typeof Text>>(null);
+  // Screen readers: move focus to the confirm title when it opens.
+  useEffect(() => {
+    if (!ask) return;
+    const node = titleRef.current ? findNodeHandle(titleRef.current) : null;
+    if (node) AccessibilityInfo.setAccessibilityFocus(node);
+  }, [ask]);
+  if (!server || (!hasKycCase(server.view) && !done)) return null;
+  const { busy, view } = server;
+  const withdrawn = view?.reason === 'consent-withdrawn';
+
+  const confirm = async () => {
+    const what = ask;
+    if (!what) return;
+    const ok = what === 'withdraw' ? await server.withdrawConsent() : await server.deleteData();
+    if (ok) { setDone(what === 'withdraw' ? KYC_TEXT.withdrawDone : KYC_TEXT.deleteDone); setAsk(null); }
+  };
+
+  return (
+    <View testID="feature-kyc-data-controls" style={s.card}>
+      <Text style={s.h2} accessibilityRole="header">{KYC_TEXT.dataTitle}</Text>
+      {ask ? (
+        <View style={st.confirm}>
+          <Text ref={titleRef} style={[s.text, { fontWeight: '800' }]} accessibilityRole="header">
+            {ask === 'withdraw' ? KYC_TEXT.withdrawTitle : KYC_TEXT.deleteTitle}
+          </Text>
+          <Text style={[s.text, { marginTop: 4 }]}>{ask === 'withdraw' ? KYC_TEXT.withdrawBody : KYC_TEXT.deleteBody}</Text>
+          <Btn title={KYC_TEXT.cancel} disabled={busy} onPress={() => setAsk(null)} />
+          <Btn danger solid title={ask === 'withdraw' ? KYC_TEXT.withdrawConfirm : KYC_TEXT.deleteConfirm} disabled={busy} onPress={() => void confirm()} />
+        </View>
+      ) : hasKycCase(view) ? (
+        <>
+          {!withdrawn ? <Btn danger title={KYC_TEXT.withdrawButton} onPress={() => { setDone(''); setAsk('withdraw'); }} /> : null}
+          <Btn danger title={KYC_TEXT.deleteButton} onPress={() => { setDone(''); setAsk('delete'); }} />
+        </>
+      ) : null}
+      {busy ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}
+      {done ? <Msg text={done} tone="muted" /> : null}
+      {ask && server.error ? <Msg text={server.error} /> : null}
+    </View>
+  );
+}
+
+const st = StyleSheet.create({
+  check: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 8, minHeight: 44 },
+  box: { width: 24, height: 24, borderRadius: 6, borderWidth: 2, borderColor: theme.line, alignItems: 'center', justifyContent: 'center' },
+  boxOn: { borderColor: theme.accent, backgroundColor: theme.accent },
+  tick: { color: theme.bg, fontWeight: '800' },
+  confirm: { borderColor: theme.bad, borderWidth: 1, borderRadius: 10, padding: 12 },
+});

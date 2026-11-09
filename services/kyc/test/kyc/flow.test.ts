@@ -70,8 +70,12 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
     // write order (rows in the same millisecond have no defined ts order)
     const audit = e.repos.audit.all().filter((r) => r.userId === userId);
     expect(audit.map((r) => r.action)).toEqual([
-      'kyc.start', 'kyc.aadhaar-start', 'kyc.aadhaar-result', 'kyc.pan-check', 'kyc.selfie', 'kyc.esign-start', 'kyc.esign-result', 'kyc.kra-upload',
+      'kyc.start', 'kyc.aadhaar-start', 'kyc.aadhaar-result', 'kyc.pan-check', 'kyc.documents-signed', 'kyc.selfie', 'kyc.esign-start',
+      'kyc.esign-result', 'kyc.kra-upload',
     ]);
+    // S11: the selfie the face match used is tagged linked
+    expect(e.uploads.states.get(`kyc/${userId}/${selfie}`)).toBe('linked');
+    expect(done.documents).toEqual(['selfie']);
     expect(rec!.version).toBe(audit.length);
     expect(audit.every((r) => r.actor === 'system')).toBe(true);
   });
@@ -80,7 +84,7 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
     const e = env();
     const token = await e.signIn();
     await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
-    const a = await e.call('POST', '/kyc/aadhaar', { token, body: { mode: 'otp', returnUrl: 'wealthfire://kyc' } });
+    const a = await e.call('POST', '/kyc/aadhaar', { token, body: { mode: 'otp', returnUrl: 'wealthfire://kyc-return' } });
     expect(a.statusCode).toBe(200);
     expect(a.json.redirectUrl).toBeUndefined();
     expect(a.json.challengeRef).toMatch(/^aad-/);
@@ -98,26 +102,45 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
     const list = await e.call('GET', '/review/cases', { headers: REVIEWER });
     expect(list.statusCode).toBe(200);
     expect(list.json.items.map((c: { id: string }) => c.id)).toEqual([userId]);
+    // R1: the reviewer gets all three documents (uploaded through /kyc/documents)
+    await e.uploadDoc(token, 'aadhaar', 'application/pdf');
+    await e.uploadDoc(token, 'pan', 'image/png');
     const ok = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve', note: 'name ok' } });
     expect(ok.statusCode).toBe(200);
-    // the approval triggered the KRA upload right away (system action, audited)
-    expect(e.partner.calls.uploadToKra).toBe(1);
     expect(ok.json.case).toMatchObject({ status: 'verified', reason: 'staff-approved' });
+    // R1: not e-signed yet, so no KRA upload: the user e-signs first
+    expect(e.partner.calls.uploadToKra).toBe(0);
     const st = await e.call('GET', '/kyc/status', { token });
-    expect(st.json).toMatchObject({ status: 'verified', reason: 'staff-approved', next: 'none', eligibleToInvest: true });
+    expect(st.json).toMatchObject({ status: 'verified', reason: 'staff-approved', next: 'esign', eligibleToInvest: false });
+    expect(e.partner.calls.uploadToKra).toBe(0);
+    const es = await e.call('POST', '/kyc/esign', { token, body: { returnUrl: RETURN_URL } });
+    expect(es.statusCode).toBe(200);
+    const done = await e.svc.recordEsign(userId, 'done'); // webhook
+    expect(done).toMatchObject({ status: 'verified', reason: 'staff-approved', next: 'none', eligibleToInvest: true });
+    expect(e.partner.calls.uploadToKra).toBe(1);
     expect(e.reviewAudit().map((a) => a.action)).toEqual(['review.approve']);
     const trail = e.repos.audit.all().filter((r) => r.userId === userId);
-    expect(trail.slice(-2).map((a) => [a.actor, a.action])).toEqual([['staff:staff-1', 'review.approve'], ['system', 'kyc.kra-upload']]);
+    expect(trail.slice(-4).map((a) => [a.actor, a.action])).toEqual([
+      ['staff:staff-1', 'review.approve'], ['system', 'kyc.esign-start'], ['system', 'kyc.esign-result'], ['system', 'kyc.kra-upload'],
+    ]);
     expect((await e.repos.cases.get(userId))!.partnerRefs.kraUpload).toMatch(/^kraup-/);
     // retry-safe: later status reads do not upload again
     await e.call('GET', '/kyc/status', { token });
     expect(e.partner.calls.uploadToKra).toBe(1);
   });
 
-  it('staff approve: a KRA upload that times out stays pending and is retried by GET /kyc/status', async () => {
+  it('R1: staff approve of an e-signed case: a KRA upload that times out stays pending and is retried by GET /kyc/status', async () => {
     const e = env();
     const token = await e.signIn();
-    const { userId } = await fullKyc(e, token, PANS.unclear);
+    const userId = await e.userIdOf(token);
+    e.partner.setScenario(userId, 'unclear'); // low face score → under review, with e-sign still open
+    await fullKyc(e, token);
+    await e.call('POST', '/kyc/selfie', { token, body: { uploadId: await e.uploadSelfie(token) } });
+    // an e-signed case for staff: put the e-sign result in as the webhook would
+    const c = (await e.repos.cases.get(userId))!;
+    await e.repos.cases.put({ ...c, evidence: { ...c.evidence, esign: 'done' }, checks: { ...c.checks, esign: 'pass' } });
+    await e.uploadDoc(token, 'aadhaar');
+    await e.uploadDoc(token, 'pan');
     e.partner.failNext('uploadToKra', 2);
     const ok = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve' } });
     expect(ok.statusCode).toBe(200); // the approval stands
@@ -125,9 +148,29 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
     expect((await e.repos.cases.get(userId))!).toMatchObject({ status: 'verified', next: 'kra-upload' });
     expect((await e.repos.cases.get(userId))!.partnerRefs.kraUpload).toBeUndefined();
     const st = await e.call('GET', '/kyc/status', { token });
-    expect(st.json).toMatchObject({ status: 'verified', next: 'none' });
+    expect(st.json).toMatchObject({ status: 'verified', next: 'none', eligibleToInvest: true });
     expect(e.partner.calls.uploadToKra).toBe(3);
     expect((await e.repos.cases.get(userId))!.partnerRefs.kraUpload).toMatch(/^kraup-/);
+  });
+
+  it('R1: a verified case that waits for the KRA upload but was never e-signed goes to next esign (no upload)', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token, PANS.unclear);
+    const c = (await e.repos.cases.get(userId))!;
+    // as an older staff Approve stored it
+    await e.repos.cases.put({ ...c, status: 'verified', reason: 'staff-approved', next: 'kra-upload', version: c.version + 1 });
+    expect(await e.svc.uploadToKra(userId)).toMatchObject({ next: 'esign', eligibleToInvest: false });
+    expect(e.partner.calls.uploadToKra).toBe(0);
+  });
+
+  it('R1: staff Approve without the documents is refused', async () => {
+    const e = env({}, { documents: 'uploaded' });
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token, PANS.unclear);
+    const r = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve' } });
+    expect(r.statusCode).toBe(409);
+    expect((await e.repos.cases.get(userId))!.status).toBe('under-review');
   });
 
   it('staff reject: no KRA upload, next none', async () => {
@@ -181,10 +224,49 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
     const token = await e.signIn();
     const s = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.kraValidated, { deviceResult: 'under-review' }) });
     expect(s.json).toMatchObject({ status: 'under-review', path: 'hand-check', reason: 'device-hand-check', next: 'wait' });
-    expect(e.partner.calls.lookupKyc).toBe(0);
-    // documents can still be uploaded for the reviewer
-    const d = await e.call('POST', '/kyc/documents', { token, body: { files: [{ kind: 'pan', contentType: 'application/pdf', size: 1000 }] } });
+    // R1: the KRA lookup and PAN check still run, for the reviewer (the case stays with staff)
+    expect(e.partner.calls.lookupKyc).toBe(1);
+    expect(e.partner.calls.verifyPan).toBe(1);
+    expect(s.json.checks).toMatchObject({ kra: 'pass', 'kra-name': 'pass', 'kra-dob': 'pass', pan: 'pass' });
+    expect(e.repos.costs.rows.map((r) => r.check)).toEqual(['kra-lookup', 'pan-verify']);
+    // documents can still be uploaded for the reviewer, all three kinds
+    const d = await e.call('POST', '/kyc/documents', {
+      token,
+      body: { files: [
+        { kind: 'pan', contentType: 'application/pdf', size: 1000 },
+        { kind: 'aadhaar', contentType: 'image/png', size: 1000 },
+        { kind: 'selfie', contentType: 'image/jpeg', size: 1000 },
+      ] },
+    });
     expect(d.statusCode).toBe(200);
+    for (const s2 of e.uploads.signed) e.uploads.markUploaded(s2.key);
+    // GET /kyc/status links the uploaded documents (S11) after the magic-byte check (S14)
+    const st = await e.call('GET', '/kyc/status', { token });
+    expect(st.json).toMatchObject({ status: 'under-review', reason: 'device-hand-check', documents: ['selfie', 'aadhaar', 'pan'] });
+    expect([...e.uploads.states.values()]).toEqual(['linked', 'linked', 'linked']);
+    // nothing to pay for again
+    expect(e.partner.calls.lookupKyc).toBe(1);
+    // staff can approve (documents present); not e-signed → next esign, no KRA upload
+    const userId = await e.userIdOf(token);
+    const ok = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve' } });
+    expect(ok.statusCode).toBe(200);
+    expect((await e.call('GET', '/kyc/status', { token })).json).toMatchObject({ status: 'verified', next: 'esign' });
+    expect(e.partner.calls.uploadToKra).toBe(0);
+  });
+
+  it('R1: hand-check pre-checks wait for the pan-check consent, then run on a later status read', async () => {
+    const e = env({}, { consents: false });
+    const token = await e.signIn();
+    const userId = await e.userIdOf(token);
+    const s = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass, { deviceResult: 'under-review' }) });
+    expect(s.statusCode).toBe(200); // the case is created; the paid pre-checks wait
+    expect(s.json).toMatchObject({ status: 'under-review', reason: 'device-hand-check' });
+    expect(e.partner.calls.lookupKyc).toBe(0);
+    await e.call('POST', '/kyc/consent', { token, body: { purpose: 'pan-check' } });
+    await e.call('GET', '/kyc/status', { token });
+    expect(e.partner.calls.lookupKyc).toBe(1);
+    expect(e.partner.calls.verifyPan).toBe(1);
+    expect((await e.repos.cases.get(userId))!.reason).toBe('device-hand-check');
   });
 
   it('timeout: KRA lookup times out after retries → under-review partner-timeout; retry verifies', async () => {
@@ -219,10 +301,12 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
 
   it('timeout: PAN check timeout → partner-timeout; retry via start continues the full KYC', async () => {
     const e = env();
-    e.partner.failNext('verifyPan', 2);
+    // the webhook's PAN check (2 tries) and the status read's auto-retry (2 tries) both time out
+    e.partner.failNext('verifyPan', 4);
     const token = await e.signIn();
     const { afterPan } = await fullKyc(e, token);
     expect(afterPan.json).toMatchObject({ status: 'under-review', reason: 'partner-timeout', unclear: ['pan'] });
+    expect(e.partner.calls.verifyPan).toBe(4);
     const r = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
     expect(r.json).toMatchObject({ status: 'under-review', reason: 'partner-timeout', next: 'selfie' });
     const f = await e.call('POST', '/kyc/selfie', { token, body: { uploadId: await e.uploadSelfie(token) } });

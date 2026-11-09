@@ -1,5 +1,6 @@
 import { FakeClock } from '../../src/lib/clock';
 import { Argon2Hasher, LocalEncryptor, LocalMacSigner } from '../../src/lib/crypto';
+import { MemoryAuthMetrics } from '../../src/lib/metrics';
 import { memoryRepos } from '../../src/lib/repo';
 import { LocalTokenSigner, TokenService } from '../../src/lib/tokens';
 import { FakeSender, OtpService } from '../../src/auth/otp';
@@ -15,8 +16,9 @@ export function setup() {
   const sender = new FakeSender();
   const mac = new LocalMacSigner();
   const encryptor = new LocalEncryptor();
-  const otp = new OtpService({ repos, clock, mac, encryptor, hasher: new Argon2Hasher(FAST_ARGON2), sender, tokens });
-  return { clock, repos, signer, tokens, sender, mac, encryptor, otp };
+  const metrics = new MemoryAuthMetrics();
+  const otp = new OtpService({ repos, clock, mac, encryptor, hasher: new Argon2Hasher(FAST_ARGON2), sender, tokens, metrics });
+  return { clock, repos, signer, tokens, sender, mac, encryptor, otp, metrics };
 }
 
 export const EMAIL = 'Asha.Rao@Example.com';

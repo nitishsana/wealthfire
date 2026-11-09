@@ -19,10 +19,14 @@ import { KmsTokenSigner, TokenService } from '../lib/tokens';
 import { ConsoleLogger } from '../kyc/log';
 import { dynamoKycRepos, kycTablesFromEnv } from '../kyc/repo';
 import { kycRoutes } from '../kyc/routes';
-import { DEFAULT_DOCS_PREFIX, DEFAULT_RETURN_URL_PREFIXES, KycService } from '../kyc/service';
+import { DEFAULT_DOCS_PREFIX, KycService } from '../kyc/service';
+import { APP_RETURN_URL, returnUrlPrefixesFromEnv } from '../lib/returnUrl';
 import { CognitoStaffVerifier } from '../kyc/staff';
 import { S3UploadSigner } from '../kyc/uploads';
-import { FakePartner } from '../partner/fake';
+import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { DEV_PARTNER_PREFIX, devPartnerRoutes, linkSignerFrom } from '../partner/devPages';
+import { FakePartner, type FakePartnerOptions } from '../partner/fake';
+import { secretFrom } from './webhook';
 import type { KycPartner } from '../partner/types';
 import { reviewRoutes } from '../review/routes';
 import { S3DocumentStore, S3DownloadSigner } from '../review/s3';
@@ -32,31 +36,78 @@ import { createRouter, type HttpRequest, type HttpResponse } from '../router';
 type Event = APIGatewayProxyEvent | APIGatewayProxyEventV2;
 type Result = APIGatewayProxyResult | APIGatewayProxyStructuredResultV2;
 
-/** App deep-link scheme used by the phone apps for DigiLocker / e-sign returns. */
-export const APP_RETURN_SCHEME = 'wealthfire://';
+/** The phone apps' DigiLocker / e-sign return deep link (pinned exactly, S15). */
+export const APP_RETURN_SCHEME = APP_RETURN_URL;
 
-/** FakePartner on dev until sandbox access; prod refuses to start without a real adapter. */
-export function createPartner(env: Env): KycPartner {
+/**
+ * FakePartner on dev until sandbox access; prod refuses to start without a real adapter.
+ * `fake` options come from devPartnerSetup() on the dev stack (redirects to /dev-partner/...).
+ */
+export function createPartner(env: Env, fake: FakePartnerOptions = {}): KycPartner {
   const stage = env[ENV.stage];
   const choice = env[ENV.partner] ?? (stage === 'dev' ? 'fake' : undefined);
-  if (choice === 'fake' && stage !== 'prod') return new FakePartner();
+  if (choice === 'fake' && stage !== 'prod') return new FakePartner(fake);
   throw new Error('No KYC partner adapter configured for this stage');
 }
 
+/** Webhook secret from Secrets Manager, read once per container (retried after a failure). */
+export function cachedSecret(read: () => Promise<string>): () => Promise<string> {
+  let p: Promise<string> | undefined;
+  return () => {
+    p ??= read().catch((e: unknown) => {
+      p = undefined;
+      throw e;
+    });
+    return p;
+  };
+}
+
+export interface DevPartnerSetup {
+  /** FakePartner options: redirect to `${API_BASE_URL}/dev-partner/...` with tagged links */
+  fake: FakePartnerOptions;
+  routes: ReturnType<typeof devPartnerRoutes>;
+}
+
 /**
- * DigiLocker / e-sign return-URL allow-list: RETURN_URL_PREFIXES (comma-separated, set by the CDK
- * stack), else the built-in default. Each entry must be an https / local-http prefix ending in '/'
- * or the app scheme, so a bare origin can never open the whole host.
+ * R4: the dev-only fake DigiLocker / e-sign pages. Only when STAGE is exactly 'dev' and both
+ * API_BASE_URL (https, the API's public URL incl. stage) and WEBHOOK_SECRET_ARN are set;
+ * otherwise null (FakePartner keeps its placeholder URLs and no pages are served).
+ */
+export function devPartnerSetup(
+  env: Env,
+  readSecret: (arn: string) => Promise<string>,
+  clock: { now(): number } = systemClock,
+): DevPartnerSetup | null {
+  if (env[ENV.stage] !== 'dev') return null;
+  const base = (env[ENV.apiBaseUrl] ?? '').trim().replace(/\/+$/, '');
+  const arn = (env[ENV.webhookSecretArn] ?? '').trim();
+  if (!base || !arn) return null;
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    throw new Error(`Bad ${ENV.apiBaseUrl}`);
+  }
+  if (url.protocol !== 'https:' || url.search || url.hash) throw new Error(`Bad ${ENV.apiBaseUrl}`);
+  const secret = cachedSecret(() => readSecret(arn));
+  return {
+    fake: { baseUrl: `${base}${DEV_PARTNER_PREFIX}`, linkSigner: linkSignerFrom(secret) },
+    routes: devPartnerRoutes({ webhookSecret: secret, webhookUrl: `${base}/webhooks/partner`, clock }),
+  };
+}
+
+async function readWebhookSecret(arn: string): Promise<string> {
+  const out = await new SecretsManagerClient({}).send(new GetSecretValueCommand({ SecretId: arn }));
+  if (!out.SecretString) throw new Error('webhook secret is empty');
+  return secretFrom(out.SecretString);
+}
+
+/**
+ * DigiLocker / e-sign return-URL allow-list (R10, S15): RETURN_URL_PREFIXES (validated by the
+ * shared parser in src/lib/returnUrl.ts), else the built-in default, which has no loopback entry.
  */
 export function returnUrlPrefixes(env: Env): string[] {
-  const list = listEnv(env, ENV.returnUrlPrefixes);
-  if (list.length === 0) return [...DEFAULT_RETURN_URL_PREFIXES];
-  for (const p of list) {
-    const ok = p === APP_RETURN_SCHEME
-      || ((p.startsWith('https://') || p.startsWith('http://127.0.0.1:') || p.startsWith('http://localhost:')) && p.endsWith('/'));
-    if (!ok) throw new Error(`Bad ${ENV.returnUrlPrefixes} entry`);
-  }
-  return list;
+  return returnUrlPrefixesFromEnv(env);
 }
 
 export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promise<HttpResponse> {
@@ -65,7 +116,10 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
   const kms = new KMSClient({});
   const s3 = new S3Client({});
   const mac = new KmsMacSigner(kms, requireEnv(env, ENV.hmacKeyId));
-  const encryptor = new KmsEnvelopeEncryptor(kms, requireEnv(env, ENV.dataKeyId));
+  // S9: PAN / contact envelopes use the field key (api role only); the Encryptor sends the
+  // required {purpose: 'pan' | 'contact', ...} encryption context to KMS on every call.
+  const encryptor = new KmsEnvelopeEncryptor(kms, requireEnv(env, ENV.fieldKeyId));
+  const dev = devPartnerSetup(env, readWebhookSecret, clock);
   const signer = new KmsTokenSigner(kms, requireEnv(env, ENV.jwtKeyId));
   const authRepos = dynamoRepos(tableNamesFromEnv(env), doc);
   const tokens = new TokenService({ sessions: authRepos.sessions, signer, clock });
@@ -78,7 +132,7 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
   const repos = dynamoKycRepos(tables, doc);
   const kyc = new KycService({
     repos,
-    partner: createPartner(env),
+    partner: createPartner(env, dev?.fake),
     uploads: new S3UploadSigner(s3, bucket),
     encryptor,
     mac,
@@ -109,6 +163,9 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
     allowedOrigins: listEnv(env, ENV.allowedOrigins),
     logger: new ConsoleLogger(),
     clock,
+    ...(env[ENV.stage] !== undefined ? { stage: env[ENV.stage] } : {}),
+    // R4: the router also ignores these unless stage === 'dev'
+    ...(dev ? { devPartner: dev.routes } : {}),
   });
 }
 

@@ -25,8 +25,10 @@ type Reply = { status: number; body?: unknown } | 'network-error';
 function fakeFetch(routes: Record<string, Reply[]>) {
   const calls: Call[] = [];
   const fetch = async (url: string, init: ServerFetchInit) => {
-    calls.push({ url, init });
     const key = `${init.method} ${url.slice(BASE.length)}`;
+    // consent calls before each step are tested in serverConsent.test.ts; here they just succeed
+    if (key === 'POST /kyc/consent' && !routes[key]) return { status: 200, text: async () => '{"ok":true}' };
+    calls.push({ url, init });
     const q = routes[key];
     const r = q && q.length > 1 ? q.shift()! : q?.[0];
     if (!r) return { status: 404, text: async () => JSON.stringify({ error: 'not_found', message: 'Not found.' }) };
@@ -119,7 +121,7 @@ describe('ServerKycClient 401 handling', () => {
       firstName: 'Asha', lastName: 'Rao', dob: '1990-01-31', pan: PAN, aadhaarLast4: '2346', deviceStatus: 'pre-verified',
       reviewFields: [{ field: 'pan', typedMasked: 'XXXXXX234F', readMasked: 'XXXXXX234F' }],
     });
-    expect(v).toEqual({ status: 'pre-verified', reason: 'in-progress', next: { type: 'digilocker' } });
+    expect(v).toEqual({ status: 'pre-verified', reason: 'in-progress', next: { type: 'digilocker' }, eligibleToInvest: false });
     const starts = f.calls.filter((x) => x.url.endsWith('/kyc/start'));
     expect(starts.map((x) => x.init.headers.authorization)).toEqual(['Bearer OLD', 'Bearer A2']);
     expect(starts[0]!.init.headers['idempotency-key']).toBe(starts[1]!.init.headers['idempotency-key']);
@@ -160,7 +162,7 @@ describe('ServerKycClient 401 handling', () => {
       'GET /kyc/status': [{ status: 200, body: { status: null, path: null, reason: null, next: 'start', eligibleToInvest: false } }],
     });
     const v = await new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens: t }).getStatus();
-    expect(v).toEqual({ status: null, reason: null, next: { type: 'start' } });
+    expect(v).toEqual({ status: null, reason: null, next: { type: 'start' }, eligibleToInvest: false });
     expect(f.calls[0]!.url).toBe(`${BASE}/auth/refresh`);
     expect(f.calls[0]!.init.credentials).toBe('include');
     expect(f.calls[1]!.init.headers.authorization).toBe('Bearer A3');
@@ -171,7 +173,7 @@ describe('ServerKycClient 401 handling', () => {
     let n = 0;
     const f = fakeFetch({ 'GET /kyc/status': [{ status: 401, body: { error: 'unauthorized' } }, { status: 200, body: statusBody({ status: 'verified', next: 'none' }) }] });
     const c = new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens: t, refresh: async () => `C${++n}` });
-    await expect(c.getStatus()).resolves.toEqual({ status: 'verified', reason: 'in-progress', next: { type: 'none' } });
+    await expect(c.getStatus()).resolves.toEqual({ status: 'verified', reason: 'in-progress', next: { type: 'none' }, eligibleToInvest: false });
     expect(n).toBe(1);
     expect(t.access).toBe('C1');
   });
@@ -205,7 +207,7 @@ describe('ServerKycClient KYC steps', () => {
     });
     const c = new ServerKycClient({ baseUrl: BASE, fetch: f.fetch, tokens: memTokens(), newKey });
     await expect(c.startAadhaar('digilocker', 'https://app.test/return')).resolves.toEqual({
-      status: 'pre-verified', reason: 'in-progress', next: { type: 'digilocker', url: 'https://partner.test/digilocker?ref=1' },
+      status: 'pre-verified', reason: 'in-progress', next: { type: 'digilocker', url: 'https://partner.test/digilocker?ref=1' }, eligibleToInvest: false,
     });
     await expect(c.startAadhaar('otp', 'https://app.test/return')).resolves.toMatchObject({ next: { type: 'aadhaar-otp' } });
     expect(JSON.parse(f.calls[0]!.init.body!)).toEqual({ mode: 'digilocker', returnUrl: 'https://app.test/return' });

@@ -94,14 +94,38 @@ export function decide(input: DecideInput, config: KycConfig): Decision {
   if (input.currentReason === 'partner-timeout') {
     return d.reason === 'in-progress' ? { ...d, status: 'under-review', reason: 'partner-timeout' } : d;
   }
-  // Waits for staff: never verified by the system, never relabelled as a timeout.
+  // Waits for staff: never verified by the system, never relabelled as a timeout. The KRA and
+  // PAN results still show (R1: hand-check / pan-in-use cases run both for the reviewer).
   const keep: ReasonCode =
     input.currentReason ??
     (d.status === 'under-review' && d.reason !== 'partner-timeout' && d.reason !== 'in-progress' ? d.reason : 'check-unclear');
   return {
-    status: 'under-review', path: d.path, reason: keep, next: 'wait', checks: d.checks,
+    status: 'under-review', path: d.path, reason: keep, next: 'wait', checks: { ...staffChecks(input), ...d.checks },
     ...(d.unclear ? { unclear: d.unclear } : {}),
   };
+}
+
+/**
+ * KRA lookup and PAN check results for a reviewer (R1). Only what the evidence holds: a missing
+ * result adds nothing; a timeout is 'unclear'; a non-validated KRA status is not a fail.
+ */
+export function staffChecks(input: Pick<DecideInput, 'kra' | 'pan' | 'typed'>): Partial<Record<CheckName, CheckResult>> {
+  const checks: Partial<Record<CheckName, CheckResult>> = {};
+  const kra = input.kra;
+  if (isTimeout(kra)) checks.kra = 'unclear';
+  else if (kra?.status === 'validated') {
+    checks.kra = 'pass';
+    checks['kra-name'] = kra.name === undefined ? 'fail' : nameMatches(input.typed.firstName, input.typed.lastName, kra.name);
+    checks['kra-dob'] = dobMatches(input.typed.dob, kra.dob) ? 'pass' : 'fail';
+  }
+  const p = input.pan;
+  if (isTimeout(p)) checks.pan = 'unclear';
+  else if (p !== undefined) {
+    checks.pan = p.valid ? 'pass' : 'fail';
+    checks['pan-name'] = p.nameMatch ? 'pass' : 'unclear';
+    checks['pan-aadhaar-link'] = p.aadhaarLinked ? 'pass' : 'unclear';
+  }
+  return checks;
 }
 
 function evaluate(input: DecideInput, config: KycConfig): Decision {
@@ -131,9 +155,10 @@ function evaluate(input: DecideInput, config: KycConfig): Decision {
     return reject('liveness-failed');
   }
 
-  // Row 3 (device part): a device hand check always goes to a person.
+  // Row 3 (device part): a device hand check always goes to a person, with the KRA lookup and PAN
+  // check results the system ran for the reviewer (R1).
   if (input.deviceHandCheck) {
-    return { status: 'under-review', path: 'hand-check', reason: 'device-hand-check', next: 'wait', checks };
+    return { status: 'under-review', path: 'hand-check', reason: 'device-hand-check', next: 'wait', checks: { ...staffChecks(input), ...checks } };
   }
 
   // Row 1: KRA fast path.
@@ -222,8 +247,12 @@ export type StaffAction =
   | { kind: 'approve'; staffId: string; note?: string }
   | { kind: 'reject'; staffId: string; reason: string };
 
-/** Design §5 row 5: staff Approve → verified, Reject (reason required) → rejected. Caller writes the audit row. */
-export function staffDecide(current: { status: KycStatus; path: KycPath | null }, action: StaffAction): Decision {
+/**
+ * Design §5 row 5: staff Approve → verified, Reject (reason required) → rejected. Caller writes the audit row.
+ * R1: the KRA upload needs the e-signed KYC form, so an Approve sets next 'kra-upload' only when
+ * `esigned` is true; otherwise (false or not given) next is 'esign' and the user e-signs first.
+ */
+export function staffDecide(current: { status: KycStatus; path: KycPath | null; esigned?: boolean }, action: StaffAction): Decision {
   const to: KycStatus = action.kind === 'approve' ? 'verified' : 'rejected';
   if (!canStaffTransition(current.status, to)) {
     throw new KycTransitionError(current.status, 'staff-action', `staff can only decide an under-review case (is ${current.status})`);
@@ -237,7 +266,7 @@ export function staffDecide(current: { status: KycStatus; path: KycPath | null }
   }
   const note = action.note?.trim();
   return {
-    status: 'verified', path, reason: 'staff-approved', next: 'kra-upload', checks: {},
+    status: 'verified', path, reason: 'staff-approved', next: current.esigned === true ? 'kra-upload' : 'esign', checks: {},
     ...(note ? { note } : {}),
   };
 }

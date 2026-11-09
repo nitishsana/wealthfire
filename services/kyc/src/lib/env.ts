@@ -20,7 +20,14 @@ export const ENV = {
   returnUrlPrefixes: 'RETURN_URL_PREFIXES',
   docsBucket: 'DOCS_BUCKET',
   docsPrefix: 'DOCS_PREFIX',
+  /** Table / S3 key (DataKey). Not for PAN / contact envelopes: those use fieldKeyId. */
   dataKeyId: 'DATA_KEY_ID',
+  /** Field-encryption key for PAN / contact envelopes (context {purpose: 'pan' | 'contact'}); api role only */
+  fieldKeyId: 'FIELD_KEY_ID',
+  /** Consent records table (pk userId, sk purpose#ts) */
+  consentsTable: 'CONSENTS_TABLE',
+  /** Dev only: the API's public base URL incl. stage, e.g. https://<id>.execute-api.ap-south-1.amazonaws.com/dev/ */
+  apiBaseUrl: 'API_BASE_URL',
   jwtKeyId: 'JWT_KEY_ID',
   hmacKeyId: 'HMAC_KEY_ID',
   partnerSecretArn: 'PARTNER_SECRET_ARN',

@@ -1,6 +1,6 @@
 // In-memory CaseStore + AuditStore (tests, local runs). Same semantics as ./dynamo.ts.
 import {
-  BadCursorError, type AuditRow, type AuditStore, type CasePage, type CaseStore, type CaseUpdate, type KycCaseRecord,
+  archiveKey, archivedRecord, BadCursorError, type ArchivedCase, type AuditRow, type AuditStore, type CasePage, type CaseStore, type CaseUpdate, type KycCaseRecord,
 } from './types';
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -79,6 +79,37 @@ export class MemoryCaseStore implements CaseStore {
     if (owner !== undefined && owner !== userId) return false;
     this.pans.set(panHash, userId);
     return true;
+  }
+
+  async releasePan(panHash: string, userId: string): Promise<void> {
+    if (this.pans.get(panHash) === userId) this.pans.delete(panHash);
+  }
+
+  /** archived cases by archive key (`arch#<userId>#<time>`) */
+  readonly archived = new Map<string, ArchivedCase>();
+
+  async archive(userId: string, expectedVersion: number, archivedAt: string, audit: AuditRow): Promise<boolean> {
+    this.beforeWrite?.();
+    const cur = this.items.get(userId);
+    if (!cur || cur.version !== expectedVersion) return false;
+    this.archived.set(archiveKey(userId, archivedAt), archivedRecord(cur));
+    this.items.delete(userId);
+    await this.audit.write(audit);
+    return true;
+  }
+
+  async remove(userId: string, expectedVersion: number, audit: AuditRow): Promise<boolean> {
+    this.beforeWrite?.();
+    const cur = this.items.get(userId);
+    if (!cur || cur.version !== expectedVersion) return false;
+    this.items.delete(userId);
+    await this.audit.write(audit);
+    return true;
+  }
+
+  /** @internal test hook: who holds a PAN claim */
+  panOwner(panHash: string): string | undefined {
+    return this.pans.get(panHash);
   }
 
   /** @internal test hook: raw stored cases */

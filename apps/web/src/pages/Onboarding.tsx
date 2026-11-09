@@ -387,7 +387,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         {heading(ob.identity ? `You're all set, ${ob.identity.firstName}.` : "You're all set.")}
         <p className="intro" role="status">{ob.kyc.status === 'pre-verified' ? DOC_MESSAGES.donePreVerified : ob.kyc.status === 'verified' ? DOC_MESSAGES.doneVerified : UNDER_REVIEW_TEXT}</p>
         {/* With a KYC server: start the final KYC and follow its next step (R2/R3, design 6). */}
-        {kycServer && <Card title="Final KYC"><ServerKyc client={kycServer} details={startDetails(ob)} autoStart /></Card>}
+        {kycServer && <Card title="Final KYC"><ServerKyc client={kycServer} details={startDetails(ob)} /></Card>}
         <button type="button" className="btn primary" onClick={onFinish}>Go to Home</button>
       </section>
     );

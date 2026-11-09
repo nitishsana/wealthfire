@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { REPLAY_WINDOW_MS } from '../../src/webhook/handler';
-import { baseCase, baseEvidence, setup, USER } from './helpers';
+import { baseCase, baseEvidence, REFS, setup, UPLOAD_REF, USER } from './helpers';
 
 const kraOk = { check: 'kra', status: 'validated', name: 'NITISH SANA', dob: '1990-08-15' };
 
@@ -222,7 +222,12 @@ describe('webhook: event types', () => {
   });
 
   it('kra.upload on a verified case records the status and ref without re-deciding', async () => {
-    const t = setup({ kycCase: baseCase({ status: 'verified', path: 'full-kyc', reason: 'full-kyc-passed', checks: { esign: 'pass' } }) });
+    const t = setup({
+      kycCase: baseCase({
+        status: 'verified', path: 'full-kyc', reason: 'full-kyc-passed', checks: { esign: 'pass' },
+        partnerRefs: { ...REFS, kraUpload: UPLOAD_REF },
+      }),
+    });
     await t.send(t.event('kra.upload', { status: 'uploaded' }, { ref: 'up_1' }));
     const s = await t.stored();
     expect(s.kycCase).toMatchObject({ status: 'verified', reason: 'full-kyc-passed', checks: { esign: 'pass' }, version: 2 });
@@ -371,5 +376,103 @@ describe('webhook: logging', () => {
     await t.send(t.event('kyc.result', kraOk));
     const text = JSON.stringify(t.applied());
     for (const s of ['NITISH', '1990']) expect(text).not.toContain(s);
+  });
+});
+
+describe('webhook: S17 partner ref binding', () => {
+  const record = (t: ReturnType<typeof setup>) => t.store.cases.all().find((c) => c.userId === USER)!;
+
+  it.each([
+    ['kra result', 'kyc.result', kraOk],
+    ['aadhaar result', 'kyc.result', { check: 'aadhaar', verified: true, last4: '1234' }],
+    ['e-sign result', 'esign.completed', { status: 'done' }],
+  ] as const)('%s without a ref is refused, audited and logged; case unchanged', async (_label, type, data) => {
+    const t = setup();
+    const res = await t.send(t.event(type, data, { ref: undefined }));
+    expect(res).toEqual({ status: 200, body: { ok: true, outcome: 'ignored-ref-mismatch' } });
+    expect((await t.stored()).kycCase.version).toBe(1);
+    expect(t.ignored()[0]).toMatchObject({ outcome: 'ignored-ref-mismatch' });
+    expect(t.logs.at(-1)).toMatchObject({ msg: 'webhook.refused', outcome: 'ignored-ref-mismatch', status: 200 });
+  });
+
+  it('a ref from another session is refused', async () => {
+    const t = setup();
+    expect((await t.send(t.event('kyc.result', kraOk, { ref: 'kra_other' }))).body.outcome).toBe('ignored-ref-mismatch');
+    expect((await t.stored()).kycCase.status).toBe('pre-verified');
+  });
+
+  it('a late KRA result after the lookup timed out (no stored ref) is refused; the case stays with staff', async () => {
+    const t = setup({
+      kycCase: baseCase({ status: 'under-review', reason: 'partner-timeout', partnerRefs: { aadhaar: REFS.aadhaar } }),
+      evidence: baseEvidence({ kra: 'timeout' }),
+    });
+    const res = await t.send(t.event('kyc.result', kraOk, { ref: 'kra_late' }));
+    expect(res.body.outcome).toBe('ignored-ref-mismatch');
+    const s = await t.stored();
+    expect(s.kycCase).toMatchObject({ status: 'under-review', reason: 'partner-timeout', version: 1 });
+    expect(s.kycCase.partnerRefs.kra).toBeUndefined();
+    expect(s.evidence!.kra).toBe('timeout');
+  });
+
+  it('a kra.upload with a ref other than the stored upload ref is refused', async () => {
+    const t = setup({ kycCase: baseCase({ status: 'verified', reason: 'staff-approved', partnerRefs: { kraUpload: UPLOAD_REF } }) });
+    expect((await t.send(t.event('kra.upload', { status: 'uploaded' }, { ref: 'up_2' }))).body.outcome).toBe('ignored-ref-mismatch');
+    expect((await t.send(t.event('kra.upload', { status: 'uploaded' }))).body.outcome).toBe('applied');
+    expect(record(t).evidence.kraUpload).toEqual({ status: 'uploaded' });
+  });
+
+  it('PAN and face results have no ref and are still applied', async () => {
+    const t = setup();
+    expect((await t.send(t.event('kyc.result', { check: 'pan', valid: true, nameMatch: true, aadhaarLinked: true }))).body.outcome).toBe('applied');
+    expect((await t.send(t.event('kyc.result', { check: 'face', match: 0.9, live: true }))).body.outcome).toBe('applied');
+  });
+
+  it('the stored refs are never overwritten by an event', async () => {
+    const t = setup();
+    await t.send(t.event('kyc.result', kraOk));
+    expect((await t.stored()).kycCase.partnerRefs).toEqual(REFS);
+  });
+});
+
+describe('webhook: R1 e-sign after a staff Approve', () => {
+  const approved = (over: Parameters<typeof baseCase>[0] = {}) =>
+    baseCase({ status: 'verified', path: 'hand-check', reason: 'staff-approved', ...over });
+  const record = (t: ReturnType<typeof setup>) => t.store.cases.all().find((c) => c.userId === USER)!;
+
+  it('e-sign done on an approved, unsigned case records it and makes the KRA upload due', async () => {
+    const t = setup({ kycCase: approved(), evidence: baseEvidence({ deviceHandCheck: true, esign: 'pending' }) });
+    const res = await t.send(t.event('esign.completed', { status: 'done' }));
+    expect(res.body.outcome).toBe('applied');
+    const rec = record(t);
+    expect(rec).toMatchObject({ status: 'verified', reason: 'staff-approved', path: 'hand-check', next: 'kra-upload', version: 2 });
+    expect(rec.checks.esign).toBe('pass');
+    expect(rec.evidence.esign).toBe('done');
+    expect(t.applied()[0]).toMatchObject({ action: 'webhook.esign', before: { status: 'verified' }, after: { status: 'verified' } });
+  });
+
+  it('e-sign failed keeps the case waiting for e-sign (no KRA upload)', async () => {
+    const t = setup({ kycCase: approved(), evidence: baseEvidence({ esign: 'pending' }) });
+    await t.send(t.event('esign.completed', { status: 'failed' }));
+    const rec = record(t);
+    expect(rec).toMatchObject({ status: 'verified', next: 'esign' });
+    expect(rec.evidence.esign).toBe('pending');
+  });
+
+  it('an approved case that is already e-signed or uploaded ignores e-sign events', async () => {
+    const signed = setup({ kycCase: approved(), evidence: baseEvidence({ esign: 'done' }) });
+    expect((await signed.send(signed.event('esign.completed', { status: 'failed' }))).body.outcome).toBe('ignored-terminal');
+    const uploaded = setup({ kycCase: approved({ partnerRefs: { ...REFS, kraUpload: UPLOAD_REF } }) });
+    expect((await uploaded.send(uploaded.event('esign.completed', { status: 'done' }))).body.outcome).toBe('ignored-terminal');
+  });
+
+  it('a rejected case still ignores e-sign events', async () => {
+    const t = setup({ kycCase: baseCase({ status: 'rejected', reason: 'staff-rejected' }) });
+    expect((await t.send(t.event('esign.completed', { status: 'done' }))).body.outcome).toBe('ignored-terminal');
+  });
+
+  it('e-sign on an approved case still needs the stored e-sign ref (S17)', async () => {
+    const t = setup({ kycCase: approved({ partnerRefs: {} }), evidence: baseEvidence({ esign: 'pending' }) });
+    expect((await t.send(t.event('esign.completed', { status: 'done' }))).body.outcome).toBe('ignored-ref-mismatch');
+    expect(record(t).evidence.esign).toBe('pending');
   });
 });

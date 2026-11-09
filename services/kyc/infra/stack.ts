@@ -13,7 +13,10 @@ import {
   type StackProps,
   aws_apigateway as apigw,
   aws_budgets as budgets,
+  aws_certificatemanager as acm,
   aws_cloudfront as cloudfront,
+  aws_cloudwatch as cloudwatch,
+  aws_cloudwatch_actions as cwActions,
   aws_cloudfront_origins as origins,
   aws_cognito as cognito,
   aws_dynamodb as dynamodb,
@@ -23,6 +26,8 @@ import {
   aws_logs as logs,
   aws_s3 as s3,
   aws_secretsmanager as secretsmanager,
+  aws_sns as sns,
+  aws_sns_subscriptions as snsSubs,
   aws_wafv2 as wafv2,
   CfnOutput,
 } from 'aws-cdk-lib';
@@ -45,8 +50,32 @@ export const DEV_PREVIEW_ORIGIN = 'http://127.0.0.1:5180';
 /** S3 key prefix under which the api Lambda may read and write KYC documents. */
 export const DOCS_PREFIX = 'kyc/';
 /** DigiLocker / e-sign return-URL allow-list (the dev stack adds the local preview). */
-export const PROD_RETURN_URL_PREFIXES = ['https://nitishsana.github.io/wealthfire/', 'wealthfire://'] as const;
+export const PROD_RETURN_URL_PREFIXES = ['https://nitishsana.github.io/wealthfire/', 'wealthfire://kyc-return'] as const;
 export const DEV_RETURN_URL_PREFIXES = [...PROD_RETURN_URL_PREFIXES, `${DEV_PREVIEW_ORIGIN}/`] as const;
+/** The only region the service runs in (data stays in India). Any other region fails synth. */
+export const KYC_REGION = 'ap-south-1';
+/**
+ * Env names added in wave 4 (contract in wave4-fixes.md). F-AUTH adds the same names to
+ * src/lib/env.ts; they are kept here too so the stack does not depend on that edit landing first.
+ */
+export const WAVE4_ENV = {
+  /** consents table (pk userId, sk `<purpose>#<ts>`) */
+  consentsTable: 'CONSENTS_TABLE',
+  /** field-encryption key for PAN / contact envelopes (encryption context { purpose }) */
+  fieldKeyId: 'FIELD_KEY_ID',
+  /** dev only: public base URL of the API stage, for the dev partner pages */
+  apiBaseUrl: 'API_BASE_URL',
+} as const;
+/** Allowed values of the `purpose` encryption context on the field key. */
+export const FIELD_KEY_PURPOSES = ['pan', 'contact'] as const;
+/** Headers the browser may send to the API (S7). */
+export const API_ALLOW_HEADERS = ['content-type', 'authorization', 'idempotency-key', 'x-wf-client'] as const;
+/** Methods the browser may use on the API (DELETE for DELETE /kyc/data). */
+export const API_ALLOW_METHODS = ['GET', 'POST', 'DELETE', 'OPTIONS'] as const;
+/** WAF: OTP endpoints, per IP per 5 minutes (S12). */
+export const OTP_RATE_LIMIT = 20;
+/** Idempotency rows (`idem#...` items in kyc_cases) expire via this TTL attribute (epoch seconds). */
+export const IDEMPOTENCY_TTL_ATTRIBUTE = 'expiresAt';
 
 /**
  * CSP for the review console. Mirrors review-console/build.mjs (which also writes it as a meta tag)
@@ -114,22 +143,104 @@ function consoleUrls(scope: Construct, key: string, isProd: boolean): string[] {
 }
 
 const DOMAIN_PREFIX = /^(?!.*(?:aws|amazon|cognito))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const EMAIL = /^[^\s@<>()",;:]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+export const EMAIL = /^[^\s@<>()",;:]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const certArn = (region: string) => new RegExp(`^arn:aws:acm:${region}:\\d{12}:certificate/[0-9a-f-]{36}$`);
+
+/** Optional app origin (S5): one exact origin; https (dev also allows http://localhost / 127.0.0.1). */
+function originContext(scope: Construct, key: string, isProd: boolean): string | undefined {
+  const raw: unknown = scope.node.tryGetContext(key);
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  let u: URL;
+  try {
+    u = new URL(String(raw).trim());
+  } catch {
+    throw new Error(`Context "${key}" is not a valid origin`);
+  }
+  const local = u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
+  const bare = (u.pathname === '/' || u.pathname === '') && !u.search && !u.hash && !u.username && !u.password;
+  if (!bare || !(u.protocol === 'https:' || (local && !isProd))) {
+    throw new Error(`Context "${key}" must be a bare https origin${isProd ? '' : ' (or http://localhost / 127.0.0.1 on dev)'}`);
+  }
+  return u.origin;
+}
+
+/** A custom domain + ACM certificate pair (S13). Both or neither; the certificate must be in `certRegion`. */
+function domainContext(
+  scope: Construct,
+  domainKey: string,
+  certKey: string,
+  certRegion: string,
+): { domain: string; certArn: string } | undefined {
+  const domain = stringContext(scope, domainKey, HOSTNAME);
+  const cert = stringContext(scope, certKey, certArn(certRegion));
+  if (!domain && !cert) return undefined;
+  if (!domain || !cert) throw new Error(`Context "${domainKey}" and "${certKey}" must be set together`);
+  return { domain, certArn: cert };
+}
+
+const ROOT_KEY_ADMIN = [
+  'kms:CreateAlias', 'kms:UpdateAlias', 'kms:DeleteAlias', 'kms:DescribeKey', 'kms:EnableKey', 'kms:DisableKey',
+  'kms:EnableKeyRotation', 'kms:DisableKeyRotation', 'kms:RotateKeyOnDemand', 'kms:GetKeyPolicy', 'kms:PutKeyPolicy',
+  'kms:GetKeyRotationStatus', 'kms:ListKeyPolicies', 'kms:ListResourceTags', 'kms:ListGrants', 'kms:RevokeGrant',
+  'kms:RetireGrant', 'kms:TagResource', 'kms:UntagResource', 'kms:UpdateKeyDescription', 'kms:ScheduleKeyDeletion',
+  'kms:CancelKeyDeletion',
+];
+
+/**
+ * Explicit key policy (S9): the account may administer the key (no kms:*), and `rootUse` lists the
+ * only data-plane actions IAM policies in this account can be granted on it. An empty `rootUse`
+ * means IAM cannot grant any use: only principals named in `extra` statements can use the key.
+ */
+function keyPolicy(rootUse: string[], extra: iam.PolicyStatement[] = []): iam.PolicyDocument {
+  const root = new iam.AccountRootPrincipal();
+  const statements = [
+    new iam.PolicyStatement({ sid: 'KeyAdministration', principals: [root], actions: ROOT_KEY_ADMIN, resources: ['*'] }),
+    ...(rootUse.length
+      ? [new iam.PolicyStatement({ sid: 'UseViaIamPolicies', principals: [root], actions: rootUse, resources: ['*'] })]
+      : []),
+    ...extra,
+  ];
+  return new iam.PolicyDocument({ statements });
+}
 
 export class KycStack extends Stack {
   constructor(scope: Construct, id: string, props: KycStackProps) {
+    // S1: the region is fixed. An unset or other region (e.g. a CLI profile default) fails synth.
+    if (props.env?.region !== KYC_REGION) {
+      throw new Error(`KycStack must be in ${KYC_REGION}, got "${props.env?.region ?? 'unset'}"`);
+    }
     super(scope, id, props);
     const { stage } = props;
     const isProd = stage === 'prod';
     const removalPolicy = isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY;
     const prefix = `wealthfire-kyc-${stage}`;
-    const allowedOrigins = isProd ? [PROD_ORIGIN] : [PROD_ORIGIN, DEV_PREVIEW_ORIGIN];
+    // S5: with appOrigin set, the app CORS allows only that origin (no GitHub Pages, no local preview).
+    const appOrigin = originContext(this, 'appOrigin', isProd);
+    const allowedOrigins = appOrigin ? [appOrigin] : isProd ? [PROD_ORIGIN] : [PROD_ORIGIN, DEV_PREVIEW_ORIGIN];
+    // S13: optional custom domains. API certs are regional (ap-south-1); CloudFront certs live in us-east-1.
+    const apiDomain = domainContext(this, 'apiDomain', 'apiCertArn', KYC_REGION);
+    const consoleDomain = domainContext(this, 'consoleDomain', 'consoleCertArn', 'us-east-1');
 
-    // ---------- KMS keys (one set per environment) ----------
+    // ---------- KMS keys (one set per environment; explicit key policies, no kms:*) ----------
     const dataKey = new kms.Key(this, 'DataKey', {
       alias: `alias/${prefix}-data`,
       description: `Wealthfire KYC ${stage}: encrypts tables, documents and secrets`,
       enableKeyRotation: true,
+      policy: keyPolicy(
+        ['kms:Encrypt', 'kms:Decrypt', 'kms:ReEncryptFrom', 'kms:ReEncryptTo', 'kms:GenerateDataKey',
+          'kms:GenerateDataKeyWithoutPlaintext', 'kms:DescribeKey'],
+        [
+          // DynamoDB / Secrets Manager create grants on the key for the resources they encrypt.
+          new iam.PolicyStatement({
+            sid: 'GrantsForAwsResources',
+            principals: [new iam.AccountRootPrincipal()],
+            actions: ['kms:CreateGrant'],
+            resources: ['*'],
+            conditions: { Bool: { 'kms:GrantIsForAWSResource': 'true' } },
+          }),
+        ],
+      ),
       removalPolicy,
     });
     const jwtKey = new kms.Key(this, 'JwtSigningKey', {
@@ -137,6 +248,7 @@ export class KycStack extends Stack {
       description: `Wealthfire KYC ${stage}: signs user access tokens (ES256)`,
       keySpec: kms.KeySpec.ECC_NIST_P256,
       keyUsage: kms.KeyUsage.SIGN_VERIFY,
+      policy: keyPolicy(['kms:Sign', 'kms:Verify', 'kms:GetPublicKey', 'kms:DescribeKey']),
       removalPolicy,
     });
     const hmacKey = new kms.Key(this, 'HmacKey', {
@@ -144,6 +256,7 @@ export class KycStack extends Stack {
       description: `Wealthfire KYC ${stage}: keyed lookup hashes (PAN, contact)`,
       keySpec: kms.KeySpec.HMAC_256,
       keyUsage: kms.KeyUsage.GENERATE_VERIFY_MAC,
+      policy: keyPolicy(['kms:GenerateMac', 'kms:VerifyMac', 'kms:DescribeKey']),
       removalPolicy,
     });
 
@@ -183,7 +296,8 @@ export class KycStack extends Stack {
       partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
     });
     const otp = table('OtpTable', 'otp', 'challengeId', undefined, 'expiresAt');
-    const kycCases = table('KycCasesTable', 'kyc_cases', 'userId');
+    // S18: `idem#...` idempotency rows carry expiresAt (epoch seconds, 24 h); case rows never set it.
+    const kycCases = table('KycCasesTable', 'kyc_cases', 'userId', undefined, IDEMPOTENCY_TTL_ATTRIBUTE);
     kycCases.addGlobalSecondaryIndex({
       indexName: 'byStatus',
       partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
@@ -195,6 +309,8 @@ export class KycStack extends Stack {
     const costs = table('CostsTable', 'costs', 'month', 'checkId');
     // Seen partner webhook event ids (replay / duplicate guard); items expire via TTL after a day.
     const webhookEvents = table('WebhookEventsTable', 'webhook_events', 'eventId', undefined, 'expiresAt');
+    // S2: consent records. Partition userId, sort `sk` = `<purpose>#<ts>` (a user's consents are one query).
+    const consents = table('ConsentsTable', 'consents', 'userId', 'sk');
 
     // ---------- Review console hosting: private S3 + CloudFront (OAC) ----------
     // Files are uploaded by hand after `node review-console/build.mjs` (aws s3 sync dist/ s3://<ConsoleBucketName>);
@@ -214,7 +330,9 @@ export class KycStack extends Stack {
     const apiOrigin = Lazy.string({
       produce: () => {
         if (!apiForCsp) throw new Error('API not created');
-        return `https://${apiForCsp.restApiId}.execute-api.${this.region}.${this.urlSuffix}`;
+        const execApi = `https://${apiForCsp.restApiId}.execute-api.${this.region}.${this.urlSuffix}`;
+        // With a custom API domain the console may use either origin.
+        return apiDomain ? `${execApi} https://${apiDomain.domain}` : execApi;
       },
     });
     const consoleHeaders = new cloudfront.ResponseHeadersPolicy(this, 'ConsoleHeaders', {
@@ -242,8 +360,16 @@ export class KycStack extends Stack {
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
         responseHeadersPolicy: consoleHeaders,
       },
+      // S13: custom console domain (certificate in us-east-1, TLS 1.2+ only).
+      ...(consoleDomain
+        ? {
+            domainNames: [consoleDomain.domain],
+            certificate: acm.Certificate.fromCertificateArn(this, 'ConsoleCertificate', consoleDomain.certArn),
+            minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+          }
+        : {}),
     });
-    const consoleUrl = `https://${consoleCdn.distributionDomainName}/`;
+    const consoleUrl = consoleDomain ? `https://${consoleDomain.domain}/` : `https://${consoleCdn.distributionDomainName}/`;
     // Hosted UI redirect targets: context, else the CloudFront URL.
     const callbackUrls = consoleUrls(this, 'consoleCallbackUrls', isProd);
     const logoutUrls = consoleUrls(this, 'consoleLogoutUrls', isProd);
@@ -252,7 +378,7 @@ export class KycStack extends Stack {
     // Browser origins of the console (for API / docs CORS).
     const consoleOrigins = callbackUrls.length
       ? [...new Set(callbackUrls.map((u) => new URL(u).origin))]
-      : [`https://${consoleCdn.distributionDomainName}`];
+      : [`https://${consoleDomain ? consoleDomain.domain : consoleCdn.distributionDomainName}`];
     const apiOrigins = [...allowedOrigins, ...consoleOrigins.filter((o) => Token.isUnresolved(o) || !allowedOrigins.includes(o))];
 
     // ---------- S3 documents bucket ----------
@@ -271,6 +397,9 @@ export class KycStack extends Stack {
       lifecycleRules: [
         { id: 'delete-after-retention', enabled: true, expiration: Duration.days(retentionDays) },
         { id: 'abort-incomplete-uploads', enabled: true, abortIncompleteMultipartUploadAfter: Duration.days(1) },
+        // S11: uploads are tagged state=pending and retagged state=linked once a case references
+        // them; anything still pending after a day was never used and is deleted.
+        { id: 'delete-unlinked-uploads', enabled: true, tagFilters: { state: 'pending' }, expiration: Duration.days(1) },
       ],
       // Browser uploads/downloads via presigned URLs: the apps PUT + GET, the review console GETs.
       cors: [
@@ -278,7 +407,8 @@ export class KycStack extends Stack {
           id: 'apps',
           allowedOrigins,
           allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET],
-          allowedHeaders: ['content-type', 'content-length'],
+          // x-amz-tagging: the presigned PUT carries the state=pending tag (S11).
+          allowedHeaders: ['content-type', 'content-length', 'x-amz-tagging'],
           maxAge: 300,
         },
         {
@@ -371,6 +501,7 @@ export class KycStack extends Stack {
       [TABLE_ENV.kycCases]: kycCases.tableName,
       [TABLE_ENV.audit]: audit.tableName,
       [TABLE_ENV.costs]: costs.tableName,
+      [WAVE4_ENV.consentsTable]: consents.tableName,
       [ENV.docsBucket]: docs.bucketName,
       [ENV.docsPrefix]: DOCS_PREFIX,
       [ENV.dataKeyId]: dataKey.keyArn,
@@ -437,15 +568,79 @@ export class KycStack extends Stack {
     ];
     const tableArns = (ts: dynamodb.Table[]) => ts.flatMap((t) => [t.tableArn, `${t.tableArn}/index/*`]);
     const dataKeyUse = ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey', 'kms:DescribeKey'];
+    // S10: the audit trail is append-only for both roles (TransactWriteItems Puts are PutItem in IAM).
+    const auditAppendOnly = (fn: lambda.Function) => {
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({ sid: 'AuditAppend', actions: ['dynamodb:PutItem', 'dynamodb:Query'], resources: tableArns([audit]) }),
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: 'AuditNoChange',
+          effect: iam.Effect.DENY,
+          actions: ['dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem'],
+          resources: tableArns([audit]),
+        }),
+      );
+    };
 
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         sid: 'TablesReadWrite',
         actions: tableRw,
-        resources: tableArns([users, sessions, otp, kycCases, audit, costs]),
+        resources: tableArns([users, sessions, otp, kycCases, costs, consents]),
       }),
     );
+    auditAppendOnly(apiFn);
     apiFn.addToRolePolicy(new iam.PolicyStatement({ sid: 'DataKey', actions: dataKeyUse, resources: [dataKey.keyArn] }));
+
+    // S9: separate field key for PAN / contact envelopes. Only the api role may use it (named in the
+    // key policy; IAM in the account cannot grant use), only with encryption context purpose=pan|contact.
+    const fieldUse = ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey'];
+    const fieldContext = { StringEquals: { 'kms:EncryptionContext:purpose': [...FIELD_KEY_PURPOSES] } };
+    const fieldKey = new kms.Key(this, 'FieldKey', {
+      alias: `alias/${prefix}-field`,
+      description: `Wealthfire KYC ${stage}: field encryption (PAN, contact); api role only, context required`,
+      enableKeyRotation: true,
+      policy: keyPolicy([], [
+        new iam.PolicyStatement({
+          sid: 'ApiRoleUseWithContext',
+          principals: [apiFn.role!],
+          actions: fieldUse,
+          resources: ['*'],
+          conditions: fieldContext,
+        }),
+        new iam.PolicyStatement({ sid: 'ApiRoleDescribe', principals: [apiFn.role!], actions: ['kms:DescribeKey'], resources: ['*'] }),
+        new iam.PolicyStatement({
+          sid: 'DenyWithoutContext',
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: [...fieldUse, 'kms:ReEncryptFrom', 'kms:ReEncryptTo', 'kms:GenerateDataKeyWithoutPlaintext'],
+          resources: ['*'],
+          conditions: { Null: { 'kms:EncryptionContext:purpose': 'true' } },
+        }),
+        new iam.PolicyStatement({
+          sid: 'DenyWebhookRole',
+          effect: iam.Effect.DENY,
+          principals: [webhookFn.role!],
+          actions: [...fieldUse, 'kms:ReEncryptFrom', 'kms:ReEncryptTo', 'kms:GenerateDataKeyWithoutPlaintext'],
+          resources: ['*'],
+        }),
+      ]),
+      removalPolicy,
+    });
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({ sid: 'FieldKey', actions: fieldUse, resources: [fieldKey.keyArn], conditions: fieldContext }),
+    );
+    apiFn.addToRolePolicy(new iam.PolicyStatement({ sid: 'FieldKeyDescribe', actions: ['kms:DescribeKey'], resources: [fieldKey.keyArn] }));
+    apiFn.addEnvironment(WAVE4_ENV.fieldKeyId, fieldKey.keyArn);
+    webhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'NoFieldKey',
+        effect: iam.Effect.DENY,
+        actions: ['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey'],
+        resources: [fieldKey.keyArn],
+      }),
+    );
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         sid: 'JwtSign',
@@ -461,10 +656,20 @@ export class KycStack extends Stack {
       }),
     );
     // Presigned PUT/GET URLs are signed with the role's credentials, so the role needs these actions.
+    // PutObjectTagging: presigned PUTs carry x-amz-tagging, and linking retags uploads (S11).
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         sid: 'DocsPrefix',
-        actions: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
+        actions: ['s3:PutObject', 's3:GetObject', 's3:PutObjectTagging'],
+        resources: [docs.arnForObjects(`${DOCS_PREFIX}*`)],
+      }),
+    );
+    // S18: DeleteObject is its own statement, on the api role only (DELETE /kyc/data). The webhook
+    // role has no S3 access at all.
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'DocsDelete',
+        actions: ['s3:DeleteObject'],
         resources: [docs.arnForObjects(`${DOCS_PREFIX}*`)],
       }),
     );
@@ -507,8 +712,9 @@ export class KycStack extends Stack {
     );
 
     webhookFn.addToRolePolicy(
-      new iam.PolicyStatement({ sid: 'TablesReadWrite', actions: tableRw, resources: tableArns([kycCases, audit, webhookEvents]) }),
+      new iam.PolicyStatement({ sid: 'TablesReadWrite', actions: tableRw, resources: tableArns([kycCases, webhookEvents]) }),
     );
+    auditAppendOnly(webhookFn);
     webhookFn.addToRolePolicy(
       new iam.PolicyStatement({
         sid: 'DataKey',
@@ -539,14 +745,38 @@ export class KycStack extends Stack {
       defaultCorsPreflightOptions: {
         // the apps plus the review console (it calls /review/* from the browser)
         allowOrigins: apiOrigins,
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
-        allowHeaders: ['content-type', 'authorization', 'idempotency-key'],
+        allowMethods: [...API_ALLOW_METHODS],
+        allowHeaders: [...API_ALLOW_HEADERS],
         allowCredentials: true,
         maxAge: Duration.minutes(10),
       },
       disableExecuteApiEndpoint: false,
     });
     apiForCsp = api;
+    if (!isProd) {
+      // Dev partner pages (F-EDGE devPartnerRoutes) sign fake webhooks and link back to the API.
+      // Built from the API id, not api.url: the stage depends on the function, so api.url would loop.
+      apiFn.addEnvironment(ENV.webhookSecretArn, webhookSecret.secretArn);
+      apiFn.addEnvironment(WAVE4_ENV.apiBaseUrl, `https://${api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${stage}/`);
+      apiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: 'DevWebhookSecretRead',
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [webhookSecret.secretArn],
+        }),
+      );
+    }
+    if (apiDomain) {
+      // S13: regional custom domain, TLS 1.2+, mapped to this stage at the root path.
+      const domain = new apigw.DomainName(this, 'ApiDomain', {
+        domainName: apiDomain.domain,
+        certificate: acm.Certificate.fromCertificateArn(this, 'ApiCertificate', apiDomain.certArn),
+        endpointType: apigw.EndpointType.REGIONAL,
+        securityPolicy: apigw.SecurityPolicy.TLS_1_2,
+        mapping: api,
+      });
+      new CfnOutput(this, 'ApiDomainTarget', { value: domain.domainNameAliasDomainName, description: 'CNAME/alias target for apiDomain' });
+    }
     const apiIntegration = new apigw.LambdaIntegration(apiFn);
     api.root.addProxy({ defaultIntegration: apiIntegration, anyMethod: true });
 
@@ -577,11 +807,59 @@ export class KycStack extends Stack {
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: `${prefix}-api`, sampledRequestsEnabled: true },
       rules: [
         {
-          name: 'rate-per-ip',
+          // S12: OTP send/verify, 20 per 5 minutes per IP. CONTAINS so it matches with or without the
+          // stage prefix (execute-api URL vs custom domain).
+          name: 'otp-rate-per-ip',
           priority: 0,
+          action: { block: {} },
+          statement: {
+            rateBasedStatement: {
+              aggregateKeyType: 'IP',
+              limit: OTP_RATE_LIMIT,
+              evaluationWindowSec: 300,
+              scopeDownStatement: {
+                byteMatchStatement: {
+                  searchString: '/auth/otp/',
+                  fieldToMatch: { uriPath: {} },
+                  positionalConstraint: 'CONTAINS',
+                  textTransformations: [
+                    { priority: 0, type: 'URL_DECODE' },
+                    { priority: 1, type: 'LOWERCASE' },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: `${prefix}-otp-rate-per-ip`, sampledRequestsEnabled: true },
+        },
+        {
+          name: 'rate-per-ip',
+          priority: 1,
           action: { block: {} },
           statement: { rateBasedStatement: { aggregateKeyType: 'IP', limit: 300, evaluationWindowSec: 300 } },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: `${prefix}-rate-per-ip`, sampledRequestsEnabled: true },
+        },
+        {
+          name: 'aws-known-bad-inputs',
+          priority: 2,
+          overrideAction: { none: {} },
+          statement: { managedRuleGroupStatement: { vendorName: 'AWS', name: 'AWSManagedRulesKnownBadInputsRuleSet' } },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: `${prefix}-known-bad-inputs`, sampledRequestsEnabled: true },
+        },
+        {
+          name: 'aws-common',
+          priority: 3,
+          overrideAction: { none: {} },
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: 'AWS',
+              name: 'AWSManagedRulesCommonRuleSet',
+              // Partner webhooks can exceed the rule's 8 KB body limit; the webhook Lambda enforces
+              // its own body cap, so this one rule only counts.
+              ruleActionOverrides: [{ name: 'SizeRestrictions_BODY', actionToUse: { count: {} } }],
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: `${prefix}-common`, sampledRequestsEnabled: true },
         },
       ],
     });
@@ -592,17 +870,41 @@ export class KycStack extends Stack {
 
     // ---------- Monthly budget alarm (R7) ----------
     const budgetAmount = numberContext(this, 'budgetAmount', 10);
-    const budgetEmail: unknown = this.node.tryGetContext('budgetEmail');
-    const subscribers =
-      typeof budgetEmail === 'string' && budgetEmail.includes('@')
-        ? [{ subscriptionType: 'EMAIL', address: budgetEmail }]
-        : [];
-    if (subscribers.length === 0) {
+    // S18: budgetEmail is required to deploy (infra/deploy.ts refuses without it); synth only warns.
+    const budgetEmail = stringContext(this, 'budgetEmail', EMAIL);
+    const subscribers = budgetEmail ? [{ subscriptionType: 'EMAIL', address: budgetEmail }] : [];
+    if (!budgetEmail) {
       Annotations.of(this).addWarningV2(
         'wealthfire:budgetEmail',
-        'No budgetEmail context set: the budget is created without an email alarm. Pass -c budgetEmail=<address> before deploying.',
+        'No budgetEmail context set: budget and cost alarms have no email. Deploy refuses without -c budgetEmail=<address>.',
       );
     }
+
+    // S12: cost alarm on SMS spend (OTP SMS is the main per-request cost). Billing metrics exist only
+    // in us-east-1, so this uses the regional SNS SMS spend metric; the account-level SNS SMS monthly
+    // spend limit is a deploy step (infra/DEPLOY.md).
+    const smsAlarmUsd = numberContext(this, 'smsSpendAlarmUsd', 5);
+    const costTopic = new sns.Topic(this, 'CostAlarmTopic', {
+      topicName: `${prefix}-cost-alarm`,
+      displayName: `Wealthfire KYC ${stage} cost alarm`,
+      enforceSSL: true,
+    });
+    if (budgetEmail) costTopic.addSubscription(new snsSubs.EmailSubscription(budgetEmail));
+    const smsSpend = new cloudwatch.Alarm(this, 'SmsSpendAlarm', {
+      alarmName: `${prefix}-sms-spend`,
+      alarmDescription: `SNS SMS month-to-date spend above ${smsAlarmUsd} USD`,
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/SNS',
+        metricName: 'SMSMonthToDateSpentUSD',
+        statistic: 'Maximum',
+        period: Duration.hours(1),
+      }),
+      threshold: smsAlarmUsd,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    smsSpend.addAlarmAction(new cwActions.SnsAction(costTopic));
     new budgets.CfnBudget(this, 'MonthlyBudget', {
       budget: {
         budgetName: `${prefix}-monthly`,
@@ -633,5 +935,7 @@ export class KycStack extends Stack {
     new CfnOutput(this, 'ConsoleBucketName', { value: consoleBucket.bucketName });
     new CfnOutput(this, 'CognitoHostedUiDomain', { value: hostedUi.baseUrl() });
     new CfnOutput(this, 'WebhookEventsTableName', { value: webhookEvents.tableName });
+    new CfnOutput(this, 'ConsentsTableName', { value: consents.tableName });
+    new CfnOutput(this, 'CostAlarmTopicArn', { value: costTopic.topicArn });
   }
 }

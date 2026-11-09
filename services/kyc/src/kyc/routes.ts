@@ -77,13 +77,21 @@ export function kycRoutes(svc: KycService): Record<string, KycHandler> {
     'POST /kyc/start': paidRoute(svc, 'start', async (req, b) => ({ ...(await svc.start(req.userId, parseStartInput(b), req.ip)) })),
     /** body {mode: 'digilocker'|'otp', returnUrl} -> 200 {redirectUrl?, challengeRef?, kyc} */
     'POST /kyc/aadhaar': paidRoute(svc, 'aadhaar', (req, b) => svc.startAadhaar(req.userId, b, req.ip)),
-    /** body {files: [{kind: 'selfie'|'aadhaar'|'pan', contentType, size}]} -> 200 {uploads} (not paid) */
+    /** body {files: [{kind: 'selfie'|'aadhaar'|'pan', contentType, size}]} -> 200 {uploads} (not paid; 9 signings / day; send every returned header) */
     'POST /kyc/documents': safe(async (req) => ({ status: 200, body: await svc.documentUploads(req.userId, parseBody(req.body)) })),
     /** body {uploadId} -> 200 StatusView (face match + liveness) */
     'POST /kyc/selfie': paidRoute(svc, 'selfie', async (req, b) => ({ ...(await svc.submitSelfie(req.userId, b, req.ip)) })),
     /** body {returnUrl} -> 200 {redirectUrl, kyc} */
     'POST /kyc/esign': paidRoute(svc, 'esign', (req, b) => svc.startEsign(req.userId, b, req.ip)),
-    /** -> 200 StatusView ({status: null, next: 'start'} before the first start) */
+    /** -> 200 StatusView ({status: null, next: 'start'} before the first start); re-runs a timed-out system step at most once per 10 min */
     'GET /kyc/status': safe(async (req) => ({ status: 200, body: { ...(await svc.status(req.userId)) } })),
+    /** R3: -> 200 {...StatusView, redo?: 'aadhaar'|'selfie'|'esign'} (paid: counts toward the daily cap) */
+    'POST /kyc/retry': paidRoute(svc, 'retry', async (req) => ({ ...(await svc.retry(req.userId, req.ip)) })),
+    /** S2: body {purpose} -> 200 {purpose, consent: 'given', at, kyc}; after a withdrawal this starts a new case */
+    'POST /kyc/consent': safe(async (req) => ({ status: 200, body: await svc.giveConsent(req.userId, parseBody(req.body), req.ip) })),
+    /** S2: body {purpose} -> 200 {purpose, consent: 'withdrawn', at, kyc}; an open case stops ('consent-withdrawn') */
+    'POST /kyc/consent/withdraw': safe(async (req) => ({ status: 200, body: await svc.withdrawConsent(req.userId, parseBody(req.body), req.ip) })),
+    /** S2: -> 200 {deleted: {documents, case}, kept: [{what, reason}]} */
+    'DELETE /kyc/data': safe(async (req) => ({ status: 200, body: await svc.deleteData(req.userId, req.ip) })),
   };
 }

@@ -15,10 +15,20 @@ export interface CasePage {
 /** One `audit` item (the shared AuditRow; review rows use the review.* actions). */
 export type AuditEntry = AuditRow;
 
+/**
+ * A case as the review routes read it. The shared store returns the whole item; the routes only
+ * look at `evidence.esign` (R1: was the case e-signed before Approve) and never send it out.
+ */
+export type ReviewCase = KycCase & {
+  evidence?: { esign?: string };
+  /** S14: per-kind upload link; a 'rejected' one failed the type check and does not count for Approve */
+  documents?: Partial<Record<string, { uploadId: string; state: 'linked' | 'rejected' }>>;
+};
+
 export interface ReviewCaseStore {
   /** Under-review cases, newest `updatedAt` first. Throws BadCursorError on a cursor it did not issue. */
   listUnderReview(q: { limit: number; cursor?: string }): Promise<CasePage>;
-  get(userId: string): Promise<KycCase | null>;
+  get(userId: string): Promise<ReviewCase | null>;
   /**
    * Atomically writes the decision fields of `after` (status, path, reason, checks, note, next,
    * updatedAt, version) and the audit row, only if the stored case still has `before.version` and

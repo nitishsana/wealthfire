@@ -1,14 +1,20 @@
-// Contact OTP: send (rate-limited per target and per IP) and verify (issues tokens, creates the
-// user on first sign-in). Limits mirror the app's OTP_RULES. Codes are argon2id-hashed, contacts
-// are stored encrypted with an HMAC lookup key. Nothing here logs codes, tokens or contacts, and
-// the send path never looks up whether the contact has an account.
+// Contact OTP: send (rate-limited per target and per IP, with a daily cap) and verify (per-IP
+// limit, failed-challenge lockout; issues tokens, creates the user on first sign-in). Short-window
+// limits mirror the app's OTP_RULES. Codes are argon2id-hashed, contacts are stored encrypted
+// (context {purpose: 'contact'}) with an HMAC lookup key. Nothing here logs codes, tokens or
+// contacts (failure metrics carry a fixed reason and the contact kind only), and the send path
+// never looks up whether the contact has an account.
 import { randomInt, randomUUID } from 'node:crypto';
 import { normalizeEmail, normalizeMobile, OTP_RULES, validateEmail, validateMobile } from '@wealthfire/core';
 import type { Clock } from '../lib/clock';
 import { hmacLookup, randomToken, type Encryptor, type MacSigner, type SecretHasher } from '../lib/crypto';
 import { AuthError } from '../lib/errors';
+import { emfAuthMetrics, type AuthMetrics, type OtpFailureReason } from '../lib/metrics';
 import type { AuthRepos, ContactKind, OtpChallenge, SendLog } from '../lib/repo';
 import type { TokenPair, TokenService } from '../lib/tokens';
+
+const HOUR = 60 * 60_000;
+const DAY = 24 * HOUR;
 
 export const OTP_LIMITS = {
   length: OTP_RULES.length,
@@ -17,11 +23,26 @@ export const OTP_LIMITS = {
   resendCooldownMs: OTP_RULES.resendCooldownMs,
   maxSendsPerTarget: OTP_RULES.maxSendsPerWindow,
   targetWindowMs: OTP_RULES.windowMs,
+  /** daily cap on sends per target (S3) */
+  maxSendsPerTargetDay: 10,
+  targetDayWindowMs: DAY,
   maxSendsPerIp: 20,
-  ipWindowMs: 60 * 60_000,
+  ipWindowMs: HOUR,
+  /** failed challenges per target (in failWindowMs) that start a lockout */
+  maxFailedChallenges: 3,
+  failWindowMs: DAY,
+  lockoutMs: HOUR,
+  /** verify calls per IP per hour */
+  maxVerifiesPerIp: 30,
+  verifyIpWindowMs: HOUR,
 } as const;
 
 const CAS_RETRIES = 5;
+
+interface Limit {
+  windowMs: number;
+  max: number;
+}
 
 // ---------- Sender ----------
 
@@ -57,6 +78,8 @@ export interface OtpDeps {
   hasher: SecretHasher;
   sender: Sender;
   tokens: TokenService;
+  /** failure counters (default: CloudWatch EMF lines) */
+  metrics?: AuthMetrics;
   /** Injectable for tests; defaults to a uniform crypto-random 6-digit code. */
   generateCode?: () => string;
 }
@@ -78,6 +101,8 @@ export interface VerifyInput {
   challengeId: string;
   code: string;
   device?: string;
+  /** caller IP (request context); counts toward the per-IP verify limit */
+  ip?: string;
 }
 
 export interface VerifyResult {
@@ -104,24 +129,54 @@ export function contactLookup(mac: MacSigner, kind: ContactKind, value: string):
   return hmacLookup(mac, 'contact', `${kind}:${value}`);
 }
 
+/** Encryption context for a challenge's contact (field key, purpose 'contact'). */
+export function challengeContactContext(challengeId: string): Record<string, string> {
+  return { purpose: 'contact', challengeId };
+}
+
 const defaultCode = (): string => String(randomInt(0, 10 ** OTP_LIMITS.length)).padStart(OTP_LIMITS.length, '0');
 
 export class OtpService {
   constructor(private readonly deps: OtpDeps) {}
 
+  private fail(reason: OtpFailureReason, kind?: ContactKind): void {
+    try {
+      (this.deps.metrics ?? emfAuthMetrics).otpFailure(kind ? { reason, kind } : { reason });
+    } catch {
+      // metrics never break sign-in
+    }
+  }
+
+  private ipHash(ip: unknown): Promise<string> {
+    return hmacLookup(this.deps.mac, 'ip', typeof ip === 'string' && ip ? ip : 'unknown');
+  }
+
   async send(input: SendInput): Promise<SendResult> {
     const { repos, clock, mac, encryptor, hasher, sender } = this.deps;
     const { kind, value } = normalizeContact(input.kind, input.contact);
     const targetHash = await contactLookup(mac, kind, value);
-    const ipHash = await hmacLookup(mac, 'ip', typeof input.ip === 'string' && input.ip ? input.ip : 'unknown');
+    const ipHash = await this.ipHash(input.ip);
 
-    // Per-IP first, so a limited IP cannot use up a target's sends.
-    await this.reserve(`ip:${ipHash}`, OTP_LIMITS.ipWindowMs, OTP_LIMITS.maxSendsPerIp, 0);
+    try {
+      // Per-IP first, so a limited IP cannot use up a target's sends.
+      await this.reserve(`ip:${ipHash}`, [{ windowMs: OTP_LIMITS.ipWindowMs, max: OTP_LIMITS.maxSendsPerIp }], 0);
+    } catch (e) {
+      this.fail('send-limited', kind);
+      throw e;
+    }
+    await this.assertNotLocked(targetHash, kind);
 
     const challengeId = randomToken(16);
-    const previous = await this.reserve(
-      `t:${targetHash}`, OTP_LIMITS.targetWindowMs, OTP_LIMITS.maxSendsPerTarget, OTP_LIMITS.resendCooldownMs, challengeId,
-    );
+    let previous: string | undefined;
+    try {
+      previous = await this.reserve(`t:${targetHash}`, [
+        { windowMs: OTP_LIMITS.targetWindowMs, max: OTP_LIMITS.maxSendsPerTarget },
+        { windowMs: OTP_LIMITS.targetDayWindowMs, max: OTP_LIMITS.maxSendsPerTargetDay },
+      ], OTP_LIMITS.resendCooldownMs, challengeId);
+    } catch (e) {
+      this.fail('send-limited', kind);
+      throw e;
+    }
     if (previous) await repos.otp.deleteChallenge(previous); // a resend replaces the old code
 
     const now = clock.now();
@@ -130,7 +185,7 @@ export class OtpService {
       challengeId,
       targetHash,
       contactKind: kind,
-      contactEnc: await encryptor.encrypt(value, { purpose: 'otp', challengeId }),
+      contactEnc: await encryptor.encrypt(value, challengeContactContext(challengeId)),
       codeHash: await hasher.hash(code),
       createdAt: now,
       expiresAt: now + OTP_LIMITS.expiryMs,
@@ -141,6 +196,7 @@ export class OtpService {
       await sender.send(kind, value, code);
     } catch {
       await repos.otp.deleteChallenge(challengeId);
+      this.fail('send-failed', kind);
       throw new AuthError('send_failed');
     }
     return { challengeId, expiresAt: challenge.expiresAt, resendAt: now + OTP_LIMITS.resendCooldownMs };
@@ -152,26 +208,46 @@ export class OtpService {
     if (typeof input.code !== 'string' || !new RegExp(`^\\d{${OTP_LIMITS.length}}$`).test(input.code)) throw new AuthError('bad_request');
     const device = typeof input.device === 'string' && input.device.length <= 100 ? input.device : undefined;
 
+    try {
+      await this.reserve(`v:${await this.ipHash(input.ip)}`, [{ windowMs: OTP_LIMITS.verifyIpWindowMs, max: OTP_LIMITS.maxVerifiesPerIp }], 0);
+    } catch (e) {
+      this.fail('verify-limited');
+      throw e;
+    }
+
     const c = await repos.otp.getChallenge(input.challengeId);
-    if (!c) throw new AuthError('invalid_code', { triesLeft: 0 });
+    if (!c) {
+      this.fail('dead-challenge');
+      throw new AuthError('invalid_code', { triesLeft: 0 });
+    }
+    await this.assertNotLocked(c.targetHash, c.contactKind);
     if (clock.now() >= c.expiresAt) {
       await repos.otp.deleteChallenge(c.challengeId);
+      this.fail('dead-challenge', c.contactKind);
       throw new AuthError('invalid_code', { triesLeft: 0 });
     }
     const tries = await repos.otp.incrementTries(c.challengeId, OTP_LIMITS.maxTries);
     if (tries === null) {
       await repos.otp.deleteChallenge(c.challengeId);
+      this.fail('dead-challenge', c.contactKind);
       throw new AuthError('invalid_code', { triesLeft: 0 });
     }
     if (!(await hasher.verify(c.codeHash, input.code))) {
-      const left = OTP_LIMITS.maxTries - tries;
+      this.fail('wrong-code', c.contactKind);
+      let left = OTP_LIMITS.maxTries - tries;
+      // A challenge counts as failed at its first wrong code (once per challenge), so resending
+      // before the tries run out cannot dodge the lockout.
+      if (tries === 1 && (await this.recordFailedChallenge(c.targetHash))) {
+        this.fail('lockout-started', c.contactKind);
+        left = 0;
+      }
       if (left <= 0) await repos.otp.deleteChallenge(c.challengeId);
       throw new AuthError('invalid_code', { triesLeft: left });
     }
     // Single use: only the caller that deletes the challenge wins.
     if (!(await repos.otp.deleteChallenge(c.challengeId))) throw new AuthError('invalid_code', { triesLeft: 0 });
 
-    const value = await encryptor.decrypt(c.contactEnc, { purpose: 'otp', challengeId: c.challengeId });
+    const value = await encryptor.decrypt(c.contactEnc, challengeContactContext(c.challengeId));
     const userId = randomUUID();
     const { user, created } = await repos.users.createIfAbsent({
       userId,
@@ -183,25 +259,59 @@ export class OtpService {
     return { tokens: await tokens.issue(user.userId, device), isNewUser: created };
   }
 
-  /**
-   * Records a send in the log at `key` if the window limit and cooldown allow it (optimistic
-   * concurrency, retried). Returns the previous challenge id stored on the log, if any.
-   */
-  private async reserve(
-    key: string, windowMs: number, max: number, cooldownMs: number, challengeId?: string,
-  ): Promise<string | undefined> {
+  /** Throws rate_limited while the target is locked out (3 failed challenges in 24 h -> 1 h). */
+  private async assertNotLocked(targetHash: string, kind: ContactKind): Promise<void> {
+    const now = this.deps.clock.now();
+    const log = await this.deps.repos.otp.getSendLog(`f:${targetHash}`);
+    const fails = (log?.sends ?? []).filter((t) => now - t < OTP_LIMITS.failWindowMs && t <= now).sort((a, b) => a - b);
+    if (fails.length < OTP_LIMITS.maxFailedChallenges) return;
+    const last = fails[fails.length - 1]!;
+    if (now - last < OTP_LIMITS.lockoutMs) {
+      this.fail('locked', kind);
+      throw new AuthError('rate_limited', { retryAfterMs: last + OTP_LIMITS.lockoutMs - now });
+    }
+  }
+
+  /** Records a failed challenge for the target; true when this failure starts a lockout. */
+  private async recordFailedChallenge(targetHash: string): Promise<boolean> {
     const { repos, clock } = this.deps;
+    const key = `f:${targetHash}`;
+    for (let attempt = 0; attempt < CAS_RETRIES; attempt++) {
+      const now = clock.now();
+      const log = await repos.otp.getSendLog(key);
+      const fails = (log?.sends ?? []).filter((t) => now - t < OTP_LIMITS.failWindowMs && t <= now);
+      const next = { key, sends: [...fails, now] };
+      if (await repos.otp.putSendLog(next, log?.version ?? 0, now + OTP_LIMITS.failWindowMs)) {
+        return next.sends.length >= OTP_LIMITS.maxFailedChallenges;
+      }
+    }
+    // Could not record under contention: fail closed with a lockout.
+    return true;
+  }
+
+  /**
+   * Records a send in the log at `key` if every window limit and the cooldown allow it
+   * (optimistic concurrency, retried). Returns the previous challenge id stored on the log, if any.
+   */
+  private async reserve(key: string, limits: readonly Limit[], cooldownMs: number, challengeId?: string): Promise<string | undefined> {
+    const { repos, clock } = this.deps;
+    const keepMs = Math.max(...limits.map((l) => l.windowMs));
     for (let attempt = 0; attempt < CAS_RETRIES; attempt++) {
       const now = clock.now();
       const log: SendLog | null = await repos.otp.getSendLog(key);
-      const sends = (log?.sends ?? []).filter((t) => now - t < windowMs && t <= now).sort((a, b) => a - b);
-      if (sends.length >= max) throw new AuthError('rate_limited', { retryAfterMs: sends[0]! + windowMs - now });
+      const sends = (log?.sends ?? []).filter((t) => now - t < keepMs && t <= now).sort((a, b) => a - b);
+      let wait = 0;
+      for (const l of limits) {
+        const inWindow = sends.filter((t) => now - t < l.windowMs);
+        if (inWindow.length >= l.max) wait = Math.max(wait, inWindow[inWindow.length - l.max]! + l.windowMs - now);
+      }
+      if (wait > 0) throw new AuthError('rate_limited', { retryAfterMs: wait });
       const last = sends[sends.length - 1];
       if (cooldownMs > 0 && last !== undefined && now - last < cooldownMs) {
         throw new AuthError('rate_limited', { retryAfterMs: last + cooldownMs - now });
       }
       const next = { key, sends: [...sends, now], lastChallengeId: challengeId ?? log?.lastChallengeId };
-      if (await repos.otp.putSendLog(next, log?.version ?? 0, now + windowMs)) return log?.lastChallengeId;
+      if (await repos.otp.putSendLog(next, log?.version ?? 0, now + keepMs)) return log?.lastChallengeId;
     }
     throw new AuthError('rate_limited', { retryAfterMs: 1000 });
   }

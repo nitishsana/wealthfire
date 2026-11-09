@@ -66,11 +66,13 @@ export function Mix({ items }: { items: { name: string; value: number }[] }) {
   );
 }
 
-export function Btn({ title, onPress, primary, danger, disabled }: { title: string; onPress: () => void; primary?: boolean; danger?: boolean; disabled?: boolean }) {
+/** `danger`: red outline; `danger` + `solid`: red button (a confirm step's destructive action). */
+export function Btn({ title, onPress, primary, danger, solid, disabled }: { title: string; onPress: () => void; primary?: boolean; danger?: boolean; solid?: boolean; disabled?: boolean }) {
+  const red = danger && solid;
   return (
     <Pressable accessibilityRole="button" accessibilityState={{ disabled: !!disabled }} disabled={disabled} onPress={onPress}
-      style={({ pressed }) => [s.btn, primary && s.btnPrimary, danger && s.btnDanger, (pressed || disabled) && { opacity: 0.6 }]}>
-      <Text style={[s.btnText, primary && { color: '#1a0f05' }, danger && { color: theme.bad }]}>{title}</Text>
+      style={({ pressed }) => [s.btn, primary && s.btnPrimary, danger && s.btnDanger, red && { backgroundColor: theme.bad }, (pressed || disabled) && { opacity: 0.6 }]}>
+      <Text style={[s.btnText, primary && { color: '#1a0f05' }, danger && { color: red ? '#1a0f05' : theme.bad }]}>{title}</Text>
     </Pressable>
   );
 }

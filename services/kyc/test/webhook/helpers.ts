@@ -11,6 +11,18 @@ import type { CaseEvidence, WebhookLogFields } from '../../src/webhook/ports';
 
 export const SECRET = 'test-webhook-secret-0123456789';
 export const USER = 'user-1';
+/** Stored partner refs of the default case, and the ref `event()` adds per event kind. */
+export const REFS = { kra: 'kra_1', aadhaar: 'aad_1', esign: 'es_1' } as const;
+export const UPLOAD_REF = 'up_1';
+
+/** The ref a real partner sends for this event (none for PAN / face results). */
+export function refFor(type: string, data: Record<string, unknown>): string | undefined {
+  if (type === 'esign.completed') return REFS.esign;
+  if (type === 'kra.upload') return UPLOAD_REF;
+  if (data.check === 'kra') return REFS.kra;
+  if (data.check === 'aadhaar') return REFS.aadhaar;
+  return undefined;
+}
 
 export function baseCase(over: Partial<KycCase> = {}): KycCase {
   return {
@@ -18,7 +30,8 @@ export function baseCase(over: Partial<KycCase> = {}): KycCase {
     status: 'pre-verified',
     path: null,
     masks: { pan: 'XXXXXX234F', aadhaar: 'XXXXXXXX1234' },
-    partnerRefs: {},
+    // refs the KYC routes stored when each step started (S17: events must carry the same ref)
+    partnerRefs: { ...REFS },
     checks: {},
     reason: null,
     updatedAt: '2026-11-06T11:00:00.000Z',
@@ -69,15 +82,19 @@ export function setup(opts: { kycCase?: KycCase | null; evidence?: CaseEvidence 
     log: (f) => logs.push(f),
   };
   let n = 0;
-  /** Builds a signed event; `at` offsets occurredAt from now (ms). */
-  const event = (type: string, data: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
-    id: `evt_${++n}`,
-    type,
-    timestamp: clock.now(),
-    userId: USER,
-    data,
-    ...extra,
-  });
+  /** Builds an event with the matching partner ref (override with `extra.ref`, drop with `ref: undefined`). */
+  const event = (type: string, data: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    const ref = refFor(type, data);
+    return {
+      id: `evt_${++n}`,
+      type,
+      timestamp: clock.now(),
+      userId: USER,
+      data,
+      ...(ref !== undefined ? { ref } : {}),
+      ...extra,
+    };
+  };
   const send = (payload: unknown, sign: string | null = SECRET): Promise<WebhookResponse> => {
     const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
     const headers: Record<string, string> = sign === null ? {} : { 'X-Webhook-Signature': `sha256=${signBody(sign, body)}` };

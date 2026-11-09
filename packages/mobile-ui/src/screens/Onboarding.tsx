@@ -292,7 +292,7 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   const [pending, setPending] = useState<PendingCode | null>(null); // code sent just before the OTP screen opened
   const [pendingError, setPendingError] = useState('');
   const [confirmError, setConfirmError] = useState('');
-  // With a KYC server (app.json extra.apiUrl): /kyc/start right after onboarding completes (Confirm or hand check).
+  // With a KYC server (app.json extra.apiUrl): the Done screen shows the final KYC panel.
   const server = useKycServer();
   const dispatch = useCallback((e: OnboardingEvent) => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, e) })), [update]);
 
@@ -314,12 +314,8 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   // Bug 2: every failed read is counted; after enough of them (or with the reader unavailable) a hand check is offered.
   const onReadFailed = (field: KycField, unavailable: boolean) =>
     dispatch(unavailable ? { type: 'read-failed', field, unavailable: true } : { type: 'read-failed', field });
-  // With a server: POST /kyc/start as soon as onboarding completes (names, PAN, date of birth, Aadhaar last 4 and the
-  // device result; never the full Aadhaar). The Done screen then follows `next`; if the start fails it offers Start final KYC.
-  const startOnServer = (after: typeof ob) => {
-    const d = server ? startDetails(after) : null;
-    if (server && d?.dob) void server.start({ ...d, dob: d.dob });
-  };
+  // With a server the Done screen's panel asks the consent tick, then Start final KYC (POST /kyc/start); no start
+  // without that tick, so nothing starts on its own when onboarding completes (same as web).
   // Sends all three documents for a hand check: Under review, then the done screen (same as web).
   const onHandCheck = (): boolean => {
     if (!docs.selfie || !docs.aadhaar || !docs.pan) return false;
@@ -328,7 +324,6 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
     const after = onboardingReducer(ob, ev);
     if (after.step !== 'done') return false;
     dispatch(ev);
-    startOnServer(after);
     clearKyc(); // documents, checks and the full Aadhaar are dropped when onboarding completes
     return true;
   };
@@ -441,7 +436,6 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
           setConfirmError('');
           dispatch(ev);
           clearKyc(); // documents, checks and the full Aadhaar are dropped when onboarding completes
-          startOnServer(after);
         }} />
     );
   }

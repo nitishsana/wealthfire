@@ -2,7 +2,8 @@
 // /review/* (staff Cognito token, group 'reviewer'). Pure: the Lambda adapter (handlers/api.ts)
 // maps API Gateway events to HttpRequest and HttpResponse back.
 //
-// Every response is JSON with no-store caching, HSTS and nosniff. Errors use fixed messages and
+// Every response is JSON with no-store caching, HSTS and nosniff (the dev-only fake partner pages,
+// registered only when STAGE=dev, may answer text/html). Errors use fixed messages and
 // never echo a PAN, Aadhaar number, contact, OTP or token. Logs hold the route template, status
 // and latency only.
 import { AUTH_ERROR_MESSAGES } from './lib/errors';
@@ -35,17 +36,45 @@ export interface HttpResponse {
   cookies: string[];
 }
 
+/** Request passed to a dev-only fake partner page handler (no auth: the fake partner is public on dev). */
+export interface DevPartnerRequest {
+  method: string;
+  path: string;
+  params: Record<string, string>;
+  query: Record<string, string | undefined>;
+  headers: Record<string, string | undefined>;
+  body?: string;
+  ip: string;
+}
+
+/** Same shape as the other route responses; a string body with a text/html content type is sent as-is. */
+export interface DevPartnerResponse {
+  status: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}
+
+export type DevPartnerHandler = (req: DevPartnerRequest) => Promise<DevPartnerResponse>;
+
 export interface RouterDeps {
   auth: AuthRouteDeps;
   tokens: TokenService;
+  /** the kyc route map ('METHOD /path' -> handler); every key is registered as-is */
   kyc: Record<string, KycHandler>;
   review: Record<string, ReviewHandler>;
   staff: StaffVerifier;
-  /** CORS allow-list (exact origins) */
+  /** CORS allow-list (exact origins); also the Origin allow-list for the refresh cookie */
   allowedOrigins: readonly string[];
   logger: Logger;
   clock: { now(): number };
+  /** env STAGE; dev partner pages are registered only when this is exactly 'dev' */
+  stage?: string;
+  /** devPartnerRoutes(deps) from src/partner/devPages.ts (ignored unless stage === 'dev') */
+  devPartner?: Record<string, DevPartnerHandler>;
 }
+
+export const CORS_ALLOW_METHODS = 'GET, POST, DELETE, OPTIONS';
+export const CORS_ALLOW_HEADERS = 'content-type, authorization, idempotency-key, x-wf-client';
 
 const SECURITY_HEADERS: Record<string, string> = {
   'content-type': 'application/json; charset=utf-8',
@@ -74,6 +103,7 @@ function header(h: Record<string, string | undefined>, name: string): string | u
 export function serializeCookie(c: Cookie): string {
   return [
     `${c.name}=${c.value}`, `Max-Age=${c.maxAge}`, `Path=${c.path}`, 'HttpOnly', 'Secure', `SameSite=${c.sameSite}`,
+    ...(c.partitioned ? ['Partitioned'] : []),
   ].join('; ');
 }
 
@@ -121,6 +151,9 @@ export function createRouter(deps: RouterDeps): (req: HttpRequest) => Promise<Ht
   const authKeys = Object.keys(AUTH_ROUTES);
   const kycKeys = Object.keys(deps.kyc);
   const reviewKeys = Object.keys(deps.review);
+  const dev = deps.stage === 'dev' ? (deps.devPartner ?? {}) : {};
+  const devKeys = Object.keys(dev);
+  const authDeps: AuthRouteDeps = { ...deps.auth, allowedOrigins: deps.allowedOrigins };
 
   const respond = (req: HttpRequest, status: number, body: unknown, extra: Record<string, string> = {}, cookies: string[] = []): HttpResponse => {
     const headers: Record<string, string> = { ...SECURITY_HEADERS, ...extra };
@@ -130,7 +163,8 @@ export function createRouter(deps: RouterDeps): (req: HttpRequest) => Promise<Ht
       headers['access-control-allow-credentials'] = 'true';
       headers.vary = 'Origin';
     }
-    return { statusCode: status, headers, body: JSON.stringify(body ?? {}), cookies };
+    const html = typeof body === 'string' && /^text\/html\b/i.test(headers['content-type'] ?? '');
+    return { statusCode: status, headers, body: html ? (body as string) : JSON.stringify(body ?? {}), cookies };
   };
   const fail = (req: HttpRequest, k: ErrKey): HttpResponse => respond(req, ERR[k].status, { error: k, message: ERR[k].message });
 
@@ -141,8 +175,8 @@ export function createRouter(deps: RouterDeps): (req: HttpRequest) => Promise<Ht
       return {
         key: 'OPTIONS',
         res: respond(req, 204, {}, {
-          'access-control-allow-methods': 'GET, POST, OPTIONS',
-          'access-control-allow-headers': 'content-type, authorization, idempotency-key, x-wf-client',
+          'access-control-allow-methods': CORS_ALLOW_METHODS,
+          'access-control-allow-headers': CORS_ALLOW_HEADERS,
           'access-control-max-age': '600',
         }),
       };
@@ -153,8 +187,15 @@ export function createRouter(deps: RouterDeps): (req: HttpRequest) => Promise<Ht
 
     const a = matchRoute(authKeys, method, path);
     if (a) {
-      const r = await AUTH_ROUTES[a.key]!({ body: req.body, headers: req.headers, ip: req.ip }, deps.auth);
+      const r = await AUTH_ROUTES[a.key]!({ body: req.body, headers: req.headers, ip: req.ip }, authDeps);
       return { key: a.key, res: respond(req, r.status, r.body, {}, (r.cookies ?? []).map(serializeCookie)) };
+    }
+
+    // Dev-only fake partner pages (DigiLocker / e-sign); never registered outside STAGE=dev.
+    const d = devKeys.length ? matchRoute(devKeys, method, path) : null;
+    if (d) {
+      const r = await dev[d.key]!({ method, path, params: d.params, query: req.query ?? {}, headers: req.headers, body: req.body, ip: req.ip });
+      return { key: d.key, res: respond(req, r.status, r.body, r.headers ?? {}) };
     }
 
     const k = matchRoute(kycKeys, method, path);

@@ -108,10 +108,23 @@ export class Argon2Hasher implements SecretHasher {
 
 // ---------- Envelope encryption (AES-256-GCM) ----------
 
-/** Encrypts small values (contact, PAN). `context` is bound as AAD / KMS encryption context. */
+/**
+ * Encrypts small values (contact, PAN). `context` is bound as AAD / KMS encryption context and
+ * must carry `purpose: 'pan' | 'contact'` (S9: the field key policy allows only those purposes).
+ */
 export interface Encryptor {
   encrypt(plaintext: string, context: Record<string, string>): Promise<string>;
   decrypt(ciphertext: string, context: Record<string, string>): Promise<string>;
+}
+
+/** Allowed `purpose` values in a field-encryption context. */
+export const FIELD_PURPOSES = ['pan', 'contact'] as const;
+export type FieldPurpose = (typeof FIELD_PURPOSES)[number];
+
+/** Throws unless the context names an allowed purpose (no value is ever echoed). */
+export function assertFieldContext(context: Record<string, string>): void {
+  const p = context?.purpose;
+  if (!(FIELD_PURPOSES as readonly string[]).includes(p as string)) throw new Error('Encryption context needs purpose pan or contact');
 }
 
 function aad(context: Record<string, string>): Buffer {
@@ -144,11 +157,13 @@ export class LocalEncryptor implements Encryptor {
   }
 
   async encrypt(plaintext: string, context: Record<string, string>): Promise<string> {
+    assertFieldContext(context);
     const { iv, ct, tag } = gcmSeal(this.key, plaintext, context);
     return ['l1', iv, ct, tag].map((p) => (typeof p === 'string' ? p : toBase64Url(p))).join('.');
   }
 
   async decrypt(ciphertext: string, context: Record<string, string>): Promise<string> {
+    assertFieldContext(context);
     const [v, iv, ct, tag] = ciphertext.split('.');
     if (v !== 'l1' || !iv || ct === undefined || !tag) throw new Error('Bad ciphertext');
     return gcmOpen(this.key, fromBase64Url(iv), fromBase64Url(ct), fromBase64Url(tag), context);
@@ -156,13 +171,16 @@ export class LocalEncryptor implements Encryptor {
 }
 
 /**
- * KMS envelope encryption: a fresh data key per record (GenerateDataKey AES_256), value sealed
- * locally with AES-256-GCM, wrapped key stored alongside. Format: `k1.<wrappedKey>.<iv>.<ct>.<tag>`.
+ * KMS envelope encryption under the field key (env FIELD_KEY_ID, not the table/S3 DataKey): a
+ * fresh data key per record (GenerateDataKey AES_256), value sealed locally with AES-256-GCM,
+ * wrapped key stored alongside. Format: `k1.<wrappedKey>.<iv>.<ct>.<tag>`. The context (with its
+ * required purpose) is sent to KMS as the encryption context on both calls.
  */
 export class KmsEnvelopeEncryptor implements Encryptor {
   constructor(private readonly kms: Pick<KMSClient, 'send'>, private readonly keyId: string) {}
 
   async encrypt(plaintext: string, context: Record<string, string>): Promise<string> {
+    assertFieldContext(context);
     const dk = await this.kms.send(new GenerateDataKeyCommand({ KeyId: this.keyId, KeySpec: 'AES_256', EncryptionContext: context }));
     if (!dk.Plaintext || !dk.CiphertextBlob) throw new Error('KMS GenerateDataKey returned no key');
     const key = Buffer.from(dk.Plaintext);
@@ -175,6 +193,7 @@ export class KmsEnvelopeEncryptor implements Encryptor {
   }
 
   async decrypt(ciphertext: string, context: Record<string, string>): Promise<string> {
+    assertFieldContext(context);
     const [v, wrapped, iv, ct, tag] = ciphertext.split('.');
     if (v !== 'k1' || !wrapped || !iv || ct === undefined || !tag) throw new Error('Bad ciphertext');
     const out = await this.kms.send(new DecryptCommand({ KeyId: this.keyId, CiphertextBlob: fromBase64Url(wrapped), EncryptionContext: context }));

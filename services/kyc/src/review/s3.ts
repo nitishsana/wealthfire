@@ -33,10 +33,27 @@ export class S3DownloadSigner implements DownloadSigner {
   constructor(private readonly s3: S3Client, private readonly bucket: string) {}
 
   sign(key: string, expiresInSec: number): Promise<string> {
+    const disposition = contentDispositionFor(key);
     return getSignedUrl(
       this.s3,
-      new GetObjectCommand({ Bucket: this.bucket, Key: key, ResponseCacheControl: 'no-store' }),
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        ResponseCacheControl: 'no-store',
+        ...(disposition ? { ResponseContentDisposition: disposition } : {}),
+      }),
       { expiresIn: expiresInSec },
     );
   }
+}
+
+/**
+ * S14: a PDF is always downloaded (`attachment`), never rendered in the reviewer's browser, so a
+ * crafted PDF cannot run in the console's context. Images stay inline. The file name is fixed
+ * (kind + extension) so no user-controlled text reaches the header.
+ */
+export function contentDispositionFor(key: string): string | undefined {
+  const file = key.split('/').pop() ?? '';
+  if (!/\.pdf$/i.test(file)) return undefined;
+  return `attachment; filename="${kindOf(file)}.pdf"`;
 }

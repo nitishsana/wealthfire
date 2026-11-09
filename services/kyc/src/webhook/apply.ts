@@ -35,6 +35,34 @@ function refKeyFor(e: PartnerEvent): RefKey | undefined {
   return undefined;
 }
 
+/** S17: the event's ref must equal the ref this case stored for the step (both present). */
+export function refMatches(stored: string | undefined, given: string | undefined): boolean {
+  return typeof stored === 'string' && stored !== '' && typeof given === 'string' && stored === given;
+}
+
+/** E-sign result on a staff-approved (verified) case: record it; 'done' makes the KRA upload due. */
+function applyEsignAfterApprove(
+  before: KycCase,
+  evidenceIn: CaseEvidence,
+  e: Extract<PartnerEvent, { type: 'esign.completed' }>,
+  now: number,
+): ApplyResult {
+  const seenAt = evidenceIn.eventTs?.esign;
+  if (seenAt !== undefined && e.occurredAt < seenAt) return { kind: 'ignored', outcome: 'ignored-stale' };
+  const evidence: CaseEvidence = structuredClone(evidenceIn);
+  evidence.eventTs = { ...(evidence.eventTs ?? {}), esign: e.occurredAt };
+  const done = e.data.status === 'done';
+  evidence.esign = done ? 'done' : e.data.status === 'timeout' ? 'timeout' : 'pending';
+  const after: KycCase = {
+    ...before,
+    checks: done ? { ...before.checks, esign: 'pass' } : before.checks,
+    updatedAt: new Date(now).toISOString(),
+    version: before.version + 1,
+  };
+  // 'kra-upload' is run by GET /kyc/status (KycService.advance); until then the user redoes e-sign.
+  return { kind: 'applied', after, evidence, next: done ? 'kra-upload' : 'esign' };
+}
+
 function evidenceKeyFor(e: PartnerEvent): EvidenceKey | undefined {
   if (e.type === 'esign.completed') return 'esign';
   if (e.type === 'kra.upload') return 'kra-upload';
@@ -92,18 +120,34 @@ export function applyEvent(
   const check = e.type === 'kyc.result' ? e.data.check : undefined;
   const withCheck = check !== undefined ? { check } : {};
 
-  // KRA upload only follows a verified case; everything else stops at a terminal case.
+  // KRA upload only follows a verified case; e-sign may follow a staff Approve (R1); everything
+  // else stops at a terminal case.
   if (e.type === 'kra.upload') {
     if (before.status !== 'verified') return { kind: 'ignored', outcome: 'ignored-not-verified' };
+  } else if (e.type === 'esign.completed' && before.status === 'verified') {
+    if (evidenceIn.esign === 'done' || before.partnerRefs.kraUpload) {
+      return { kind: 'ignored', outcome: 'ignored-terminal' };
+    }
   } else if (TERMINAL.has(before.status)) {
     return { kind: 'ignored', outcome: 'ignored-terminal', ...withCheck };
   }
 
-  // A result for a different partner session (e.g. an abandoned e-sign) is not this case's.
+  // S17: an event for a ref-bound step (KRA lookup, Aadhaar, e-sign, KRA upload) must carry the
+  // partner ref this case stored when it started that step. A missing ref, a case with no stored
+  // ref (e.g. a late KRA result after the lookup timed out) or a different session's ref is
+  // refused: audited + logged as 'ignored-ref-mismatch', and the case stays as it is (an
+  // under-review case stays with staff). PAN and face results have no ref of their own.
   const refKey = refKeyFor(e);
   const storedRef = refKey ? before.partnerRefs[refKey] : undefined;
-  if (refKey && e.ref !== undefined && storedRef !== undefined && storedRef !== e.ref) {
+  if (refKey && !refMatches(storedRef, e.ref)) {
     return { kind: 'ignored', outcome: 'ignored-ref-mismatch', ...withCheck };
+  }
+
+  // R1: a staff-approved case that was never e-signed waits as verified with next 'esign'. Its
+  // e-sign result only records the signature and moves the case on to its KRA upload; it is
+  // never re-decided (staff already decided it).
+  if (e.type === 'esign.completed' && before.status === 'verified') {
+    return applyEsignAfterApprove(before, evidenceIn, e, now);
   }
 
   const evKey = evidenceKeyFor(e);
@@ -114,8 +158,8 @@ export function applyEvent(
 
   const evidence: CaseEvidence = structuredClone(evidenceIn);
   if (evKey) evidence.eventTs = { ...(evidence.eventTs ?? {}), [evKey]: e.occurredAt };
-  const partnerRefs = { ...before.partnerRefs, ...(refKey && e.ref !== undefined ? { [refKey]: e.ref } : {}) };
-  const base: KycCase = { ...before, partnerRefs, updatedAt: new Date(now).toISOString(), version: before.version + 1 };
+  // refs are set by the KYC routes when a step starts; the webhook only checks them (S17)
+  const base: KycCase = { ...before, partnerRefs: { ...before.partnerRefs }, updatedAt: new Date(now).toISOString(), version: before.version + 1 };
 
   if (e.type === 'kra.upload') {
     evidence.kraUpload = { status: e.data.status };

@@ -27,6 +27,7 @@ export const FEATURES = [
   { id: 'onboard-check', name: 'Onboarding: check typed numbers against the documents' },
   { id: 'onboard-review', name: 'Onboarding: account status and manual review (approve / reject, redo documents)' },
   { id: 'kyc-final-status', name: 'Final KYC: server status in Settings' },
+  { id: 'kyc-data-controls', name: 'Final KYC: withdraw consent and delete my KYC data in Profile' },
 ] as const;
 
 export type FeatureId = (typeof FEATURES)[number]['id'];

@@ -1,9 +1,9 @@
 // DynamoDB CaseStore + AuditStore (layout in ./types.ts). Uses the `kyc_cases` GSI `byStatus`
 // (partition status, sort updatedAt) and the `audit` table (partition userId, sort ts).
-import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { DocClient } from '../lib/repo';
 import {
-  BadCursorError, PAN_PREFIX, isCaseKey,
+  BadCursorError, PAN_PREFIX, archiveKey, archivedRecord, isCaseKey,
   type AuditRow, type AuditStore, type CasePage, type CaseStore, type CaseUpdate, type KycCaseRecord,
 } from './types';
 
@@ -139,6 +139,68 @@ export class DynamoCaseStore implements CaseStore {
         Item: { userId: PAN_PREFIX + panHash, ownerId: userId },
         ConditionExpression: 'attribute_not_exists(userId) OR ownerId = :me',
         ExpressionAttributeValues: { ':me': userId },
+      }));
+      return true;
+    } catch (e) {
+      if (isConditionFailure(e)) return false;
+      throw e;
+    }
+  }
+
+  async releasePan(panHash: string, userId: string): Promise<void> {
+    try {
+      await this.doc.send(new DeleteCommand({
+        TableName: this.table,
+        Key: { userId: PAN_PREFIX + panHash },
+        ConditionExpression: 'ownerId = :me',
+        ExpressionAttributeValues: { ':me': userId },
+      }));
+    } catch (e) {
+      if (!isConditionFailure(e)) throw e; // gone already, or another account's claim
+    }
+  }
+
+  async archive(userId: string, expectedVersion: number, archivedAt: string, audit: AuditRow): Promise<boolean> {
+    if (!isCaseKey(userId)) return false;
+    const cur = await this.get(userId);
+    if (!cur || cur.version !== expectedVersion) return false;
+    try {
+      await this.doc.send(new TransactWriteCommand({
+        TransactItems: [
+          // the archive item has no `status`, so it never shows in the byStatus GSI (review queue)
+          {
+            Put: {
+              TableName: this.table, Item: { userId: archiveKey(userId, archivedAt), archivedAt, record: archivedRecord(cur) },
+              ConditionExpression: 'attribute_not_exists(userId)',
+            },
+          },
+          {
+            Delete: {
+              TableName: this.table, Key: { userId }, ConditionExpression: 'version = :v', ExpressionAttributeValues: { ':v': expectedVersion },
+            },
+          },
+          { Put: auditPut(this.auditTable, audit) },
+        ],
+      }));
+      return true;
+    } catch (e) {
+      if (isConditionFailure(e)) return false;
+      throw e;
+    }
+  }
+
+  async remove(userId: string, expectedVersion: number, audit: AuditRow): Promise<boolean> {
+    if (!isCaseKey(userId)) return false;
+    try {
+      await this.doc.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Delete: {
+              TableName: this.table, Key: { userId }, ConditionExpression: 'version = :v', ExpressionAttributeValues: { ':v': expectedVersion },
+            },
+          },
+          { Put: auditPut(this.auditTable, audit) },
+        ],
       }));
       return true;
     } catch (e) {

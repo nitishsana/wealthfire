@@ -8,6 +8,7 @@ import {
 import { useStore } from '../store';
 import { useNav, type TabKey } from '../nav';
 import { FireTypePicker, FireTypesCompare } from './FireTypes';
+import { KycDataControls } from '../server';
 import { Bar, Btn, Card, Chips, Field, Line, Mix, NumField, s, Screen, Stat, Stats, Tips } from '../ui';
 
 const STATUS_TEXT = { on_track: 'On track', close: 'Almost there', off_track: 'Off track' } as const;
@@ -132,6 +133,8 @@ export function ProfileScreen() {
         {error ? <Text style={{ color: '#ff6b6b' }} accessibilityRole="alert">{error}</Text> : null}
         <Btn primary title="Save profile" onPress={save} />
       </Card>
+      {/* Server mode only; renders nothing until the server says a KYC case exists (same as web). */}
+      <KycDataControls />
     </Screen>
   );
 }

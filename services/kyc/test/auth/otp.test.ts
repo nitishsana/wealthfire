@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { OTP_RULES } from '@wealthfire/core';
 import { AuthError } from '../../src/lib/errors';
-import { contactLookup, normalizeContact, OTP_LIMITS } from '../../src/auth/otp';
+import { challengeContactContext, contactLookup, normalizeContact, OTP_LIMITS } from '../../src/auth/otp';
+import { otpFailureEmf } from '../../src/lib/metrics';
 import { EMAIL, MOBILE, setup } from './helpers';
 
 const IP = '203.0.113.7';
@@ -194,5 +195,130 @@ describe('OtpService.verify', () => {
     const e = await errOf(otp.verify({ challengeId: a.challengeId, code: wrong }));
     const text = `${e.message} ${e.stack} ${JSON.stringify(e)}`;
     for (const secret of [right, wrong, '9876543210', a.challengeId]) expect(text).not.toContain(secret);
+  });
+});
+
+describe('OTP abuse limits (S3)', () => {
+  const wrongOf = (code: string) => (code === '000000' ? '111111' : '000000');
+
+  it('limits are 10 sends per target per day, 3 failed challenges -> 1 h lockout, 30 verifies per IP per hour', () => {
+    expect(OTP_LIMITS).toMatchObject({
+      maxSendsPerTargetDay: 10, targetDayWindowMs: 86_400_000, maxFailedChallenges: 3, failWindowMs: 86_400_000,
+      lockoutMs: 3_600_000, maxVerifiesPerIp: 30, verifyIpWindowMs: 3_600_000,
+    });
+  });
+
+  it('caps sends per target at 10 per 24 h', async () => {
+    const { otp, clock, metrics } = setup();
+    const start = clock.now();
+    for (let i = 0; i < 10; i++) {
+      await otp.send({ kind: 'mobile', contact: MOBILE, ip: `198.51.100.${i}` });
+      clock.advance(11 * 60_000);
+    }
+    const e = await errOf(otp.send({ kind: 'mobile', contact: MOBILE, ip: '198.51.100.99' }));
+    expect(e.code).toBe('rate_limited');
+    expect(e.retryAfterMs).toBe(start + 86_400_000 - clock.now());
+    expect(metrics.count('send-limited')).toBe(1);
+    // another target is fine; the capped one opens again when the first send leaves the window
+    await expect(otp.send({ kind: 'mobile', contact: '9123456789', ip: '198.51.100.99' })).resolves.toBeTruthy();
+    clock.advance(e.retryAfterMs!);
+    await expect(otp.send({ kind: 'mobile', contact: MOBILE, ip: '198.51.100.99' })).resolves.toBeTruthy();
+  });
+
+  it('3 failed challenges in 24 h lock the target for 1 h (send and verify)', async () => {
+    const { otp, sender, clock, metrics, repos } = setup();
+    for (let i = 0; i < 2; i++) {
+      const a = await otp.send({ kind: 'email', contact: EMAIL, ip: IP });
+      // the first wrong code marks the challenge failed; more wrong codes on it do not add up
+      await errOf(otp.verify({ challengeId: a.challengeId, code: wrongOf(sender.lastCode!), ip: IP }));
+      await errOf(otp.verify({ challengeId: a.challengeId, code: wrongOf(sender.lastCode!), ip: IP }));
+      clock.advance(11 * 60_000);
+    }
+    const third = await otp.send({ kind: 'email', contact: EMAIL, ip: IP });
+    const right = sender.lastCode!;
+    const e = await errOf(otp.verify({ challengeId: third.challengeId, code: wrongOf(right), ip: IP }));
+    expect(e).toMatchObject({ code: 'invalid_code', triesLeft: 0 });
+    expect(repos.otp.challengeCount()).toBe(0);
+    expect(metrics.count('lockout-started')).toBe(1);
+    // the right code is useless now, and no new code can be sent
+    expect((await errOf(otp.verify({ challengeId: third.challengeId, code: right, ip: IP }))).code).toBe('invalid_code');
+    clock.advance(60_000);
+    const locked = await errOf(otp.send({ kind: 'email', contact: EMAIL.toLowerCase(), ip: IP }));
+    expect(locked).toMatchObject({ code: 'rate_limited', retryAfterMs: 59 * 60_000 });
+    expect(metrics.count('locked')).toBe(1);
+    // other targets are not locked
+    await expect(otp.send({ kind: 'email', contact: 'other@example.com', ip: IP })).resolves.toBeTruthy();
+    // after the hour, sign-in works again
+    clock.advance(59 * 60_000);
+    const ok = await otp.send({ kind: 'email', contact: EMAIL, ip: IP });
+    await expect(otp.verify({ challengeId: ok.challengeId, code: sender.lastCode!, ip: IP })).resolves.toMatchObject({ isNewUser: true });
+  });
+
+  it('a 4th failure inside the same 24 h locks again', async () => {
+    const { otp, sender, clock } = setup();
+    for (let i = 0; i < 3; i++) {
+      const a = await otp.send({ kind: 'mobile', contact: MOBILE, ip: IP });
+      await errOf(otp.verify({ challengeId: a.challengeId, code: wrongOf(sender.lastCode!), ip: IP }));
+      clock.advance(11 * 60_000);
+    }
+    clock.advance(60 * 60_000);
+    const a = await otp.send({ kind: 'mobile', contact: MOBILE, ip: IP });
+    await errOf(otp.verify({ challengeId: a.challengeId, code: wrongOf(sender.lastCode!), ip: IP }));
+    clock.advance(30_000);
+    expect((await errOf(otp.send({ kind: 'mobile', contact: MOBILE, ip: IP }))).code).toBe('rate_limited');
+  });
+
+  it('a correct first code never counts as a failure', async () => {
+    const { otp, sender, clock, metrics } = setup();
+    for (let i = 0; i < 4; i++) {
+      const a = await otp.send({ kind: 'mobile', contact: MOBILE, ip: IP });
+      await otp.verify({ challengeId: a.challengeId, code: sender.lastCode!, ip: IP });
+      clock.advance(11 * 60_000);
+    }
+    expect(metrics.count('wrong-code')).toBe(0);
+    await expect(otp.send({ kind: 'mobile', contact: MOBILE, ip: IP })).resolves.toBeTruthy();
+  });
+
+  it('limits verify calls to 30 per IP per hour', async () => {
+    const { otp, clock, metrics } = setup();
+    for (let i = 0; i < 30; i++) {
+      expect((await errOf(otp.verify({ challengeId: 'A'.repeat(22), code: '123456', ip: IP }))).code).toBe('invalid_code');
+    }
+    const e = await errOf(otp.verify({ challengeId: 'A'.repeat(22), code: '123456', ip: IP }));
+    expect(e).toMatchObject({ code: 'rate_limited', retryAfterMs: 3_600_000 });
+    expect(metrics.count('verify-limited')).toBe(1);
+    expect(metrics.count('dead-challenge')).toBe(30);
+    expect((await errOf(otp.verify({ challengeId: 'A'.repeat(22), code: '123456', ip: '198.51.100.1' }))).code).toBe('invalid_code');
+    clock.advance(3_600_000);
+    expect((await errOf(otp.verify({ challengeId: 'A'.repeat(22), code: '123456', ip: IP }))).code).toBe('invalid_code');
+  });
+
+  it('failure metrics carry a reason and kind only (no contact, hash, IP or code)', async () => {
+    const { otp, sender, metrics, mac } = setup();
+    const a = await otp.send({ kind: 'mobile', contact: MOBILE, ip: IP });
+    const code = sender.lastCode!;
+    await errOf(otp.verify({ challengeId: a.challengeId, code: wrongOf(code), ip: IP }));
+    sender.fail = true;
+    await errOf(otp.send({ kind: 'email', contact: EMAIL, ip: IP }));
+    expect(metrics.events).toEqual([{ reason: 'wrong-code', kind: 'mobile' }, { reason: 'send-failed', kind: 'email' }]);
+    const text = JSON.stringify(metrics.events);
+    const hash = await contactLookup(mac, 'mobile', '9876543210');
+    for (const s of ['9876543210', 'asha', IP, code, wrongOf(code), a.challengeId, hash]) expect(text.toLowerCase()).not.toContain(s.toLowerCase());
+  });
+
+  it('EMF line names the metric and reason only', () => {
+    const line = otpFailureEmf({ reason: 'locked', kind: 'email' }, 1);
+    expect(line).toMatchObject({ event: 'otp_failure', Reason: 'locked', kind: 'email', OtpFailures: 1 });
+    expect((line._aws as { CloudWatchMetrics: unknown[] }).CloudWatchMetrics).toEqual([
+      { Namespace: 'Wealthfire/Kyc', Dimensions: [['Reason']], Metrics: [{ Name: 'OtpFailures', Unit: 'Count' }] },
+    ]);
+  });
+
+  it('challenge contacts are encrypted with purpose contact (field key)', async () => {
+    const { otp, repos, encryptor } = setup();
+    const a = await otp.send({ kind: 'mobile', contact: MOBILE, ip: IP });
+    const c = (await repos.otp.getChallenge(a.challengeId))!;
+    expect(await encryptor.decrypt(c.contactEnc, challengeContactContext(a.challengeId))).toBe('9876543210');
+    expect(challengeContactContext('x')).toEqual({ purpose: 'contact', challengeId: 'x' });
   });
 });
