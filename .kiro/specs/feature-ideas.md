@@ -105,6 +105,56 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - Profile already has: name, age, city, dependents, take-home pay, current SIP, retire age, plan-till age, optional monthly spend, FIRE goal picker (Lean / FIRE / Barista / Fat), part-time income for Barista (PR #1, PR #4).
 - FIRE plan already shows: FIRE number, projected corpus, SIP needed with yearly step-up, earliest FIRE age, and a side-by-side table of all 4 FIRE types with corpus, SIP and FIRE age. Lean = 70% of spend, FIRE = 100%, Barista = spend minus part-time income, Fat = 150% (PR #4).
 
+### The video's method (Kirttan Shah, DIY retirement planning, shared by Nitish)
+
+- No government pension in India: active income stops near 60, so build a corpus that lasts to 85 or beyond.
+- Start from monthly expenses **excluding EMIs**, because loans should be paid off before retirement.
+- Inflate them (e.g. 6%) to the retirement date, then work out the **lump sum needed at retirement** for the years to the life-expectancy age.
+- Split the corpus into 3 buckets:
+  1. **Liquidity (Bucket 1):** 3 years of expenses in arbitrage funds.
+  2. **Income (Bucket 2):** the rest, in hybrid funds, drawn with a systematic withdrawal plan.
+  3. **Wealth (Bucket 3):** 20% of the corpus in equity funds, for long-term growth.
+- Its bucket rule (3 years / the rest / 20%) differs from Idea 1 (2-3 years / 5 years / the rest). The spec picks one, or offers both.
+
+### The sheet (Retirement Planner Sheet, shared 2026-11-09)
+
+The sheet came as a CSV, which keeps values but not formulas. The formulas below were worked out from its values and reproduce every number in it exactly. A local copy is kept outside the repo: `wealthfire-tc\Retirement_Planner_Sheet.csv`. It is a third-party sheet, so only the method is stored here.
+
+**Inputs**
+
+| Input | Sheet example | Note in the sheet |
+|---|---|---|
+| Current age | 38 | |
+| Retirement age | 55 | |
+| Live up to | 85 | Life expectancy |
+| Monthly expenses, excluding EMI | 1,00,000 | |
+| Inflation rate | 6% | 6% is a fair expectation |
+| Rate of return after retirement | 2% | Assumed low, because rates fall over time |
+| Estate to leave behind | (blank) | Amount left after you |
+| Existing investments for retirement | 10,00,000 | Current value |
+| EPF, gratuity, leave encashment, NPS expected | 11,00,000 | Received at retirement |
+| Rate of return before retirement | 10% | Use 9-10% if mostly fixed income |
+
+**Formulas** (Y = retirement age minus current age; N = live-up-to minus retirement age)
+
+| Output | Formula | Sheet example |
+|---|---|---|
+| Monthly expense at retirement | expense x (1 + inflation)^Y | 2,69,277.28 |
+| Yearly expense at retirement (E) | monthly x 12 | 32,31,327 |
+| Corpus needed at retirement (C) | Excel `PV(post-return, N, -E, -estate, 1)`, paid at the start of each year | 7,38,17,685 |
+| Monthly SIP needed | Excel `PMT(pre-return/12, Y x 12, existing, -(C - EPF), 1)`: existing investments compound monthly at the pre-retirement return; SIP paid at the start of each month | 1,25,363 (if the result is 0 or less, no SIP is needed) |
+| Bucket 1 | 3 x E | 96,93,982 |
+| Bucket 3 | 20% x C | 1,47,63,537 |
+| Bucket 2 | C - Bucket 1 - Bucket 3 | 4,93,60,166 |
+| Bucket 2 lasts (years) | Excel `NPER(post-return, -E, Bucket 2, 0, 1)` | 17.98 |
+| Bucket 3 grows to | Bucket 3 x (1 + pre-return)^(3 + Bucket 2 years) | 10,90,13,205 |
+
+Note: the sheet keeps the yearly expense flat after retirement and uses the low 2% return to allow for that, rather than adding inflation every year.
+
+**Golden test:** with the inputs above, the app must show exactly the sheet's outputs (to the rupee, and 17.98 years).
+
+**Lean / FIRE / Barista / Fat:** the sheet has one goal. Each FIRE type changes the expense used: today Lean = 70%, FIRE = 100%, Fat = 150%, Barista = expense minus part-time income. Then the same formulas run for each type, giving a corpus and SIP per type.
+
 ### Questions to settle in the spec (once the Excel sheet is in)
 
 - Which inputs from the sheet are missing in Profile today (for example current corpus, existing investments, expected return, inflation, step-up, life expectancy, withdrawal rate, one-off goals)?
