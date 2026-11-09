@@ -20,6 +20,12 @@ const docReader = {
   // Dev builds only: pick the demo reader's mode (match | misread | different | unreadable). Never shown in the UI.
   demoMode: __DEV__ && typeof extra.demoReaderMode === 'string' ? extra.demoReaderMode : undefined,
 };
+// Final KYC server (services/kyc, design §6). Not set, so onboarding and Settings stay device-only (demo OTP, device status).
+// Set extra.apiUrl (HTTPS) to use it; extra.kycRedirectOrigins lists extra partner page origins (comma separated).
+const kycServer = {
+  apiUrl: typeof extra.apiUrl === 'string' && extra.apiUrl ? extra.apiUrl : undefined,
+  redirectOrigins: typeof extra.kycRedirectOrigins === 'string' && extra.kycRedirectOrigins ? extra.kycRedirectOrigins : undefined,
+};
 
 export default function App() {
   const [tab, setTab] = useState<TabKey>('home');
@@ -45,7 +51,7 @@ export default function App() {
   return (
     <>
       <StatusBar style="light" />
-      <WealthfireApp platform="android" google={{ androidClientId: appJson.expo.extra.googleAndroidClientId || undefined }} otp={otp} docReader={docReader} onboardingBack={onboardingBack} tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
+      <WealthfireApp platform="android" google={{ androidClientId: appJson.expo.extra.googleAndroidClientId || undefined }} otp={otp} docReader={docReader} kycServer={kycServer} onboardingBack={onboardingBack} tab={tab} setTab={(t) => { if (t !== tab) history.current.push(tab); setTab(t); }} />
     </>
   );
 }

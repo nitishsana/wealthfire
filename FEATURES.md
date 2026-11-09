@@ -4,7 +4,21 @@ Only features that are merged into `main` are listed here.
 Each row is: Date (merge date, IST) · Category (app section) · Feature description.
 Features apply to web, Android and iOS unless the row says otherwise.
 
-Last updated: 2026-11-06 (PR #7)
+Last updated: 2026-11-09 (PR #10)
+
+## The apps and what each is for
+
+Wealthfire is made of these apps. They must always stay in sync (rule: `.kiro/steering/apps-in-sync.md`).
+
+| App | Where it runs | Who uses it | What it is for |
+|---|---|---|---|
+| Wealthfire app | Web (`apps/web`), Android (`apps/android`), iOS (`apps/ios`); shared code in `packages/core` and `packages/mobile-ui` | Investors | The FIRE planner itself: onboarding, profile, risk, net worth, expenses, FIRE plan, portfolio, buckets, progress. In server mode it also runs the final KYC (consent ticks, DigiLocker, selfie and documents, e-sign, Profile data controls). |
+| KYC server | `services/kyc` (AWS Lambda online; `npm run local` on the laptop) | The app and the review console | Does the real KYC work: sign-in OTP, consent records, KYC checks with the partner, document uploads, e-sign, staff decisions, audit. It is the only place that can make a user Verified. |
+| Review console | `services/kyc/review-console` (static site online; port 5182 on the laptop) | Wealthfire staff (reviewers) | Lets staff open Under-review cases, see the linked documents and Approve or Reject them. |
+| Local test home | Served by the local KYC server at http://127.0.0.1:5181/ | Nitish, testers | One page to test everything on the laptop: sign in to the app as a test investor, sign in to the console as the demo reviewer, reset local data, open the test cases. Local only, never online. |
+| Infra | `services/kyc/infra` (AWS CDK) | Deploys only | Describes the AWS setup for the KYC server and console (ap-south-1). Nothing is deployed until Nitish says yes (see `.kiro/specs/final-kyc-service/go-online-tasks.md`). |
+
+The KYC server, review console, local test home and final KYC in the app were merged in PR #10. They run on the laptop only; going online is listed in `.kiro/specs/final-kyc-service/go-online-tasks.md`.
 
 ## Platform (all apps)
 
@@ -16,6 +30,10 @@ Last updated: 2026-11-06 (PR #7)
 | 2026-11-06 | Platform | Parity check fails CI if any platform is missing a feature or colors differ (PR #1) |
 | 2026-11-06 | Platform | All data stays on the device (browser storage / phone storage); no server (PR #1) |
 | 2026-11-06 | Platform | Not-advice disclaimer on every page (PR #1) |
+| 2026-11-09 | Platform | KYC server (`services/kyc`): OTP sign-in, consent records, partner checks (FakePartner for now), document uploads with type checks, e-sign, KRA upload after staff approval, signed webhooks, audit; AWS CDK infra in ap-south-1, not deployed (PR #10) |
+| 2026-11-09 | Platform | Staff review console: open Under-review cases, see linked documents, approve or reject (PR #10) |
+| 2026-11-09 | Platform | Local test mode, no AWS: local KYC server and console on the laptop, DEMO OTP code on screen, demo reviewer sign-in, Local test home with 6 test users and separate sign-ins, Reset local data; one launcher starts everything (PR #10) |
+| 2026-11-09 | Platform | Section links work in path form too (`/profile` opens Profile) (PR #10) |
 
 ## Onboarding
 
@@ -29,6 +47,10 @@ Last updated: 2026-11-06 (PR #7)
 | 2026-11-06 | Onboarding | On-device document reading (Tesseract.js + pdf.js on web, ML Kit on phones); wrong, masked or multi-card documents rejected (PR #7) |
 | 2026-11-06 | Onboarding | Check numbers and names against the documents; re-check limit; hand-check fallback; result Pre-verified or Under review, Verified only after final KYC (PR #7) |
 | 2026-11-06 | Onboarding | Settings Account card: masked contact, PAN and Aadhaar, account status, Sign out, Redo documents (PR #7) |
+| 2026-11-09 | Onboarding | Date of birth asked (18+) (PR #10) |
+| 2026-11-09 | Onboarding | Final KYC with the KYC server: consent ticks, KYC record lookup, DigiLocker, selfie and 3 documents, e-sign; Verified only after final KYC; Try again when the partner is slow (PR #10) |
+| 2026-11-09 | Onboarding | Sign out keeps the finished onboarding; signing in again with the same contact opens the planner (PR #10) |
+| 2026-11-09 | Onboarding | Check numbers: PAN choice kept after Back, 'No re-checks left for this card.', no hand-check offer once a locked e-Aadhaar opens, Aadhaar name read across blank lines, reading % never goes down (PR #10) |
 
 ## Home
 
@@ -48,6 +70,7 @@ Last updated: 2026-11-06 (PR #7)
 | 2026-11-06 | Profile | Option to type monthly spend instead of using expenses (PR #1) |
 | 2026-11-06 | Profile | Pick FIRE goal: Lean, FIRE, Barista or Fat (PR #4) |
 | 2026-11-06 | Profile | Part-time income box for Barista FIRE (default 40% of spend) (PR #4) |
+| 2026-11-09 | Profile | Your KYC data: 'Withdraw consent' and 'Delete my KYC data', each behind an accessible confirm (PR #10) |
 
 ## Risk
 
@@ -55,6 +78,7 @@ Last updated: 2026-11-06 (PR #7)
 |---|---|---|
 | 2026-11-06 | Risk | 6-question quiz plus age adjustment gives a score of 0–100 (PR #1) |
 | 2026-11-06 | Risk | Profiles: Conservative, Moderate, Balanced, Growth, Aggressive (PR #1) |
+| 2026-11-09 | Risk | No score until all 6 questions are answered (PR #10) |
 
 ## Net worth
 
@@ -74,6 +98,7 @@ Last updated: 2026-11-06 (PR #7)
 | 2026-11-06 | Expenses | Connect Gmail (read-only) to read card spend alert emails into expenses (PR #2) |
 | 2026-11-06 | Expenses | Gmail skips refunds, OTPs, payments and declines; never adds the same spend twice (PR #2) |
 | 2026-11-06 | Expenses | Gmail connect moved into Expenses as a card (no separate tab); later syncs read only new mail (PR #3) |
+| 2026-11-09 | Expenses | Bank statement CSVs with debits as negative amounts import as spends (PR #10) |
 
 ## FIRE plan
 

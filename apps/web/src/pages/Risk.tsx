@@ -1,4 +1,4 @@
-import { computeRiskScore, isRiskComplete, RISK_QUESTIONS } from '@wealthfire/core';
+import { computeRiskScore, isRiskComplete, RISK_INCOMPLETE_TEXT, RISK_QUESTIONS } from '@wealthfire/core';
 import { Link } from 'react-router-dom';
 import { useStore } from '../store';
 import { Bar, Card, Page } from '../ui';
@@ -37,7 +37,7 @@ export function RiskPage() {
             <Link className="btn primary" to="/portfolio">See my portfolio</Link>
           </>
         ) : (
-          <p className="muted">Answer all {RISK_QUESTIONS.length} questions to see your score.</p>
+          <p className="muted">{RISK_INCOMPLETE_TEXT}</p>
         )}
       </Card>
     </Page>

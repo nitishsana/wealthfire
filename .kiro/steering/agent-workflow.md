@@ -50,6 +50,16 @@ Chief of Staff (master orchestrator, the main session; only voice to Nitish)
 - Each builder gets: its task numbers, the files it owns, the checks it must pass, and when to stop. Two builders never edit the same file. Work that depends on another part waits for that part.
 - Builders report only to the orchestrator. The orchestrator merges the parts and gives Nitish one combined report.
 
+## 2a. Bug fixes: many fixers, one orchestrator
+
+Bug lists (from reviewers or testers) are fixed the same way as features, never by one agent working through the list alone.
+
+- The **Chief of Staff** is the one orchestrator for the fix batch. It groups the bugs by the files they touch and starts one **fixer** agent per group, all at the same time, as many as the bugs allow.
+- Each fixer gets: its bug ids, the evidence (steps, expected vs actual, screenshots), the files it owns, the tests it must add, and when to stop. Two fixers never edit the same file. A bug that spans groups goes to one fixer, with a contract for the others.
+- Every fix gets a test that fails before it and passes after it, and updates the test cases it changes.
+- Fixers report only to the orchestrator. It runs all checks on the combined result, commits, and gives Nitish one report.
+- Then independent testers (see `testing.md`) retest every fixed case before any push or merge.
+
 ## 3. Independent plan check
 
 - A separate **reviewer** agent, not the orchestrator and not a builder, checks the finished work against the approved `requirements.md`, `design.md` and `tasks.md`.

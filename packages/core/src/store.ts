@@ -5,7 +5,7 @@ import type {
 import { DEFAULT_ASSUMPTIONS } from './fire';
 // Circular with onboarding.ts, safe: both sides only call each other inside functions.
 import {
-  normalizeEmail, normalizeMobile, normalizePan, validateEmail, validateMobile, validateName, validatePan,
+  normalizeDob, normalizeEmail, normalizeMobile, normalizePan, validateDob, validateEmail, validateMobile, validateName, validatePan,
 } from './onboarding';
 
 export const STORAGE_KEY = 'wealthfire.data.v1';
@@ -43,7 +43,7 @@ export interface SanitizeOptions {
 }
 
 const STEPS: readonly OnboardingStep[] = ['signin', 'otp', 'identity', 'aadhaar-otp', 'documents', 'check', 'done'];
-const PROVIDERS: readonly OtpProviderId[] = ['demo', 'digilocker', 'digio'];
+const PROVIDERS: readonly OtpProviderId[] = ['demo', 'digilocker', 'digio', 'http'];
 const READERS: readonly DocReaderId[] = ['ondevice', 'demo', 'digio', 'hyperverge'];
 const MATCHES: readonly KycMatch[] = ['matched', 'review'];
 const STATUSES: readonly KycStatus[] = ['pre-verified', 'verified', 'under-review', 'rejected'];
@@ -139,6 +139,9 @@ export function sanitizeOnboarding(raw: unknown, opts?: SanitizeOptions): Onboar
     !validateName(i.firstName) && !validateName(i.lastName) && !validatePan(i.pan)
   ) {
     out.identity = { firstName: i.firstName.trim(), lastName: i.lastName.trim(), pan: normalizePan(i.pan) };
+    // dob is optional (users who onboarded before it was asked); an invalid / under-18 dob is
+    // dropped on its own, keeping the identity and the step. needsDob() then asks for it again.
+    if (isStr(i.dob) && !validateDob(i.dob)) out.identity.dob = normalizeDob(i.dob);
   }
   const a = r.aadhaar as Record<string, unknown> | null | undefined;
   if (
@@ -181,6 +184,20 @@ export function sanitizeOnboarding(raw: unknown, opts?: SanitizeOptions): Onboar
   if (out.step === 'check' && (reload || clamped || !out.kyc.documentsAt)) out.step = 'documents';
   out.completedAt = out.step === 'done' && isStr(r.completedAt) ? r.completedAt : null;
   if (out.step === 'done' && !out.completedAt) out.completedAt = out.aadhaar?.verifiedAt ?? null;
+  // After Sign out (TC-37): the finished onboarding's contact, kept only while signing in again and only
+  // while the finished data (identity, Aadhaar, KYC result) is still there.
+  const so = r.signedOut as Record<string, unknown> | null | undefined;
+  if (so && typeof so === 'object' && isStr(so.value) && (out.step === 'signin' || out.step === 'otp') &&
+    out.identity && out.aadhaar && out.kyc.match && out.kyc.status) {
+    const kind = so.kind === 'email' ? 'email' : so.kind === 'mobile' ? 'mobile' : null;
+    const ok = kind === 'email' ? !validateEmail(so.value) : kind === 'mobile' ? !validateMobile(so.value) : false;
+    if (kind && ok) {
+      out.signedOut = {
+        kind, value: kind === 'email' ? normalizeEmail(so.value) : normalizeMobile(so.value),
+        completedAt: isStr(so.completedAt) ? so.completedAt : out.aadhaar.verifiedAt,
+      };
+    }
+  }
   return out;
 }
 

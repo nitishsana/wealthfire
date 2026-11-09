@@ -11,6 +11,8 @@ GitHub `main` is the source of truth. Chat history is not.
    - `.kiro/steering/git-workflow.md`: batch features, preview, ask before push/merge
    - `.kiro/steering/feature-log.md`: how to update the feature log
    - `.kiro/steering/agent-workflow.md`: design first, one orchestrator with parallel builders, an independent plan reviewer, and a full-flow bug check before merge
+   - `.kiro/steering/apps-in-sync.md`: a change to one app updates every app it touches
+   - `.kiro/steering/testing.md`: independent testers run all test cases before any push
    - `FEATURES.md`: everything merged so far
 4. `git log --oneline -15` to see recent changes, including ones made outside this tool.
 

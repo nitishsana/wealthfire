@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import {
-  canFinalApprove, DEFAULT_ASSUMPTIONS, demoData, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewRowReasonText, serialize,
+  accountStatusNote, DEFAULT_ASSUMPTIONS, demoData, showDemoReviewer, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewRowReasonText, serialize,
   type Assumptions,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { documentReader } from '../docreader';
 import { DATA_DELETED_TEXT, markDataDeleted } from './Onboarding';
+import { kycServer } from '../server';
+import { ServerKyc, startDetails } from '../components/ServerKyc';
 import { Card, NumberField, Page } from '../ui';
 
 const FIELDS: { key: keyof Assumptions; label: string; step: number }[] = [
@@ -46,23 +48,33 @@ export function SettingsPage() {
               {ob.aadhaar ? <>{maskAadhaar(ob.aadhaar.last4)} <span className="badge">OTP verified</span></> : '—'}
             </dd>
           </dl>
+          {/* R5: with a KYC server its status decides (the device value is a cache); without one the device status shows. */}
+          <div data-feature="kyc-final-status">
+          {kycServer && <ServerKyc client={kycServer} details={startDetails(ob)} />}
           <div data-feature="onboard-review" className="account-status">
             {/* Live region on the text only, not on the block holding the button (Bug 10). */}
             <p role="status">
-              Account status: <strong>{kycStatusLabel(ob.kyc.status)}</strong>
+              {kycServer ? 'Device check: ' : 'Account status: '}<strong>{kycStatusLabel(ob.kyc.status)}</strong>
               {ob.kyc.status === 'rejected' && ob.kyc.review?.decision?.reason ? <> ({ob.kyc.review.decision.reason})</> : null}
             </p>
+            {accountStatusNote(ob.kyc.status) && <p className="muted">{accountStatusNote(ob.kyc.status)}</p>}
             {ob.kyc.status === 'rejected' && (
               <button className="btn primary" onClick={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'redo-documents' }) }))}>Redo documents</button>
             )}
           </div>
+          </div>
           <p className="muted small">Signing out keeps your financial data in this browser.</p>
-          <button className="btn" onClick={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'sign-out' }) }))}>Sign out</button>
+          <button className="btn" onClick={() => {
+            // With a server, also end the server session (clears the in-memory token and the refresh cookie).
+            if (kycServer) void kycServer.logout().catch(() => undefined);
+            update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'sign-out' }) }));
+          }}>Sign out</button>
         </Card>
       </div>
       {/* G2: dev builds only; the production bundle drops the Demo reviewer entirely. */}
-      {/* Shown only while a final KYC approval can be given (pre-verified or under review). */}
-      {import.meta.env.DEV && documentReader.isDemo && canFinalApprove(ob.kyc) && <DemoReviewer />}
+      {/* Shown only while a final KYC approval can be given (pre-verified or under review), and never with a
+          KYC server (F8: Verified then comes only from the server). */}
+      {showDemoReviewer({ dev: import.meta.env.DEV, demoReader: documentReader.isDemo, serverConfigured: !!kycServer, kyc: ob.kyc }) && <DemoReviewer />}
       <Card title="Assumptions (% per year)">
         <div className="form-grid">
           {FIELDS.map((f) => (

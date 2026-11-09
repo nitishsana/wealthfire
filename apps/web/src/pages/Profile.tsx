@@ -2,6 +2,8 @@ import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DEFAULT_BARISTA_SHARE, FIRE_TYPES, prefillProfileName, type Profile } from '@wealthfire/core';
 import { useStore } from '../store';
+import { kycServer } from '../server';
+import { KycDataControls } from '../components/KycDataControls';
 import { Card, NumberField, Page } from '../ui';
 
 const BLANK: Profile = {
@@ -86,6 +88,8 @@ export function ProfilePage() {
           <button className="btn primary" type="submit">Save profile</button>
         </Card>
       </form>
+      {/* Server mode only; renders nothing until the server says a KYC case exists. */}
+      {kycServer && <KycDataControls client={kycServer} />}
     </Page>
   );
 }

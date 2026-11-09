@@ -1,6 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { analyze, deserialize, serialize, STORAGE_KEY, type Analysis, type AppData } from '@wealthfire/core';
+import { analyze, deserialize, serialize, STORAGE_KEY as BASE_KEY, type Analysis, type AppData } from '@wealthfire/core';
 import { previewData } from './preview';
+import { storageKey } from './localTest';
+
+/** `wealthfire.data.v1`, or `wf.persona.<id>.wealthfire.data.v1` for a test user (localkyc build, ?persona=). */
+const STORAGE_KEY = storageKey(BASE_KEY);
 
 interface Store {
   data: AppData;

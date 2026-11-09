@@ -5,6 +5,7 @@ import type { AppData, KycField, KycMatch, KycState, KycStatus, ReviewRecord } f
 import { maskAadhaar, maskPan, normalizeAadhaar, normalizePan } from './onboarding';
 // Circular import (store) is safe: only used inside functions.
 import { NOT_READ_MASK } from './store';
+import { serverEligibleToInvest, type KycStatusView } from './server';
 
 export const MAX_REREADS = 2;
 
@@ -122,6 +123,48 @@ const nameFailed = (c: FieldCheck) => c.nameMatch === false || (c.nameRequired =
 /** A field needs a person to look at it: the numbers differ, or the name check didn't pass. */
 const needsReview = (c: FieldCheck) => !c.matched || nameFailed(c);
 
+/** What a Check numbers row offers (web and phones). */
+export interface CheckRowState {
+  /** the numbers agree (typed or taken from the document) */
+  numbersMatch: boolean;
+  /** this card goes to a person: number or name not passed */
+  review: boolean;
+  useDocument: boolean;
+  edit: boolean;
+  uploadAgain: boolean;
+  /** re-checks left (session and stored counts) */
+  left: number;
+  /** '2 re-checks left', '1 re-check left', 'No re-checks left for this card.'; '' when the row needs nothing */
+  leftText: string;
+}
+
+/** Text for re-checks left; 0 → 'No re-checks left for this card.' (TC-31). */
+export function rereadsLeftText(left: number): string {
+  return left <= 0 ? 'No re-checks left for this card.' : `${left} re-check${left === 1 ? '' : 's'} left`;
+}
+
+/**
+ * TC-50: one rule for the row's buttons. While the card needs review and a re-check is left,
+ * "Upload again" stays on offer, also after "Use number from document" + a re-read (numbers equal,
+ * name not passed). "Use number from document" / "Edit number" only while the PAN numbers differ.
+ * The Aadhaar is locked to the OTP-verified number: only "Upload again".
+ */
+export function checkRowState(c: FieldCheck, storedLeft: number = MAX_REREADS): CheckRowState {
+  const left = Math.max(0, Math.min(MAX_REREADS - c.rereads, storedLeft));
+  const numbersMatch = c.matched || (c.final !== '' && c.final === c.read);
+  const review = needsReview(c);
+  const pan = c.field === 'pan';
+  return {
+    numbersMatch,
+    review,
+    useDocument: review && pan && !numbersMatch,
+    edit: review && pan && !numbersMatch && left > 0,
+    uploadAgain: review && left > 0,
+    left,
+    leftText: review ? rereadsLeftText(left) : '',
+  };
+}
+
 /**
  * 'matched' only when every field matched AND no card's name failed (nameMatch === false, or null
  * when the read was given a name: "not checked" is never a pass);
@@ -176,10 +219,14 @@ export function reviewRowReasonText(field: ReviewRecord['fields'][number], field
 /**
  * Investing is allowed only after onboarding is done and KYC is verified (a final KYC confirmation;
  * 'pre-verified' from the device checks is not enough).
- * Client-side only: the future investment journey must re-check this on a server.
+ * With a server view (GET /kyc/status), the server status decides and the device value is only a
+ * cache; without one (not fetched, offline, demo) the device value is used.
+ * The investment journey must still re-check this on the server.
  */
-export function isEligibleToInvest(data: AppData): boolean {
-  return data.onboarding?.step === 'done' && data.onboarding.kyc?.status === 'verified';
+export function isEligibleToInvest(data: AppData, server?: KycStatusView | null): boolean {
+  if (data.onboarding?.step !== 'done') return false;
+  if (server) return serverEligibleToInvest(server);
+  return data.onboarding.kyc?.status === 'verified';
 }
 
 /** A final KYC approval (review-decided 'approved') can be given: status under review or pre-verified. */

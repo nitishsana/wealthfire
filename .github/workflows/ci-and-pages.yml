@@ -64,9 +64,28 @@ jobs:
         env:
           CI: '1'
 
+  services:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: KYC service tests
+        run: npm run test -w @wealthfire/kyc-service
+      - name: KYC service type check
+        run: npm run typecheck -w @wealthfire/kyc-service
+      - name: KYC service CDK synth (no deploy)
+        run: npm run synth -w @wealthfire/kyc-service
+        env:
+          CDK_DEFAULT_REGION: ap-south-1
+          CDK_DEFAULT_ACCOUNT: '000000000000'
+
   deploy:
     if: github.ref == 'refs/heads/main'
-    needs: [check, mobile]
+    needs: [check, mobile, services]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

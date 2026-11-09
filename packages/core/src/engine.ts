@@ -43,7 +43,10 @@ export function analyze(data: AppData, opts: AnalyzeOptions = {}): Analysis {
   if (expenses.months === 0 && !data.profile?.monthlyExpenseOverride) missing.push('expenses');
 
   const profile = data.profile;
-  const risk = profile ? computeRiskScore(data.riskAnswers, profile.age) : null;
+  // The plan works with a middle-answer estimate until the quiz is done, but the score and profile are
+  // only shown (Analysis.risk) once all questions are answered (TC-42).
+  const riskEstimate = profile ? computeRiskScore(data.riskAnswers, profile.age) : null;
+  const risk = riskEstimate && isRiskComplete(data.riskAnswers) ? riskEstimate : null;
 
   let portfolio: PortfolioSuggestion | null = null;
   let fire: FirePlan | null = null;
@@ -52,10 +55,10 @@ export function analyze(data: AppData, opts: AnalyzeOptions = {}): Analysis {
   let fireType: FireTypeInfo | null = null;
   let coast: CoastFire | null = null;
 
-  if (profile && risk) {
+  if (profile && riskEstimate) {
     const yearsToFire = Math.max(0, profile.targetRetireAge - profile.age);
     // First pass with the current SIP to get a return, then size the portfolio to the required SIP.
-    const draft = suggestPortfolio(risk.profile, yearsToFire, profile.currentMonthlySip, data.assumptions);
+    const draft = suggestPortfolio(riskEstimate.profile, yearsToFire, profile.currentMonthlySip, data.assumptions);
     const base = {
       profile,
       monthlyLiving: expenses.monthlyLiving,
@@ -69,7 +72,7 @@ export function analyze(data: AppData, opts: AnalyzeOptions = {}): Analysis {
     fire = fireTypes.find((t) => t.type.id === fireType!.id)!.plan;
     coast = computeCoastFire(profile, profile.monthlyExpenseOverride ?? expenses.monthlyLiving, netWorth.investable, draft.expectedReturn, data.assumptions);
     const sipToSplit = Math.max(profile.currentMonthlySip, fire.requiredMonthlySip);
-    portfolio = suggestPortfolio(risk.profile, yearsToFire, sipToSplit, data.assumptions);
+    portfolio = suggestPortfolio(riskEstimate.profile, yearsToFire, sipToSplit, data.assumptions);
     buckets = planBuckets({
       current: data.buckets ?? bucketsFromNetWorth(netWorth),
       yearsToFire,

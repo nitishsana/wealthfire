@@ -57,7 +57,7 @@ function parseAmount(s: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-const CREDIT_HINT = /\b(cr|credit|payment received|refund|reversal|cashback)\b/i;
+const CREDIT_HINT = /\b(cr|credit|payment received|payment\s*-?\s*thank you|refund|reversal|cashback|salary)\b/i;
 
 export interface ParseResult {
   expenses: Expense[];
@@ -72,7 +72,9 @@ const newId = () => `exp_${Date.now().toString(36)}_${(counter++).toString(36)}`
  * Accepts lines like:
  *   05/10/2026, SWIGGY BANGALORE, 450.00
  *   05 Oct 2026  AMAZON PAY INDIA  1,299.00 Dr
- * Credits, refunds and payments are skipped.
+ *   2026-10-01,SWIGGY ORDER,-450        (bank export: debits negative)
+ * Credits, refunds and payments are skipped: a Cr marker, a credit word, or the minority sign of the
+ * file (positive amounts in a debits-negative file, negative amounts in a spends-positive file).
  */
 export function parseStatement(text: string, source: Expense['source'] = 'statement'): ParseResult {
   const expenses: Expense[] = [];
@@ -80,6 +82,8 @@ export function parseStatement(text: string, source: Expense['source'] = 'statem
   const dateRe = /(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[\s-][A-Za-z]{3,9}[\s-,]+\d{2,4})/;
   const amountRe = /(?:₹|rs\.?|inr)?\s*(-?[\d,]+(?:\.\d{1,2})?)\s*(dr|cr)?\s*$/i;
 
+  type Row = { line: string; cleaned: string; dm: RegExpMatchArray; am: RegExpMatchArray; date: string; amount: number; marker: string; hint: boolean };
+  const rows: Row[] = [];
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -91,7 +95,17 @@ export function parseStatement(text: string, source: Expense['source'] = 'statem
     if (!date || !am) { skipped++; continue; }
     const amount = parseAmount(am[1]!);
     if (amount === null || amount === 0) { skipped++; continue; }
-    const isCredit = am[2]?.toLowerCase() === 'cr' || amount < 0 || CREDIT_HINT.test(line.replace(/\bdr\b/i, ''));
+    rows.push({ line, cleaned, dm, am, date, amount, marker: am[2]?.toLowerCase() ?? '', hint: CREDIT_HINT.test(line.replace(/\bdr\b/i, '')) });
+  }
+  // TC-44: the sign of an unmarked amount is read the same way for the whole file. Card statements list
+  // spends as positive (refunds negative); bank exports list debits as negative (credits positive).
+  // The file is a "debits negative" one when most unmarked, non-credit-looking amounts are negative.
+  const plain = rows.filter((r) => !r.marker && !r.hint);
+  const debitsNegative = plain.filter((r) => r.amount < 0).length > plain.filter((r) => r.amount > 0).length;
+
+  for (const { cleaned, dm, am, date, amount, marker, hint } of rows) {
+    // Cr marker or a credit word (refund, payment received, cashback…) is never a spend; a Dr marker is.
+    const isCredit = marker === 'cr' || hint || (!marker && (debitsNegative ? amount > 0 : amount < 0));
     if (isCredit) { skipped++; continue; }
     const description = cleaned
       .replace(dm[0], '')

@@ -53,6 +53,71 @@ export function panSurnameWarning(pan: string, lastName: string): string | null 
   return p[4] === first ? null : "PAN's 5th letter usually matches your last name";
 }
 
+export const DOB_LABEL = 'Date of birth';
+export const DOB_HINT = 'DD/MM/YYYY';
+/** Investors must be at least this old. */
+export const MIN_INVEST_AGE = 18;
+export const MAX_DOB_AGE = 120;
+
+export const DOB_MESSAGES = {
+  format: 'Enter your date of birth as DD/MM/YYYY.',
+  minor: 'You must be 18 or older to invest.',
+  unreal: 'Enter a real date of birth.',
+} as const;
+
+/** Identity exists but has no date of birth: ask for it (dispatch 'dob-added') before server KYC starts. */
+export function needsDob(s: OnboardingState | null | undefined): boolean {
+  return !!s?.identity && !s.identity.dob;
+}
+
+/** dd/mm/yyyy or yyyy-mm-dd → [y, m, d]; null when the shape is wrong. */
+function dobParts(input: string): [number, number, number] | null {
+  const v = input.trim();
+  const dmy = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v);
+  if (dmy) return [Number(dmy[3]), Number(dmy[2]), Number(dmy[1])];
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])];
+  return null;
+}
+
+function isCalendarDate(y: number, m: number, d: number): boolean {
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+
+/** Date of birth as ISO yyyy-mm-dd (from dd/mm/yyyy or yyyy-mm-dd); '' when it isn't a calendar date. */
+export function normalizeDob(input: string): string {
+  const p = dobParts(input);
+  if (!p || !isCalendarDate(...p)) return '';
+  const [y, m, d] = p;
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/** Whole years from a birth date to `today` (local calendar date). A 29 Feb birthday counts from 1 Mar. */
+export function ageOn(dobIso: string, today: Date = new Date()): number {
+  const [y, m, d] = dobIso.split('-').map(Number) as [number, number, number];
+  const ty = today.getFullYear();
+  const tm = today.getMonth() + 1;
+  const td = today.getDate();
+  return ty - y - (tm < m || (tm === m && td < d) ? 1 : 0);
+}
+
+/**
+ * Date of birth check (dd/mm/yyyy or yyyy-mm-dd). Error text, or null when OK.
+ * Not a calendar date, in the future or over 120 years → 'Enter a real date of birth.'; under 18 → minor.
+ */
+export function validateDob(input: string, today: Date = new Date()): string | null {
+  if (typeof input !== 'string' || !dobParts(input)) return DOB_MESSAGES.format;
+  const iso = normalizeDob(input);
+  if (!iso) return DOB_MESSAGES.unreal;
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  if (iso > todayIso) return DOB_MESSAGES.unreal;
+  const age = ageOn(iso, today);
+  if (age > MAX_DOB_AGE) return DOB_MESSAGES.unreal;
+  if (age < MIN_INVEST_AGE) return DOB_MESSAGES.minor;
+  return null;
+}
+
 export function normalizeAadhaar(s: string): string {
   return s.replace(/\D/g, '');
 }
@@ -202,12 +267,21 @@ export type OnboardingEvent =
   | { type: 'otp-sent'; channel: 'contact' | 'aadhaar'; at: string; contact?: { kind: ContactKind; value: string } }
   | { type: 'contact-verified'; at: string }
   | { type: 'change-contact' }
-  | { type: 'identity-saved'; firstName: string; lastName: string; pan: string }
+  /** `dob`: dd/mm/yyyy or yyyy-mm-dd (stored ISO). `at`: ISO time of the save, for the 18+ check (default now). */
+  | { type: 'identity-saved'; firstName: string; lastName: string; pan: string; dob: string; at?: string }
+  /** Add / replace the date of birth from any step with an identity (validated 18+; stored ISO). `at` as in identity-saved. */
+  | { type: 'dob-added'; dob: string; at?: string }
   | { type: 'back-to-identity' }
   | { type: 'aadhaar-verified'; last4: string; at: string; provider: OtpProviderId }
   | { type: 'aadhaar-locked'; until: string }
   | { type: 'sign-out' }
-  | { type: 'documents-ready'; at: string; reader: DocReaderId }
+  /**
+   * `reread`: after Back from Check numbers, the cards really read again (a replaced document). A card
+   * whose earlier check is kept (same document) is not counted. Default: both cards.
+   */
+  | { type: 'documents-ready'; at: string; reader: DocReaderId; reread?: KycField[] }
+  /** A card was read well: earlier failed tries of that card (e.g. a locked PDF before its password) no longer count. */
+  | { type: 'read-ok'; field: KycField }
   | { type: 'back-to-documents' }
   | { type: 'reread-used'; field: KycField }
   | { type: 'check-confirmed'; match: KycMatch; pan: string; fields: ReviewRecord['fields']; at: string }
@@ -255,6 +329,15 @@ function normalizeContact(c: { kind: ContactKind; value: string }): { kind: Cont
   return validateMobile(c.value) ? null : { kind: 'mobile', value: normalizeMobile(c.value) };
 }
 
+const sameContact = (a: { kind: ContactKind; value: string }, b: { kind: ContactKind; value: string }) => a.kind === b.kind && a.value === b.value;
+
+/** Sign in after Sign out: 'Sign in with +91 ******3210 to open your planner again.', or '' when nothing is kept. */
+export function signedOutHint(s: OnboardingState): string {
+  if (!s.signedOut || s.step !== 'signin') return '';
+  const c = s.signedOut;
+  return `Sign in with ${c.kind === 'email' ? maskEmail(c.value) : maskMobile(c.value)} to open your planner again.`;
+}
+
 /** Move onboarding forward. Events from the wrong step return the state unchanged. */
 export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): OnboardingState {
   switch (e.type) {
@@ -270,8 +353,10 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       const target = next ?? keep;
       if (!target) return s;
       const same = keep && keep.kind === target.kind && keep.value === target.value;
+      // After Sign out: another contact is another person, so the kept onboarding goes (send limits stay).
+      const base = s.signedOut && !sameContact(s.signedOut, target) ? { ...emptyOnboarding(), sends: s.sends } : s;
       return {
-        ...s,
+        ...base,
         step: 'otp',
         contact: same && keep ? keep : { ...target, verifiedAt: null },
         sends: { ...s.sends, contact: addSend(s.sends.contact, e.at) },
@@ -279,18 +364,31 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
     }
     case 'contact-verified':
       if (s.step !== 'otp' || !s.contact) return s;
+      // Signed in again with the contact the onboarding was finished with: straight back to the planner.
+      if (s.signedOut && sameContact(s.signedOut, s.contact) && s.identity && s.aadhaar && s.kyc.match && s.kyc.status) {
+        return { ...s, step: 'done', contact: { ...s.contact, verifiedAt: e.at }, completedAt: s.signedOut.completedAt, signedOut: null };
+      }
       return { ...s, step: 'identity', contact: { ...s.contact, verifiedAt: e.at } };
     case 'change-contact':
       if (s.step !== 'otp') return s;
       return { ...s, step: 'signin', contact: null };
     case 'identity-saved': {
       if (s.step !== 'identity') return s;
-      if (validateName(e.firstName) || validateName(e.lastName) || validatePan(e.pan)) return s;
+      const t = e.at ? Date.parse(e.at) : NaN;
+      const today = Number.isFinite(t) ? new Date(t) : new Date();
+      if (validateName(e.firstName) || validateName(e.lastName) || validatePan(e.pan) || validateDob(e.dob, today)) return s;
       return {
         ...s,
         step: 'aadhaar-otp',
-        identity: { firstName: e.firstName.trim(), lastName: e.lastName.trim(), pan: normalizePan(e.pan) },
+        identity: { firstName: e.firstName.trim(), lastName: e.lastName.trim(), pan: normalizePan(e.pan), dob: normalizeDob(e.dob) },
       };
+    }
+    case 'dob-added': {
+      // Any step with an identity (users who onboarded before DOB was asked). Step unchanged.
+      if (!s.identity) return s;
+      const t = e.at ? Date.parse(e.at) : NaN;
+      if (validateDob(e.dob, Number.isFinite(t) ? new Date(t) : new Date())) return s;
+      return { ...s, identity: { ...s.identity, dob: normalizeDob(e.dob) } };
     }
     case 'back-to-identity':
       // Only before the Aadhaar OTP passes. From documents / check the Aadhaar is locked.
@@ -303,12 +401,12 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
     case 'documents-ready': {
       if (s.step !== 'documents' || !s.aadhaar) return s;
       // A read after Back from Check numbers is a re-read of every field (Bug 1: no bypass via Back).
-      const rereads = s.kyc.returnedFromCheck
-        ? {
-          pan: Math.min(MAX_REREADS, s.kyc.rereads.pan + 1),
-          aadhaar: Math.min(MAX_REREADS, s.kyc.rereads.aadhaar + 1),
-        }
-        : s.kyc.rereads;
+      // TC-50: only a card actually read again counts; a kept earlier check (same document) does not.
+      const again = (f: KycField) => s.kyc.returnedFromCheck && (e.reread ? e.reread.includes(f) : true);
+      const rereads = {
+        pan: again('pan') ? Math.min(MAX_REREADS, s.kyc.rereads.pan + 1) : s.kyc.rereads.pan,
+        aadhaar: again('aadhaar') ? Math.min(MAX_REREADS, s.kyc.rereads.aadhaar + 1) : s.kyc.rereads.aadhaar,
+      };
       return { ...s, step: 'check', kyc: { ...s.kyc, documentsAt: e.at, reader: e.reader, rereads, returnedFromCheck: false } };
     }
     case 'back-to-documents':
@@ -355,6 +453,12 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       const now = s.kyc.failedReads[e.field];
       const next = e.unavailable ? Math.max(now, HAND_CHECK_AFTER_FAILS) : Math.min(MAX_FAILED_READS, now + 1);
       return { ...s, kyc: { ...s.kyc, failedReads: { ...s.kyc.failedReads, [e.field]: next } } };
+    }
+    case 'read-ok': {
+      // TC-21: a good read of a card (e.g. the e-Aadhaar after its password) clears that card's failed tries.
+      if (s.step !== 'documents' && s.step !== 'check') return s;
+      if ((e.field !== 'pan' && e.field !== 'aadhaar') || s.kyc.failedReads[e.field] === 0) return s;
+      return { ...s, kyc: { ...s.kyc, failedReads: { ...s.kyc.failedReads, [e.field]: 0 } } };
     }
     case 'send-for-hand-check': {
       if (s.step !== 'documents' && s.step !== 'check') return s;
@@ -415,6 +519,15 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       // Previous review stays as history until a new one replaces it.
       return { ...s, step: 'documents', completedAt: null, kyc: { ...emptyKyc(), review: s.kyc.review } };
     case 'sign-out':
+      // TC-37: Sign out ends the session only. A finished onboarding stays on the device for the same person.
+      if (s.step === 'done' && s.contact) {
+        return {
+          ...s, step: 'signin', contact: null, completedAt: null,
+          signedOut: { kind: s.contact.kind, value: s.contact.value, completedAt: s.completedAt ?? s.aadhaar?.verifiedAt ?? '' },
+        };
+      }
+      // Signing out again before signing back in keeps the finished onboarding.
+      if (s.signedOut) return { ...s, step: 'signin', contact: null };
       return emptyOnboarding();
     default:
       return s;

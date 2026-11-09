@@ -116,6 +116,14 @@ export function computeRiskScore(answers: Record<string, number>, age: number): 
   return { score, profile: profileFromScore(score) };
 }
 
+/** Shown instead of a score until every question is answered (web and phones). */
+export const RISK_INCOMPLETE_TEXT = `Answer all ${RISK_QUESTIONS.length} questions to see your risk profile.`;
+
+/** The result to show: null until all questions are answered (no estimate from middle answers). */
+export function shownRiskResult(answers: Record<string, number>, age: number): RiskResult | null {
+  return isRiskComplete(answers) ? computeRiskScore(answers, age) : null;
+}
+
 export function isRiskComplete(answers: Record<string, number>): boolean {
   return RISK_QUESTIONS.every((q) => answers[q.id] !== undefined);
 }

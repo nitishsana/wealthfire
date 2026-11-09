@@ -4,13 +4,17 @@
 // AppData keeps the final PAN, Aadhaar last 4 and masked review fields.
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
-  applyReread, canReread, canSend, canSendForHandCheck, checkOutcome, countsAsFailedRead, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
-  maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer, panSurnameWarning,
-  readBlocked, readsLeft, resendIn, reviewFields, sameDocument, takeDocumentNumber, validateAadhaar, validateEmail, validateMobile, validateName, validatePan,
+  applyReread, canReread, checkRowState, normalizeDob, validateDob, canSend, canSendForHandCheck, checkOutcome, countsAsFailedRead, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
+  maskEmail, maskMobile, monotonicProgress, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer, panSurnameWarning,
+  readBlocked, readsLeft, resendIn, signedOutHint, reviewFields, sameDocument, takeDocumentNumber, validateAadhaar, validateEmail, validateMobile, validateName, validatePan,
   type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OnboardingEvent,
 } from '@wealthfire/core';
 import { useStore } from '../store';
-import { otpProvider } from '../otp';
+import { aadhaarOtpProvider, otpProvider } from '../otp';
+import { kycServer } from '../server';
+import { personaFill, storageKey } from '../localTest';
+import { ServerKyc, startDetails } from '../components/ServerKyc';
+import { DobField, isoToDmy } from '../components/DobField';
 import * as readerModule from '../docreader';
 import { documentReader } from '../docreader';
 import { OtpStep, requestOtp, type OtpRequest } from '../components/OtpStep';
@@ -40,7 +44,7 @@ export const RETYPE_FOR_NEW_OTP = 'Enter your Aadhaar number again to get a new 
 export const HAND_CHECK_FAILED = 'Could not send your documents. Try again.';
 /** Shown once on Sign in right after Settings → "Delete all data" (the gate switches to Sign in at once). */
 export const DATA_DELETED_TEXT = 'All data deleted.';
-const DATA_DELETED_KEY = 'wealthfire.dataDeleted';
+const DATA_DELETED_KEY = storageKey('wealthfire.dataDeleted');
 /** Settings calls this just before deleting, so Sign in can say the data was deleted. */
 export function markDataDeleted() {
   try { window.sessionStorage.setItem(DATA_DELETED_KEY, '1'); } catch { /* storage blocked: no message */ }
@@ -143,7 +147,7 @@ function useReadProgress(active: boolean): number | null {
     const off = sub((p) => {
       if (!Number.isFinite(p)) return;
       const v = p <= 1 ? p * 100 : p; // accept 0–1 or 0–100
-      setPct(Math.max(0, Math.min(100, Math.round(v))));
+      setPct((prev) => monotonicProgress(prev, v)); // never goes down during one read
     });
     return () => { if (typeof off === 'function') off(); };
   }, [active]);
@@ -174,6 +178,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
     const next = { ...lastReads.current };
     if (value === null) delete next[field]; else next[field] = value;
     lastReads.current = next;
+    // TC-21: a good read clears this card's earlier failed tries (locked PDF before its password)
+    if (value !== null) dispatch({ type: 'read-ok', field });
   };
   // Minor 3: one-time "All data deleted." after Settings → Delete all data (flag cleared once shown).
   const [dataDeleted] = useState(dataDeletedFlag);
@@ -258,6 +264,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
       <section data-feature="onboard-signin" aria-label="Sign in">
         {heading('Sign in')}
         {dataDeleted && <p className="muted" role="status">{DATA_DELETED_TEXT}</p>}
+        {/* TC-37: after Sign out the finished onboarding is kept; this contact opens the planner again. */}
+        {signedOutHint(ob) && <p className="muted">{signedOutHint(ob)}</p>}
         <SignIn onSent={(kind, value, r) => {
           setFirstSend(r);
           dispatch({ type: 'otp-sent', channel: 'contact', at: r.at, contact: { kind, value } });
@@ -291,7 +299,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         <p className="intro">We need these to tie your account to you.</p>
         <Identity initial={ob.identity} onContinue={async (id, digits) => {
           // Req 3.8 / C1: save name + PAN, keep the full Aadhaar in memory, send the Aadhaar OTP.
-          const r = await requestOtp(otpProvider, 'aadhaar', digits, ob.sends.aadhaar, ob.aadhaarLockedUntil);
+          const r = await requestOtp(aadhaarOtpProvider, 'aadhaar', digits, ob.sends.aadhaar, ob.aadhaarLockedUntil);
           setAadhaar(digits);
           setChecks(null);
           setPrevious(null);
@@ -311,14 +319,14 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         {heading('Verify Aadhaar')}
         <p className="intro">Enter the OTP sent to the mobile linked with Aadhaar {maskAadhaar(aadhaar.slice(-4))}.</p>
         <Card>
-          <OtpStep provider={otpProvider} channel="aadhaar" target={aadhaar}
+          <OtpStep provider={aadhaarOtpProvider} channel="aadhaar" target={aadhaar}
             sends={ob.sends.aadhaar} lockedUntil={ob.aadhaarLockedUntil} initial={firstSend} verifyLabel="Verify Aadhaar"
             onSent={(at) => dispatch({ type: 'otp-sent', channel: 'aadhaar', at })}
             onVerified={(r) => {
               const last4 = r.aadhaarLast4 ?? aadhaar.slice(-4);
               // Req 4.3 / C1: only the last 4 is stored; the full number stays in memory until Check numbers.
               setFirstSend(undefined);
-              dispatch({ type: 'aadhaar-verified', last4, at: new Date().toISOString(), provider: otpProvider.id });
+              dispatch({ type: 'aadhaar-verified', last4, at: new Date().toISOString(), provider: aadhaarOtpProvider.id });
             }}
             onLocked={(until) => dispatch({ type: 'aadhaar-locked', until })} />
           {/* C1: Back returns to "Your details" (name and PAN kept, Aadhaar typed again). */}
@@ -338,8 +346,10 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
           // its earlier read result (kept in `checks`) is used instead.
           blocked={{ pan: readBlocked(ob.kyc, 'pan'), aadhaar: readBlocked(ob.kyc, 'aadhaar') }}
           prior={{ pan: priorRead('pan'), aadhaar: priorRead('aadhaar') }}
-          onRead={(pan, aad, verified) => {
-            const ev: OnboardingEvent = { type: 'documents-ready', at: new Date().toISOString(), reader: documentReader.id };
+          onRead={(pan, aad, verified, kept) => {
+            // TC-50: only the cards really read again count as re-reads after Back.
+            const reread = (['pan', 'aadhaar'] as const).filter((f) => !kept.includes(f) && !readBlocked(ob.kyc, f));
+            const ev: OnboardingEvent = { type: 'documents-ready', at: new Date().toISOString(), reader: documentReader.id, reread };
             // Already on Check numbers (another tab): only this tab's checks are created; nothing is dispatched.
             const already = ob.step === 'check';
             // The reducer counts a read after Back as a re-read; seed the checks with the counts it will store (Req 8.8).
@@ -348,7 +358,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
               { pan: pan.nameMatch, aadhaar: aad.nameMatch })
               // Minor 2: a card with no re-checks left keeps its whole earlier check (the PAN chosen via
               // "Use number from document" / "Edit number" included), not a fresh one built from the typed PAN.
-              .map((c) => (readBlocked(ob.kyc, c.field) ? priorCheck(c.field) : undefined) ?? c)
+              .map((c) => (readBlocked(ob.kyc, c.field) || kept.includes(c.field) ? priorCheck(c.field) : undefined) ?? c)
               .map((c) => ({ ...c, rereads: Math.min(MAX_REREADS, Math.max(c.rereads, counted[c.field])) }));
             setAadhaar(verified);
             setChecks(cs);
@@ -383,6 +393,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
       <section data-feature="onboard-aadhaar-otp" aria-label="You're all set">
         {heading(ob.identity ? `You're all set, ${ob.identity.firstName}.` : "You're all set.")}
         <p className="intro" role="status">{ob.kyc.status === 'pre-verified' ? DOC_MESSAGES.donePreVerified : ob.kyc.status === 'verified' ? DOC_MESSAGES.doneVerified : UNDER_REVIEW_TEXT}</p>
+        {/* With a KYC server: start the final KYC and follow its next step (R2/R3, design 6). */}
+        {kycServer && <Card title="Final KYC"><ServerKyc client={kycServer} details={startDetails(ob)} /></Card>}
         <button type="button" className="btn primary" onClick={onFinish}>Go to Home</button>
       </section>
     );
@@ -427,7 +439,8 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
   blocked: Record<KycField, boolean>;
   /** Earlier read result per field from this session, if any. */
   prior: Record<KycField, ReadValue | null>;
-  onRead: (pan: ReadValue, aadhaar: ReadValue, verifiedAadhaar: string) => void;
+  /** `kept`: cards whose earlier check is kept as it is (same document after Back). */
+  onRead: (pan: ReadValue, aadhaar: ReadValue, verifiedAadhaar: string, kept: KycField[]) => void;
 }) {
   const [reading, setReading] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<KycField, string>>>({});
@@ -445,12 +458,18 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
   const verified = needRetype ? normalizeAadhaar(retype) : aadhaar;
   const ready = DOC_KINDS.every((k) => docs[k]) && !retypeErr;
 
-  /** Blocked field: keep the earlier result; with none (after a reload) do one strict read. */
+  // TC-50: cards replaced on this screen since Back. A card not replaced keeps its whole earlier check
+  // (e.g. the PAN chosen with "Use number from document") and is not read again or counted.
+  const [replaced, setReplaced] = useState<Partial<Record<KycField, boolean>>>({});
+  const keep = (f: KycField) => !!prior[f] && !replaced[f] && (f === 'pan' || !needRetype);
+
+  /** Kept or blocked field: the earlier result; a blocked one with none (after a reload) gets one strict read. */
   function readField(field: KycField, password?: string): Promise<ReadOutcome> {
     const doc = docs[field]!;
     const typed = field === 'pan' ? pan : verified;
-    if (!blocked[field]) return readNumber(doc, field, false, typed, name, password);
     const p = prior[field];
+    if (keep(field) && p) return Promise.resolve(p);
+    if (!blocked[field]) return readNumber(doc, field, false, typed, name, password);
     return p ? Promise.resolve(p) : readNumber(doc, field, true, typed, name, password);
   }
 
@@ -471,7 +490,7 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
       }
     });
     setResults(nextResults); setErrors(nextErrors); setLocked(nextLocked);
-    if (nextResults.pan && nextResults.aadhaar) onRead(nextResults.pan, nextResults.aadhaar, verified);
+    if (nextResults.pan && nextResults.aadhaar) onRead(nextResults.pan, nextResults.aadhaar, verified, (['pan', 'aadhaar'] as const).filter(keep));
   }
 
   function go() {
@@ -493,6 +512,7 @@ function Documents({ docs, setDoc, pan, name, aadhaar, verifiedLast4, blocked, p
       setErrors((e) => ({ ...e, [k]: undefined }));
       setLocked((l) => ({ ...l, [k]: false }));
       setResults((r) => { const n = { ...r }; delete n[k]; return n; });
+      setReplaced((r) => ({ ...r, [k]: true }));
       // The remembered read belonged to the old document: forget it when the card is replaced or removed.
       onReadOk(k, null);
     }
@@ -631,6 +651,7 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
   const left = Math.max(0, Math.min(MAX_REREADS - c.rereads, storedLeft));
   // "Edit number" / "Upload again" dispatch reread-used, so both the session and stored counts must allow one.
   const mayReread = canReread(c) && left > 0;
+  const row = checkRowState(c, storedLeft);
   const id = `chk-${c.field}`;
   // c.matched also needs the name when the number came from the document (takeDocumentNumber).
   const numberMatch = c.matched || (c.final !== '' && c.final === c.read);
@@ -720,22 +741,23 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
         </div>
       )}
       {/* Review bug 9: after "Use number from document" without a name match (false or null), "Upload again" stays on offer. */}
-      {!c.matched && !editing && !uploading && (locked || takenByHand ? mayReread : true) && (
+      {/* TC-50 / TC-31: the row's buttons and counter come from core checkRowState (same on phones). */}
+      {row.review && !editing && !uploading && (
         <>
-          <div className="row">
-            {!locked && !takenByHand && (
-              <button type="button" className="btn" disabled={reading} onClick={() => onChange(takeDocumentNumber(c), false)}>Use number from document</button>
-            )}
-            {mayReread && (
-              <>
-                {!locked && !takenByHand && (
-                  <button type="button" className="btn" disabled={reading} onClick={() => { setDraft(c.final); setEditing(true); setError(''); setPdfLocked(false); }}>Edit number</button>
-                )}
+          {(row.useDocument || row.edit || row.uploadAgain) && (
+            <div className="row">
+              {row.useDocument && (
+                <button type="button" className="btn" disabled={reading} onClick={() => onChange(takeDocumentNumber(c), false)}>Use number from document</button>
+              )}
+              {row.edit && mayReread && (
+                <button type="button" className="btn" disabled={reading} onClick={() => { setDraft(c.final); setEditing(true); setError(''); setPdfLocked(false); }}>Edit number</button>
+              )}
+              {row.uploadAgain && mayReread && (
                 <button type="button" className="btn" disabled={reading} onClick={() => { setUploading(true); setError(''); setPdfLocked(false); }}>Upload again</button>
-              </>
-            )}
-          </div>
-          <p className="muted small">{left} re-check{left === 1 ? '' : 's'} left</p>
+              )}
+            </div>
+          )}
+          <p className="muted small">{row.leftText}</p>
         </>
       )}
       {editing && !locked && (
@@ -793,7 +815,8 @@ function FieldRow({ check: c, doc, otherDoc, personName, storedLeft, setDoc, onC
 
 function SignIn({ onSent }: { onSent: (kind: ContactKind, value: string, r: Extract<OtpRequest, { ok: true }>) => void }) {
   const [kind, setKind] = useState<ContactKind>('mobile');
-  const [raw, setRaw] = useState('');
+  // localkyc test user (?persona=): the mobile starts filled in
+  const [raw, setRaw] = useState(personaFill?.mobile ?? '');
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sendError, setSendError] = useState('');
@@ -864,17 +887,21 @@ function SignIn({ onSent }: { onSent: (kind: ContactKind, value: string, r: Extr
   );
 }
 
-interface IdentityValues { firstName: string; lastName: string; pan: string }
+/** dob: ISO yyyy-mm-dd when saved (missing for identities saved before DOB was asked); the form takes DD/MM/YYYY. */
+interface IdentityValues { firstName: string; lastName: string; pan: string; dob?: string }
 
 function Identity({ initial, onContinue }: {
   initial: IdentityValues | null;
-  onContinue: (id: IdentityValues, aadhaarDigits: string) => Promise<void>;
+  onContinue: (id: Required<IdentityValues>, aadhaarDigits: string) => Promise<void>;
 }) {
-  const [firstName, setFirst] = useState(initial?.firstName ?? '');
-  const [lastName, setLast] = useState(initial?.lastName ?? '');
-  const [pan, setPan] = useState(initial?.pan ?? '');
-  // Full Aadhaar typed here: component state only, empty again after Back.
-  const [aadhaar, setAadhaar] = useState('');
+  // localkyc test user (?persona=): empty fields start with the test user's details
+  const fill = personaFill?.identity;
+  const [firstName, setFirst] = useState(initial?.firstName ?? fill?.firstName ?? '');
+  const [lastName, setLast] = useState(initial?.lastName ?? fill?.lastName ?? '');
+  const [pan, setPan] = useState(initial?.pan ?? fill?.pan ?? '');
+  const [dob, setDob] = useState(isoToDmy(initial?.dob ?? fill?.dob ?? ''));
+  // Full Aadhaar typed here: component state only, empty again after Back (a test user's made-up one is filled in).
+  const [aadhaar, setAadhaar] = useState(personaFill?.aadhaar ?? '');
   const [showAadhaar, setShowAadhaar] = useState(false);
   const [consent, setConsent] = useState(false);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
@@ -886,17 +913,18 @@ function Identity({ initial, onContinue }: {
     first: validateName(firstName),
     last: validateName(lastName),
     pan: validatePan(panN),
+    dob: validateDob(dob),
     aadhaar: validateAadhaar(aadhaar),
   };
   const panWarn = !errs.pan && !errs.last ? panSurnameWarning(panN, lastName.trim()) : null;
-  const allValid = !errs.first && !errs.last && !errs.pan && !errs.aadhaar;
+  const allValid = !errs.first && !errs.last && !errs.pan && !errs.dob && !errs.aadhaar;
   const show = (k: keyof typeof errs) => (touched[k] ? errs[k] : null);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!allValid || !consent || busy) return;
     setBusy(true);
-    await onContinue({ firstName: firstName.trim(), lastName: lastName.trim(), pan: panN }, aadhaar);
+    await onContinue({ firstName: firstName.trim(), lastName: lastName.trim(), pan: panN, dob: normalizeDob(dob) }, aadhaar);
     setBusy(false);
   }
 
@@ -929,6 +957,7 @@ function Identity({ initial, onContinue }: {
             {show('pan') && <span id="ob-pan-err" className="error" role="status">{show('pan')}</span>}
             {panWarn && touched.pan && <span id="ob-pan-warn" className="field-warn" role="status">{panWarn}</span>}
           </label>
+          <DobField id="ob-dob" value={dob} touched={!!touched.dob} onChange={setDob} onBlur={() => touch('dob')} />
           <div className="field">
             <label htmlFor="ob-aadhaar">Aadhaar number</label>
             <span className="input-wrap has-toggle">

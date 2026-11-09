@@ -1,6 +1,14 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  /**
+   * Final KYC server base URL (services/kyc API, e.g. the dev stack). Unset or '' = no server: the
+   * demo / device-only flow (live site and local preview today). Set = contact OTP and final KYC
+   * status come from the server.
+   */
+  readonly VITE_API_URL?: string;
+  /** Extra HTTPS origins (comma separated) the app may redirect to for DigiLocker / e-sign. The API origin is always allowed. */
+  readonly VITE_KYC_REDIRECT_ORIGINS?: string;
   /** OTP provider id: unset or 'demo' in v1. 'digilocker' / 'digio' need a backend (not built yet). */
   readonly VITE_OTP_PROVIDER?: string;
   /** Backend base URL for a real OTP provider. Unused by the demo provider. */

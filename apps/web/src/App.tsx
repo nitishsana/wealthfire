@@ -14,6 +14,7 @@ import { SettingsPage } from './pages/Settings';
 import { OnboardingPage } from './pages/Onboarding';
 import { useStore } from './store';
 import { Disclaimer } from './ui';
+import { TestUserBar } from './components/TestUserBar';
 
 const NAV = [
   { to: '/', label: 'Home', icon: '🏠' },
@@ -29,15 +30,25 @@ const NAV = [
   { to: '/settings', label: 'Settings', icon: '⚙️' },
 ];
 
+/** Route names a path link may use (e.g. /profile?preview=demo), turned into #/profile in main.tsx. */
+export const ROUTE_NAMES: readonly string[] = [...NAV.map((n) => n.to.slice(1)).filter(Boolean), 'gmail'];
+
 export function App() {
   const { data } = useStore();
   const navigate = useNavigate();
   // Keeps the onboarding page up for the "You're all set" screen after Confirm on Check numbers.
   const [finishing, setFinishing] = useState(false);
   if (data.onboarding.step !== 'done' || finishing) {
-    return <OnboardingPage onCompleting={() => setFinishing(true)} onFinish={() => { setFinishing(false); navigate('/'); }} />;
+    return (
+      <>
+        <TestUserBar />
+        <OnboardingPage onCompleting={() => setFinishing(true)} onFinish={() => { setFinishing(false); navigate('/'); }} />
+      </>
+    );
   }
   return (
+    <>
+    <TestUserBar />
     <div className="shell">
       <a className="skip" href="#main">Skip to content</a>
       <aside className="sidebar">
@@ -72,5 +83,6 @@ export function App() {
         <Disclaimer />
       </main>
     </div>
+    </>
   );
 }

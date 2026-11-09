@@ -2,12 +2,13 @@
 import { useState } from 'react';
 import { Alert, Switch, Text, View } from 'react-native';
 import {
-  ASSET_TYPE_LABELS, computeRiskScore, DEFAULT_BARISTA_SHARE, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, prefillProfileName, RISK_QUESTIONS,
+  ASSET_TYPE_LABELS, computeRiskScore, RISK_INCOMPLETE_TEXT, DEFAULT_BARISTA_SHARE, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, prefillProfileName, RISK_QUESTIONS,
   type AssetType, type LiabilityType, type Profile,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { useNav, type TabKey } from '../nav';
 import { FireTypePicker, FireTypesCompare } from './FireTypes';
+import { KycDataControls } from '../server';
 import { Bar, Btn, Card, Chips, Field, Line, Mix, NumField, s, Screen, Stat, Stats, Tips } from '../ui';
 
 const STATUS_TEXT = { on_track: 'On track', close: 'Almost there', off_track: 'Off track' } as const;
@@ -132,6 +133,8 @@ export function ProfileScreen() {
         {error ? <Text style={{ color: '#ff6b6b' }} accessibilityRole="alert">{error}</Text> : null}
         <Btn primary title="Save profile" onPress={save} />
       </Card>
+      {/* Server mode only; renders nothing until the server says a KYC case exists (same as web). */}
+      <KycDataControls />
     </Screen>
   );
 }
@@ -156,7 +159,7 @@ export function RiskScreen() {
             <Bar pct={result.score} label="Risk score" />
             <Btn primary title="See my portfolio" onPress={() => go('portfolio')} />
           </>
-        ) : <Text style={s.muted}>Answer all {RISK_QUESTIONS.length} questions to see your score.</Text>}
+        ) : <Text style={s.muted}>{RISK_INCOMPLETE_TEXT}</Text>}
       </Card>
     </Screen>
   );

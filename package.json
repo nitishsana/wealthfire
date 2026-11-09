@@ -1,17 +1,20 @@
 {
-  "name": "wealthfire",
-  "private": true,
-  "version": "0.1.0",
-  "description": "Wealthfire - mutual fund and FIRE planning app (web, Android, iOS) with one shared core",
-  "workspaces": [
-    "packages/core",
-    "apps/web"
-  ],
-  "scripts": {
-    "test": "npm run test -w @wealthfire/core",
-    "dev": "npm run dev -w @wealthfire/web",
-    "build": "npm run build -w @wealthfire/web",
-    "typecheck": "npm run typecheck -w @wealthfire/core && npm run typecheck -w @wealthfire/web",
-    "parity": "node scripts/check-parity.mjs"
-  }
+    "name":  "wealthfire",
+    "private":  true,
+    "version":  "0.1.0",
+    "description":  "Wealthfire - mutual fund and FIRE planning app (web, Android, iOS) with one shared core",
+    "workspaces":  [
+                       "packages/core",
+                       "apps/web",
+                       "services/kyc"
+                   ],
+    "scripts":  {
+                    "test":  "npm run test -w @wealthfire/core",
+                    "dev":  "npm run dev -w @wealthfire/web",
+                    "build":  "npm run build -w @wealthfire/web",
+                    "typecheck":  "npm run typecheck -w @wealthfire/core \u0026\u0026 npm run typecheck -w @wealthfire/web",
+                    "parity":  "node scripts/check-parity.mjs",
+                    "test:kyc":  "npm run test -w @wealthfire/kyc-service",
+                    "typecheck:kyc":  "npm run typecheck -w @wealthfire/kyc-service"
+                }
 }

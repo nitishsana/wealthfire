@@ -1,7 +1,8 @@
 // Shared 6-digit OTP step for the contact and Aadhaar screens (design D5).
 // Request ids, demo codes and typed codes live in component state only; nothing here is saved.
 import { useEffect, useId, useState, type FormEvent } from 'react';
-import { canSend, OTP_RULES, type OtpChannel, type OtpProvider, type OtpVerifyResult } from '@wealthfire/core';
+import { canSend, kycDemoCodeText, OTP_RULES, type OtpChannel, type OtpProvider, type OtpVerifyResult } from '@wealthfire/core';
+import { testPersona } from '../localTest';
 
 export const NO_LINKED_MOBILE = 'Your Aadhaar has no linked mobile. Link one at an Aadhaar centre, then try again.';
 
@@ -60,7 +61,8 @@ export function OtpStep({ provider, channel, target, sends, lockedUntil, initial
   const id = useId();
   const [requestId, setRequestId] = useState(initial?.ok ? initial.requestId : '');
   const [demoCode, setDemoCode] = useState(initial?.ok ? initial.demoCode ?? '' : '');
-  const [code, setCode] = useState('');
+  // localkyc test user (?persona=): the code box starts with the DEMO code; the user still clicks Verify
+  const [code, setCode] = useState(testPersona ? demoCode : '');
   const [error, setError] = useState(initial && !initial.ok && !initial.cooldown ? initial.error : '');
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -82,7 +84,7 @@ export function OtpStep({ provider, channel, target, sends, lockedUntil, initial
     const r = await requestOtp(provider, channel, target, sends, lockedUntil);
     setBusy(false);
     if (r.ok) {
-      setRequestId(r.requestId); setDemoCode(r.demoCode ?? ''); setCode('');
+      setRequestId(r.requestId); setDemoCode(r.demoCode ?? ''); setCode(testPersona ? r.demoCode ?? '' : '');
       onSent(r.at);
     } else {
       if (r.lockUntil) { onLocked(r.lockUntil); setRequestId(''); setDemoCode(''); setCode(''); }
@@ -123,6 +125,8 @@ export function OtpStep({ provider, channel, target, sends, lockedUntil, initial
     ? `Demo mode: no real Aadhaar OTP is sent. Your code is ${demoCode}. In the live app this comes from UIDAI to your Aadhaar-linked mobile.`
     : `Demo mode: no real SMS or email is sent. Your code is ${demoCode}.`;
   const errId = `${id}-err`;
+  const demoId = `${id}-demo`;
+  const describedBy = [error ? errId : '', !provider.isDemo && demoCode ? demoId : ''].filter(Boolean).join(' ') || undefined;
 
   if (locked) {
     return <p className="error" role="status">{tooMany(lockLeft)}</p>;
@@ -135,10 +139,12 @@ export function OtpStep({ provider, channel, target, sends, lockedUntil, initial
         <label className="field" htmlFor={`${id}-code`}>
           <span>6-digit code</span>
           <input id={`${id}-code`} className="otp-input" value={code} inputMode="numeric" autoComplete="one-time-code" maxLength={12} placeholder="123456"
-            pattern="[0-9]*" aria-invalid={error ? true : undefined} aria-describedby={error ? errId : undefined}
+            pattern="[0-9]*" aria-invalid={error ? true : undefined} aria-describedby={describedBy}
             onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, OTP_RULES.length))} />
         </label>
       ) : null}
+      {/* Local KYC server only (no SMS or email): the server sends the code back and it shows here. */}
+      {requestId && !provider.isDemo && demoCode && <p id={demoId} className="demo-code" role="status">{kycDemoCodeText(demoCode)}</p>}
       {error && <p id={errId} className="error" role="status">{error}</p>}
       <div className="row">
         {requestId ? (

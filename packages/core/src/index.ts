@@ -19,3 +19,7 @@ export * from './otp';
 export * from './docreader';
 export * from './cardtext';
 export * from './kyc';
+export * from './server';
+export * from './localPersonas';
+export * from './localTest';
+export * from './hashRoute';
