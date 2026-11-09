@@ -391,11 +391,21 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 | No credit history (no score) | Show a short message encouraging the user to **build a credit history** going forward. |
 | Platforms | **Consistent on web, Android and iOS, and across browsers and devices.** |
 
-### Still open (ask Nitish in the spec)
+| Who pays per pull? | **Wealthfire (the app company) pays**; free for the user. |
+| Notification channels | **All channels: in-app, SMS and email** (and phone push notifications, as part of "all channels"). |
+| Wording | Polite placeholder texts below; Nitish will edit them later. |
 
-- Cost per pull from the partner, and who pays.
-- Notification channel: in-app only, or also push notification / SMS / email?
-- Exact wording of the change notification and the no-score message.
+**Placeholder texts (Nitish to edit later):**
+
+| When | Text |
+|---|---|
+| Score went up | "Good news! Your CIBIL score went up by {points} points to {score}. Keep it up." |
+| Score went down | "Your CIBIL score changed by {points} points to {score}. Paying dues on time helps it grow again." |
+| No credit history | "You don't have a credit score yet. Using a credit card or loan wisely and paying on time will help you build one." |
+| SMS (short) | "Wealthfire: your CIBIL score is now {score} ({change}). Open the app to see more." |
+| Email subject | "Your CIBIL score has changed" |
+
+All Idea 8 questions are answered.
 
 ---
 
