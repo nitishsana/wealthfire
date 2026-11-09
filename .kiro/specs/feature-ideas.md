@@ -102,9 +102,25 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - Never used for anything else (no planning, no marketing); deleted automatically when the retention period ends.
 - The delete confirmation tells the user that some records are kept because the law requires it, and for how long.
 
+### Links that lead to the Risk tab today, and their new target
+
+When the Risk tab moves into a collapsible section of Profile, every place that opens the Risk tab today needs a new target. Found in the code (web `apps/web`, phones `packages/mobile-ui`):
+
+| # | Where today | What it does today | New target (proposal) |
+|---|---|---|---|
+| 1 | Main menu: "Risk" tab (web nav bar; phone tab bar) | Opens the Risk page | **Removed** from the menu |
+| 2 | Home, "A few steps left" card: "Take the risk quiz" link (web `ui.tsx`, phone `Core.tsx`) | Opens the Risk page | Opens **Profile with the Risk section expanded** and scrolled into view. Since the risk cards are now mandatory at the end of onboarding, this link only shows for an older user with missing answers. |
+| 3 | Home, "Risk profile" tile (shows profile and score; web hint "Take the quiz") | Text only today | Tapping it opens **Profile, Risk section expanded** (proposal: make the tile a link) |
+| 4 | Profile, Save button (web `Profile.tsx`, phone `Core.tsx`) | Jumps to the Risk page if risk is not answered | **Removed**: risk is always answered before Profile can be reached |
+| 5 | Old address `/risk` (bookmarks, test case links, the path-route fix from PR #10) | Opens the Risk page | **Redirects to Profile with the Risk section expanded**, so old links still work |
+| 6 | Feature list for the parity check (`packages/core/src/features.ts`, id `risk`) | Lists Risk as its own page | Renamed to "Profile: risk section", same on all platforms |
+| 7 | Test cases (Risk section, e.g. TC-42) | Open the Risk tab | Rewritten to open Profile's Risk section |
+
+Same behaviour on web, Android and iOS, and across browsers and devices.
+
 ### Still open (ask Nitish in the spec)
 
-- Home tiles and links that point to the Risk tab today need a new target. Same layout on web, Android and iOS.
+- Should the Home "Risk profile" tile become a link to Profile's Risk section (row 3)?
 
 ---
 
