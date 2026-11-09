@@ -50,7 +50,7 @@ It builds on the existing **Buckets** page (3 pots with time- and market-based m
 
 ### Questions to settle in the spec (ask Nitish then, not now)
 
-- Bucket 1 target: 2 or 3 years by default, and can the user choose?
+- ~~Bucket 1 target: 2 or 3 years by default, and can the user choose?~~ **Answered (Nitish, Idea board comment): the buckets are fixed, not a user choice.** Still to confirm in the spec: the fixed Bucket 1 size, 2 or 3 years (the video sheet uses 3).
 - What counts as a "sharp crash": any negative year, or a drop beyond a set % (e.g. 10% or 20%)?
 - What counts as "recovered": back to the pre-crash value in money terms, or including the missed growth?
 - The simulation horizon (e.g. to age 90 or 100), and what the dashboard shows when a bucket runs dry (the year the money runs out).
