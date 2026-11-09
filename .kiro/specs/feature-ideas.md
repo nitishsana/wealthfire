@@ -87,3 +87,28 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - If a user deletes KYC data or withdraws consent, do name and age become editable again?
 - Old users who answered Risk before this change: keep their answers, or ask again?
 - Home tiles and links that point to the Risk tab today need a new target. Same layout on web, Android and iOS.
+
+---
+
+## Idea 3: Profile asks the retirement questions and suggests numbers for each FIRE type
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+- The **Profile** tab asks for the age the person wants to retire at, plus the other details needed to plan retirement.
+- From those numbers, the app suggests the right corpus for **Lean FIRE, FIRE, Barista FIRE and Fat FIRE**, and the **SIP needed per month** to reach each one.
+- Method and fields come from this video: [YouTube ZnPV8V59in8 (from 5:09)](https://www.youtube.com/watch?v=ZnPV8V59in8&t=309s). Nitish has the **Excel sheet** shown in the video and will share it. The spec follows the sheet's inputs and formulas.
+
+### What exists today (so the spec only adds what is new)
+
+- Profile already has: name, age, city, dependents, take-home pay, current SIP, retire age, plan-till age, optional monthly spend, FIRE goal picker (Lean / FIRE / Barista / Fat), part-time income for Barista (PR #1, PR #4).
+- FIRE plan already shows: FIRE number, projected corpus, SIP needed with yearly step-up, earliest FIRE age, and a side-by-side table of all 4 FIRE types with corpus, SIP and FIRE age. Lean = 70% of spend, FIRE = 100%, Barista = spend minus part-time income, Fat = 150% (PR #4).
+
+### Questions to settle in the spec (once the Excel sheet is in)
+
+- Which inputs from the sheet are missing in Profile today (for example current corpus, existing investments, expected return, inflation, step-up, life expectancy, withdrawal rate, one-off goals)?
+- Do the sheet's multipliers or withdrawal rates for Lean, FIRE, Barista and Fat differ from today's 70% / 100% / spend minus part-time income / 150%? If so, the sheet wins.
+- Should the 4 suggestions show on Profile itself, or stay on FIRE plan with Profile linking to them?
+- Does this merge with Idea 2 (Risk inside Profile, locked name and age) into one Profile redesign?
+- Same on web, Android and iOS; numbers must match the sheet exactly for the same inputs (golden tests built from the sheet).
