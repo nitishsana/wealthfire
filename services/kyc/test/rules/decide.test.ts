@@ -134,15 +134,15 @@ describe('decide: row 3, device hand check → under-review', () => {
 
 describe('decide: row 1, KRA fast path', () => {
   it('KRA lookup not done → in progress, status unchanged', () => {
-    for (const current of ['pre-verified', 'under-review'] as const) {
-      const d = decide(base({ current, kra: undefined }), cfg);
-      expect(d).toEqual({ status: current, path: null, reason: 'in-progress', next: 'kra-lookup', checks: {} });
-    }
+    const d = decide(base({ kra: undefined }), cfg);
+    expect(d).toEqual({ status: 'pre-verified', path: null, reason: 'in-progress', next: 'kra-lookup', checks: {} });
+    const t = decide(base({ current: 'under-review', currentReason: 'partner-timeout', kra: undefined }), cfg);
+    expect(t).toEqual({ status: 'under-review', path: null, reason: 'partner-timeout', next: 'kra-lookup', checks: {} });
   });
-  it('KRA timeout → under-review, kra unclear', () => {
+  it('KRA timeout → under-review, reason partner-timeout, kra unclear', () => {
     const d = decide(base({ kra: 'timeout' }), cfg);
     expect(d).toEqual({
-      status: 'under-review', path: null, reason: 'check-unclear', next: 'wait', checks: {}, unclear: ['kra'],
+      status: 'under-review', path: null, reason: 'partner-timeout', next: 'wait', checks: {}, unclear: ['kra'],
     });
   });
   it('validated + name match + DOB match → verified (kra-validated)', () => {
@@ -152,8 +152,9 @@ describe('decide: row 1, KRA fast path', () => {
       checks: { 'kra-name': 'pass', 'kra-dob': 'pass' },
     });
   });
-  it('validated from an under-review case also verifies', () => {
-    expect(decide(base({ current: 'under-review', kra: kraOk }), cfg).status).toBe('verified');
+  it('validated from an under-review partner-timeout case verifies (system retry)', () => {
+    const d = decide(base({ current: 'under-review', currentReason: 'partner-timeout', kra: kraOk }), cfg);
+    expect(d).toMatchObject({ status: 'verified', path: 'kra-validated', reason: 'kra-validated' });
   });
   it('validated but name fails → falls to full KYC', () => {
     const d = decide(base({ kra: { ...kraOk, name: 'RAHUL SANA' } }), cfg);
@@ -243,19 +244,19 @@ describe('decide: row 2, full KYC', () => {
   });
 
   describe('row 3: any unclear check → under-review', () => {
-    const cases: [string, Partial<DecideInput>, string[]][] = [
-      ['Aadhaar timeout', { aadhaar: 'timeout' }, ['aadhaar']],
-      ['PAN timeout', { pan: 'timeout' }, ['pan']],
-      ['PAN name partial', { pan: { ...panOk, nameMatch: false } }, ['pan-name']],
-      ['PAN not Aadhaar-linked', { pan: { ...panOk, aadhaarLinked: false } }, ['pan-aadhaar-link']],
-      ['face match timeout', { face: ['timeout'] }, ['face-match']],
-      ['low face score', { face: [{ match: 0.79, live: true }] }, ['face-match']],
-      ['e-sign timeout', { esign: 'timeout' }, ['esign']],
+    const cases: [string, Partial<DecideInput>, string[], 'check-unclear' | 'partner-timeout'][] = [
+      ['Aadhaar timeout', { aadhaar: 'timeout' }, ['aadhaar'], 'partner-timeout'],
+      ['PAN timeout', { pan: 'timeout' }, ['pan'], 'partner-timeout'],
+      ['PAN name partial', { pan: { ...panOk, nameMatch: false } }, ['pan-name'], 'check-unclear'],
+      ['PAN not Aadhaar-linked', { pan: { ...panOk, aadhaarLinked: false } }, ['pan-aadhaar-link'], 'check-unclear'],
+      ['face match timeout', { face: ['timeout'] }, ['face-match'], 'partner-timeout'],
+      ['low face score', { face: [{ match: 0.79, live: true }] }, ['face-match'], 'check-unclear'],
+      ['e-sign timeout', { esign: 'timeout' }, ['esign'], 'partner-timeout'],
     ];
-    for (const [label, over, unclear] of cases) {
+    for (const [label, over, unclear, reason] of cases) {
       it(label, () => {
         const d = decide(fullPass(over), cfg);
-        expect(d).toMatchObject({ status: 'under-review', path: 'full-kyc', reason: 'check-unclear', next: 'wait' });
+        expect(d).toMatchObject({ status: 'under-review', path: 'full-kyc', reason, next: 'wait' });
         expect(d.unclear).toEqual(unclear);
         for (const name of unclear) expect(d.checks[name as keyof typeof d.checks]).toBe('unclear');
       });
@@ -292,10 +293,18 @@ describe('transition guards', () => {
   const all: KycStatus[] = ['pre-verified', 'under-review', 'verified', 'rejected'];
   it('system: terminal cases never move; under-review never goes back to pre-verified', () => {
     for (const to of all) {
-      expect(canSystemTransition('verified', to)).toBe(false);
-      expect(canSystemTransition('rejected', to)).toBe(false);
+      expect(canSystemTransition('verified', to, 'partner-timeout')).toBe(false);
+      expect(canSystemTransition('rejected', to, 'partner-timeout')).toBe(false);
       expect(canSystemTransition('pre-verified', to)).toBe(true);
-      expect(canSystemTransition('under-review', to)).toBe(to !== 'pre-verified');
+      expect(canSystemTransition('under-review', to, 'partner-timeout')).toBe(to !== 'pre-verified');
+    }
+  });
+  it('system: under-review → verified only when the reason is partner-timeout', () => {
+    expect(canSystemTransition('under-review', 'verified', 'partner-timeout')).toBe(true);
+    for (const r of [undefined, null, 'check-unclear', 'device-hand-check', 'in-progress'] as const) {
+      expect(canSystemTransition('under-review', 'verified', r)).toBe(false);
+      expect(canSystemTransition('under-review', 'rejected', r)).toBe(true);
+      expect(canSystemTransition('under-review', 'under-review', r)).toBe(true);
     }
   });
   it('staff: only under-review → verified / rejected', () => {
@@ -310,13 +319,63 @@ describe('transition guards', () => {
       base({ kra: undefined }), base({ kra: 'timeout' }), base({ kra: kraOk }), base(), fullPass(),
       fullPass({ panIndividual: false }), fullPass({ deviceHandCheck: true }), fullPass({ esign: 'timeout' }),
     ];
-    for (const current of ['pre-verified', 'under-review'] as const) {
+    const starts = [
+      { current: 'pre-verified' as const, currentReason: null },
+      ...([null, 'partner-timeout', 'check-unclear', 'device-hand-check'] as const).map((r) => ({
+        current: 'under-review' as const, currentReason: r,
+      })),
+    ];
+    for (const s of starts) {
       for (const i of inputs) {
-        const d = decide({ ...i, current }, cfg);
-        if (d.status !== current) expect(canSystemTransition(current, d.status)).toBe(true);
-        expect(current === 'under-review' && d.status === 'pre-verified').toBe(false);
+        const d = decide({ ...i, ...s }, cfg);
+        if (d.status !== s.current) expect(canSystemTransition(s.current, d.status, s.currentReason)).toBe(true);
+        expect(s.current === 'under-review' && d.status === 'pre-verified').toBe(false);
       }
     }
+  });
+});
+
+describe('decide: under-review cases (system vs staff)', () => {
+  const ur = (currentReason: DecideInput['currentReason'], over: Partial<DecideInput> = {}) =>
+    base({ current: 'under-review', currentReason, ...over });
+
+  it('partner-timeout: a retry that now passes verifies (KRA and full KYC)', () => {
+    expect(decide(ur('partner-timeout', { kra: kraOk }), cfg).status).toBe('verified');
+    expect(decide({ ...fullPass(), current: 'under-review', currentReason: 'partner-timeout' }, cfg)).toMatchObject({
+      status: 'verified', reason: 'full-kyc-passed',
+    });
+  });
+  it('partner-timeout: steps still missing → stays under-review, reason kept, next is the step', () => {
+    const d = decide(ur('partner-timeout', { aadhaar: aadhaarOk }), cfg);
+    expect(d).toMatchObject({ status: 'under-review', reason: 'partner-timeout', next: 'pan-check' });
+  });
+  it('partner-timeout: a real doubt on retry becomes check-unclear', () => {
+    const d = decide({ ...fullPass({ face: [{ match: 0.5, live: true }] }), current: 'under-review', currentReason: 'partner-timeout' }, cfg);
+    expect(d).toMatchObject({ status: 'under-review', reason: 'check-unclear', unclear: ['face-match'] });
+  });
+  for (const r of ['check-unclear', 'device-hand-check', null, undefined] as const) {
+    it(`reason ${String(r)}: never verified by the system, waits for staff`, () => {
+      for (const i of [ur(r, { kra: kraOk }), { ...fullPass(), current: 'under-review' as const, currentReason: r }, ur(r)]) {
+        const d = decide(i, cfg);
+        expect(d.status).toBe('under-review');
+        expect(d.next).toBe('wait');
+        expect(d.reason).toBe(r ?? 'check-unclear');
+      }
+    });
+    it(`reason ${String(r)}: a clear fail still rejects`, () => {
+      expect(decide(ur(r, { panIndividual: false }), cfg).status).toBe('rejected');
+    });
+  }
+  it('a staff-needed case is never relabelled partner-timeout by a later timeout', () => {
+    expect(decide(ur('check-unclear', { kra: 'timeout' }), cfg).reason).toBe('check-unclear');
+    expect(decide(ur(undefined, { kra: 'timeout' }), cfg).reason).toBe('check-unclear');
+  });
+  it('without a stored reason, a fresh unclear reason is kept (device hand check)', () => {
+    expect(decide(ur(undefined, { deviceHandCheck: true }), cfg).reason).toBe('device-hand-check');
+  });
+  it('keeps unclear names on a staff-needed case', () => {
+    const d = decide({ ...fullPass({ face: [{ match: 0.5, live: true }] }), current: 'under-review', currentReason: 'check-unclear' }, cfg);
+    expect(d.unclear).toEqual(['face-match']);
   });
 });
 

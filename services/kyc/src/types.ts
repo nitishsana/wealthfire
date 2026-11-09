@@ -36,6 +36,8 @@ export type ReasonCode =
   | 'full-kyc-passed'
   | 'in-progress'
   | 'check-unclear'
+  /** under review only because a partner call still timed out after its retries; a later system retry may verify */
+  | 'partner-timeout'
   | 'device-hand-check'
   | 'pan-invalid'
   | 'pan-not-individual'

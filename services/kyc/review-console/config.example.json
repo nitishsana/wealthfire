@@ -1,0 +1,7 @@
+{
+  "apiUrl": "https://YOUR-API-ID.execute-api.ap-south-1.amazonaws.com/prod",
+  "cognitoDomain": "https://YOUR-DOMAIN-PREFIX.auth.ap-south-1.amazoncognito.com",
+  "clientId": "YOUR-REVIEW-CONSOLE-APP-CLIENT-ID",
+  "redirectUri": "https://YOUR-CONSOLE-HOST/",
+  "logoutUri": "https://YOUR-CONSOLE-HOST/"
+}

@@ -12,6 +12,11 @@ export type Timeout = 'timeout';
 export interface DecideInput {
   /** the case's current status (first call: the device result) */
   current: KycStatus;
+  /**
+   * the case's stored reason. An under-review case may be moved to verified by the system only
+   * when this is 'partner-timeout'; any other under-review case waits for staff.
+   */
+  currentReason?: ReasonCode | null;
   /** device onboarding sent the documents for a hand check */
   deviceHandCheck: boolean;
   /** typed at onboarding */
@@ -53,10 +58,15 @@ export class KycTransitionError extends Error {
 
 const TERMINAL: ReadonlySet<KycStatus> = new Set(['verified', 'rejected']);
 
-/** System (non-staff) moves: terminal cases never change; a case never goes back to pre-verified. */
-export function canSystemTransition(from: KycStatus, to: KycStatus): boolean {
+/**
+ * System (non-staff) moves: terminal cases never change; a case never goes back to pre-verified;
+ * an under-review case reaches verified without staff only when its reason is 'partner-timeout'.
+ */
+export function canSystemTransition(from: KycStatus, to: KycStatus, fromReason?: ReasonCode | null): boolean {
   if (TERMINAL.has(from)) return false;
-  return !(from === 'under-review' && to === 'pre-verified');
+  if (from === 'under-review' && to === 'pre-verified') return false;
+  if (from === 'under-review' && to === 'verified') return fromReason === 'partner-timeout';
+  return true;
 }
 
 /** Staff moves: only an under-review case, only to verified or rejected. */
@@ -66,12 +76,36 @@ export function canStaffTransition(from: KycStatus, to: KycStatus): boolean {
 
 const isTimeout = (v: unknown): v is Timeout => v === 'timeout';
 
-/** Evaluate all known evidence for a case (design §5 rows 1–4). Throws KycTransitionError on a terminal case. */
+/**
+ * Evaluate all known evidence for a case (design §5 rows 1–4). Throws KycTransitionError on a terminal case.
+ *
+ * Under-review cases: a clear fail still rejects. When `currentReason` is 'partner-timeout' the
+ * evidence decides as usual (a retry that now passes verifies; while steps are missing the case
+ * stays under-review with reason 'partner-timeout'). Any other under-review case stays
+ * under-review with its reason and next 'wait' until staff decide.
+ */
 export function decide(input: DecideInput, config: KycConfig): Decision {
   const { current } = input;
   if (TERMINAL.has(current)) {
     throw new KycTransitionError(current, current, `case is ${current}; only a new case can change it`);
   }
+  const d = evaluate(input, config);
+  if (current !== 'under-review' || d.status === 'rejected') return d;
+  if (input.currentReason === 'partner-timeout') {
+    return d.reason === 'in-progress' ? { ...d, status: 'under-review', reason: 'partner-timeout' } : d;
+  }
+  // Waits for staff: never verified by the system, never relabelled as a timeout.
+  const keep: ReasonCode =
+    input.currentReason ??
+    (d.status === 'under-review' && d.reason !== 'partner-timeout' && d.reason !== 'in-progress' ? d.reason : 'check-unclear');
+  return {
+    status: 'under-review', path: d.path, reason: keep, next: 'wait', checks: d.checks,
+    ...(d.unclear ? { unclear: d.unclear } : {}),
+  };
+}
+
+function evaluate(input: DecideInput, config: KycConfig): Decision {
+  const { current } = input;
   const checks: Partial<Record<CheckName, CheckResult>> = {};
   const reject = (reason: ReasonCode): Decision => ({ status: 'rejected', path: 'full-kyc', reason, next: 'none', checks });
 
@@ -109,7 +143,7 @@ export function decide(input: DecideInput, config: KycConfig): Decision {
   }
   if (isTimeout(kra)) {
     return {
-      status: 'under-review', path: null, reason: 'check-unclear', next: 'wait', checks, unclear: ['kra'],
+      status: 'under-review', path: null, reason: 'partner-timeout', next: 'wait', checks, unclear: ['kra'],
     };
   }
   if (kra.status === 'validated') {
@@ -143,6 +177,13 @@ export function decide(input: DecideInput, config: KycConfig): Decision {
   const e = input.esign;
   steps.push({ step: 'esign', results: [['esign', e === 'done' ? 'pass' : isTimeout(e) ? 'unclear' : null]] });
 
+  // Unclear only because a partner call timed out (not a real doubt about the person).
+  const timedOut = new Set<CheckName>();
+  if (isTimeout(a)) timedOut.add('aadhaar');
+  if (isTimeout(p)) timedOut.add('pan');
+  if (isTimeout(faces[faces.length - 1])) timedOut.add('face-match');
+  if (isTimeout(e)) timedOut.add('esign');
+
   const unclear: CheckName[] = [];
   let next: NextStep | null = null;
   for (const s of steps) {
@@ -155,7 +196,8 @@ export function decide(input: DecideInput, config: KycConfig): Decision {
     }
   }
   if (unclear.length > 0) {
-    return { status: 'under-review', path: 'full-kyc', reason: 'check-unclear', next: 'wait', checks, unclear };
+    const reason: ReasonCode = unclear.every((n) => timedOut.has(n)) ? 'partner-timeout' : 'check-unclear';
+    return { status: 'under-review', path: 'full-kyc', reason, next: 'wait', checks, unclear };
   }
   if (next !== null) {
     return { status: current, path: 'full-kyc', reason: 'in-progress', next, checks };
