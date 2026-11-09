@@ -360,3 +360,31 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**. Split out of Idea 6.
 - Joint accounts and joint loans: count once, or split between members?
 - Is KYC needed for each member, or only for members who invest?
 - Same on web, Android and iOS.
+
+---
+
+## Idea 8: CIBIL credit score in the Net worth tab
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+- Fetch the user's **CIBIL score**.
+- Show it **inside the Net worth tab**.
+- **Whenever the score changes**, show the change (for example "Your CIBIL score went up 12 points to 781").
+
+### Notes for the spec
+
+- The score comes from a credit bureau (TransUnion CIBIL; others are Experian, Equifax and CRIF High Mark), through a bureau partnership or a licensed reseller, with the user's consent and an OTP. It is pulled against the PAN and the mobile number already verified in onboarding.
+- The same credit report also lists all loans and credit cards, so it can feed **Idea 6's liabilities** (loans not found through the Account Aggregator).
+- A user's own check is a "soft" enquiry and does not lower the score.
+- Consent, storage and deletion follow the same rules as KYC data; "Delete my KYC data" (Idea 2) also erases the credit report, except anything the law requires to keep.
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- Which bureau or partner: CIBIL only, or the best available bureau?
+- How often to refresh (monthly, or on opening the app), and is there a cost per pull?
+- How the change is shown: a line and arrow on the Net worth tab only, or also an alert or notification?
+- Show the score history as a chart, and the main reasons (late payments, credit use, age of accounts)?
+- What happens if the user has no credit history (no score)?
+- Same on web, Android and iOS.
