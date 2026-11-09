@@ -380,11 +380,36 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - A user's own check is a "soft" enquiry and does not lower the score.
 - Consent, storage and deletion follow the same rules as KYC data; "Delete my KYC data" (Idea 2) also erases the credit report, except anything the law requires to keep.
 
+### Answers from Nitish (Idea board comments, 2026-11-09)
+
+| Question | Answer |
+|---|---|
+| Which bureau? | The **best and most used bureau in India**. Today that is TransUnion CIBIL; Experian, Equifax and CRIF High Mark are the alternatives if CIBIL is not available through the partner. |
+| How often to refresh? | **Automatically once every 15 days** (this overrides an earlier "monthly" note). When the user logs in and 15 days have passed since the last pull, refresh then. |
+| How is a change shown? | On the Net worth tab, **and a notification** is sent whenever the score changes. |
+| Score history chart and main reasons | **Not now**: moved to a later idea (Idea 9). |
+| No credit history (no score) | Show a short message encouraging the user to **build a credit history** going forward. |
+| Platforms | **Consistent on web, Android and iOS, and across browsers and devices.** |
+
+### Still open (ask Nitish in the spec)
+
+- Cost per pull from the partner, and who pays.
+- Notification channel: in-app only, or also push notification / SMS / email?
+- Exact wording of the change notification and the no-score message.
+
+---
+
+## Idea 9: Credit score history and reasons (later)
+
+Added 2026-11-09 by Nitish (split from Idea 8, "for future consideration, not right now"). Status: **idea, later**.
+
+### What Nitish wants
+
+- A **chart of the credit score over time** (each 15-day refresh from Idea 8).
+- The **main reasons** behind the score and its changes (for example late payments, how much of the credit limit is used, age of accounts, number of new loan enquiries), with simple tips to improve it.
+
 ### Questions to settle in the spec (ask Nitish then, not now)
 
-- Which bureau or partner: CIBIL only, or the best available bureau?
-- How often to refresh (monthly, or on opening the app), and is there a cost per pull?
-- How the change is shown: a line and arrow on the Net worth tab only, or also an alert or notification?
-- Show the score history as a chart, and the main reasons (late payments, credit use, age of accounts)?
-- What happens if the user has no credit history (no score)?
-- Same on web, Android and iOS.
+- How far back the chart goes, and whether old points are kept after "Delete my KYC data" (Idea 2 says all data is erased).
+- Which reasons the bureau partner actually provides.
+- Same on web, Android and iOS, across browsers and devices.
