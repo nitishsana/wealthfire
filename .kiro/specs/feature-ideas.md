@@ -231,3 +231,38 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - Existing users' saved dependents value: delete it, or keep it hidden?
 - Where does the new tab sit in the menu, and does FIRE plan merge into it or stay separate?
 - Home tiles and links that open these fields in Profile today need the new target. Same on web, Android and iOS.
+
+---
+
+## Idea 6: Find and link all accounts by phone number, then fill Net worth
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+- **When:** the next flow after the risk profile is done.
+- **Find accounts by phone number:** automatically fetch every account mapped to the user's phone number:
+  - bank accounts
+  - EPFO (provident fund)
+  - Demat accounts (stocks, mutual funds)
+  - NPS accounts
+- **Choose:** show all the accounts found. The user can **untick any account** they don't want linked.
+- **Fetch the money data:** for the accounts kept, fetch the credits and debits (and balances or holdings).
+- **Fill Net worth:** put everything into the **Net worth** tab, sorted into **Assets** (bank balances, EPF, Demat holdings, NPS, deposits) and **Liabilities** (loans, credit card dues).
+
+### Notes for the spec
+
+- In India this is done through the RBI **Account Aggregator** framework: a licensed AA (for example Finvu, OneMoney, Setu, Anumati) finds accounts linked to the mobile number and shares data only after the user approves a **consent** on the AA's screen. Wealthfire would need an AA / FIU partner agreement and its sandbox, like the KYC partner. Already noted as a gap: "Bank links need an Account Aggregator partner and are not built".
+- Coverage to check with the partner: banks and deposits are widely available; Demat (via NSDL / CDSL), mutual funds (CAS) and NPS (via the CRAs) are available through some AAs; **EPFO** may not be available through AAs yet and could need another route (for example the EPF passbook / UAN). Loans and credit cards: check which lenders share liabilities.
+- Consent rules: purpose, which data, how long, how often; the user can revoke. Data handling follows the same privacy and retention rules as KYC (adviser to confirm).
+- Today's app: Connect page has "Coming soon" placeholders for Bank, CAS, Stocks/broker and EPF/NPS; Net worth is typed in by hand; Expenses reads card statements and Gmail alerts. Fetched debits could also feed Expenses.
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- **Order:** Idea 4 says the Retirement planner starts right after the risk profile; this idea also comes right after it. Which comes first, or does account linking feed the planner (existing investments, EPF, NPS filled in automatically)?
+- Can the user skip linking and type numbers by hand instead?
+- How often are accounts refreshed (once, daily, on opening the app)?
+- Do fetched debits also go into Expenses, with categories?
+- Manual entries already in Net worth: keep beside the linked ones, replace, or ask?
+- Which AA partner, and what happens on the local test mode (a fake AA like the fake KYC partner)?
+- Same flow on web, Android and iOS.
