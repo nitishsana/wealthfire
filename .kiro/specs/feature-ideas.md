@@ -201,3 +201,33 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - One question per screen or grouped screens; a progress bar; a Back button?
 - Does the end screen pick one FIRE type as the goal (today's Profile "FIRE goal")?
 - Same flow on web, Android and iOS.
+
+---
+
+## Idea 5: Slimmer Profile and a new "Retirement planner" tab
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+- **Profile tab: remove** the field "People who depend on you".
+- **Move out of Profile into a new tab called "Retirement planner":**
+  - Monthly take-home pay
+  - Current monthly SIP
+  - Age you want to retire
+  - Plan money till age
+  - All the cards under "Which FIRE are you aiming for?" (Lean, FIRE, Barista, Fat, with the Barista part-time income box)
+- **Profile keeps** the personal details (name, age, city; and, with Idea 2, the risk profile toggle and the locked name and age).
+
+### Links to other ideas
+
+- **Idea 4:** the first-run Retirement planner flow should now save its answers into this **Retirement planner tab** (not Profile).
+- **Idea 3:** its extra inputs (live-up-to age, spend without EMIs, inflation, returns, existing investments, EPF / NPS / gratuity, estate) and the suggested corpus and SIP per FIRE type also belong in this tab.
+- **Idea 1:** the bucket simulator could sit here too, or stay on the Buckets page.
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- Is dependents used anywhere today (for example in the FIRE number)? If so, drop it from the maths too, or keep a default?
+- Existing users' saved dependents value: delete it, or keep it hidden?
+- Where does the new tab sit in the menu, and does FIRE plan merge into it or stay separate?
+- Home tiles and links that open these fields in Profile today need the new target. Same on web, Android and iOS.
