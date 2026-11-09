@@ -94,9 +94,16 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 
 **Change to what is live today:** Profile currently has both "Withdraw consent" and "Delete my KYC data" (PR #10). This idea removes the "Withdraw consent" button, its server routes stay unused or are removed, and the test cases for it (TC-72, TC-79) are retired. Note for the compliance adviser: India's data protection law expects users to be able to withdraw consent; "Delete my KYC data" must count as that withdrawal and say so in its text.
 
+| Records the law requires after "Delete my KYC data" | **Keep them in the KYC server's database and handle them by the rules** (Nitish, Idea board comment). Everything else is erased. |
+
+**How the kept records are handled** (to confirm with the compliance adviser):
+- Keep only what KYC and anti-money-laundering rules require for a verified KYC (for example the KYC record, consent and audit trail), for the retention period the adviser sets (`DOC_RETENTION_DAYS`). Everything else is erased at once.
+- Encrypted at rest, in India (ap-south-1), reachable only by authorised staff, every access audited (as built in PR #10).
+- Never used for anything else (no planning, no marketing); deleted automatically when the retention period ends.
+- The delete confirmation tells the user that some records are kept because the law requires it, and for how long.
+
 ### Still open (ask Nitish in the spec)
 
-- "Delete my KYC data" erasing everything: the KYC server must still keep what the law requires (the retention rule) for a verified KYC; the app's own data is fully erased. Confirm with the compliance adviser.
 - Home tiles and links that point to the Risk tab today need a new target. Same layout on web, Android and iOS.
 
 ---
