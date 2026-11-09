@@ -274,13 +274,39 @@ Checked INDmoney's public pages to see which sources a full, correct net worth n
 | PPF, other deposits | Listed among tracked items ([how the tracker started](https://www.indmoney.com/blog/personal-finance/the-idea-behind-networth-on-indmoney)) | Bank / post office via AA where available, else manual | Asset |
 | Credit cards, loans, EMIs | Listed among tracked items (same blog) | AA for lenders that share; credit bureau report for the rest | Liability |
 | Insurance policies | Listed among tracked items (same blog) | Manual entry (policy, cover, premium) | Shown separately (cover is not net worth; surrender value can be an asset) |
-| Family members | Separate and combined family net worth ([family accounts](https://www.indmoney.com/networth/family-accounts)) | Later idea | Both |
+| Family members | Separate and combined family net worth ([family accounts](https://www.indmoney.com/networth/family-accounts)) | Moved to **Idea 7** | Both |
 
 Other things a correct net worth usually needs, typed in by hand: gold (physical and Sovereign Gold Bonds), real estate, recurring deposits and post office schemes, company shares (ESOP / RSU / ESPP), cash, money lent to others, and crypto.
 
+### Decided: every source above is in Idea 6 (Nitish, 2026-11-09)
+
+All of these are connected in this idea; the account-linking flow and the Net worth tab must cover each one:
+
+| # | Source | Connected by | Net worth side |
+|---|---|---|---|
+| 1 | Bank savings and current accounts | Account Aggregator (found by phone number) | Asset |
+| 2 | Fixed deposits | Account Aggregator | Asset |
+| 3 | Mutual funds held anywhere | MF Central / CAMS-KFintech CAS with OTP consent | Asset |
+| 4 | Indian stocks and ETFs across all brokers and Demat accounts | NSDL / CDSL CAS, or Account Aggregator | Asset |
+| 5 | US stocks | Typed in by hand (broker link later if available) | Asset |
+| 6 | EPF | UAN-based fetch | Asset |
+| 7 | NPS | NPS CRA, or Account Aggregator | Asset |
+| 8 | PPF and other small savings | Account Aggregator where the bank or post office shares it, else typed in | Asset |
+| 9 | Loans (home, car, personal, education, gold, loan against property) | Account Aggregator, plus credit bureau report for lenders not on AA | Liability |
+| 10 | Credit cards and EMIs | Account Aggregator, plus credit bureau report | Liability |
+| 11 | Insurance policies | Typed in (policy, cover, premium, surrender value) | Cover shown separately; surrender value is an asset |
+| 12 | Gold and Sovereign Gold Bonds | Typed in (SGBs may come through the Demat CAS) | Asset |
+| 13 | Real estate | Typed in | Asset |
+| 14 | Recurring deposits, post office schemes | Account Aggregator where available, else typed in | Asset |
+| 15 | Company shares (ESOP / RSU / ESPP) | Typed in | Asset |
+| 16 | Cash and money lent to others | Typed in | Asset |
+| 17 | Crypto | Typed in | Asset |
+
+Family members are a separate idea (Idea 7).
+
 ### Questions to settle in the spec (ask Nitish then, not now)
 
-- Which sources from the table go in v1, and which later? Is "family net worth" in scope?
+- Build all 17 sources at once, or in waves (connected sources first, typed-in ones next)?
 - **Order:** Idea 4 says the Retirement planner starts right after the risk profile; this idea also comes right after it. Which comes first, or does account linking feed the planner (existing investments, EPF, NPS filled in automatically)?
 - Can the user skip linking and type numbers by hand instead?
 - How often are accounts refreshed (once, daily, on opening the app)?
@@ -290,3 +316,29 @@ Other things a correct net worth usually needs, typed in by hand: gold (physical
 - Can the user untick a loan? (Unticking would hide a real liability, so Net worth would look higher.)
 - Which AA partner, and what happens on the local test mode (a fake AA like the fake KYC partner)?
 - Same flow on web, Android and iOS.
+
+---
+
+## Idea 7: Family net worth
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**. Split out of Idea 6.
+
+### What Nitish wants
+
+- Add family members (for example spouse, parents, children) to the user's account.
+- Track each member's net worth **separately**, and see the **combined family** net worth, assets and liabilities, without mixing their accounts.
+- Similar to INDmoney's Family Accounts ([family accounts](https://www.indmoney.com/networth/family-accounts)).
+
+### Links to other ideas
+
+- Uses Idea 6's sources (all 17) for each member.
+- Could later feed a family retirement plan (Ideas 3, 4 and 5).
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- Who can be added, and how: does each member sign in and approve consent for their own accounts (needed for Account Aggregator and KYC data), or can the main user add typed-in numbers for them?
+- What can each member see: only their own, or the whole family?
+- Can a member leave or be removed, and what happens to their data?
+- Joint accounts and joint loans: count once, or split between members?
+- Is KYC needed for each member, or only for members who invest?
+- Same on web, Android and iOS.
