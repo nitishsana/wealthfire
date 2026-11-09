@@ -5,6 +5,7 @@ import {
   panSurnameWarning, prefillProfileName, pruneSends, resumeStep, serialize, validateAadhaar, validateEmail,
   validateMobile, validateName, validatePan, verhoeffValid, verhoeffCheckDigit, emptyKyc, isEligibleToInvest,
   sanitizeOnboarding, readBlocked, readsLeft, resendIn, confirmAadhaarRetype, type OnboardingEvent, type OnboardingState,
+  signedOutHint, canSendForHandCheck,
 } from '../src';
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -247,12 +248,59 @@ describe('reducer', () => {
     expect(docs.kyc.status).toBeNull();
   });
 
-  it('sign-out resets onboarding only', () => {
-    const data = { ...demoData(new Date(T0)), onboarding: runHappyPath() };
+  it('sign-out after a finished onboarding ends the session only (TC-37)', () => {
+    const done = runHappyPath();
+    const data = { ...demoData(new Date(T0)), onboarding: done };
     const out = { ...data, onboarding: onboardingReducer(data.onboarding, { type: 'sign-out' }) };
-    expect(out.onboarding).toEqual(emptyOnboarding());
+    expect(out.onboarding.step).toBe('signin');
+    expect(out.onboarding.contact).toBeNull();
+    expect(out.onboarding.identity).toEqual(done.identity);
+    expect(out.onboarding.aadhaar).toEqual(done.aadhaar);
+    expect(out.onboarding.kyc).toEqual(done.kyc);
+    expect(out.onboarding.signedOut).toEqual({ kind: 'mobile', value: '9876543210', completedAt: done.completedAt });
+    expect(signedOutHint(out.onboarding)).toBe('Sign in with +91 ******3210 to open your planner again.');
     expect(out.assets).toEqual(data.assets);
     expect(out.profile).toEqual(data.profile);
+    // before onboarding is finished, sign-out still starts over
+    const half = onboardingReducer(emptyOnboarding(), { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } });
+    expect(onboardingReducer(half, { type: 'sign-out' })).toEqual(emptyOnboarding());
+  });
+
+  it('signing in again with the same contact opens the planner; another contact starts over', () => {
+    const done = runHappyPath();
+    const out = onboardingReducer(done, { type: 'sign-out' });
+    const send = (s: OnboardingState, value: string) =>
+      onboardingReducer(s, { type: 'otp-sent', channel: 'contact', at: iso(T0 + 200_000), contact: { kind: 'mobile', value } });
+    const back = onboardingReducer(send(out, '98765 43210'), { type: 'contact-verified', at: iso(T0 + 210_000) });
+    expect(back.step).toBe('done');
+    expect(back.signedOut).toBeNull();
+    expect(back.identity).toEqual(done.identity);
+    expect(back.kyc.status).toBe('pre-verified');
+    expect(back.completedAt).toBe(done.completedAt);
+    expect(back.contact).toEqual({ kind: 'mobile', value: '9876543210', verifiedAt: iso(T0 + 210_000) });
+    // a different contact: new person, onboarding from Your details with nothing kept
+    const other = onboardingReducer(send(out, '9123456780'), { type: 'contact-verified', at: iso(T0 + 210_000) });
+    expect(other.step).toBe('identity');
+    expect(other.identity).toBeNull();
+    expect(other.aadhaar).toBeNull();
+    expect(other.kyc).toEqual(emptyKyc());
+    expect(other.signedOut).toBeFalsy();
+    // Change (back to sign in) and sign-out again keep the finished onboarding
+    const changed = onboardingReducer(send(out, '9123456780'), { type: 'change-contact' });
+    expect(changed.identity).toBeNull(); // the other contact already started a new person
+    const again = onboardingReducer(onboardingReducer(out, { type: 'sign-out' }), { type: 'sign-out' });
+    expect(again.signedOut).toEqual(out.signedOut);
+    expect(again.identity).toEqual(done.identity);
+  });
+
+  it('the signed-out state survives a reload (sanitize) and is dropped when its data is gone', () => {
+    const out = onboardingReducer(runHappyPath(), { type: 'sign-out' });
+    const back = sanitizeOnboarding(JSON.parse(JSON.stringify(out)));
+    expect(back.step).toBe('signin');
+    expect(back.signedOut).toEqual(out.signedOut);
+    expect(back.identity).toEqual(out.identity);
+    expect(sanitizeOnboarding({ ...JSON.parse(JSON.stringify(out)), aadhaar: null }).signedOut).toBeUndefined();
+    expect(sanitizeOnboarding({ ...JSON.parse(JSON.stringify(out)), signedOut: { kind: 'mobile', value: '123' } }).signedOut).toBeUndefined();
   });
 
   it('prefillProfileName', () => {
@@ -523,8 +571,42 @@ describe('Part C: reducer order (Aadhaar OTP once, before documents)', () => {
     for (const [s, e] of cases) expect(onboardingReducer(s, e)).toBe(s);
   });
 
-  it('sign-out clears kyc too', () => {
-    expect(onboardingReducer(runHappyPath(), { type: 'sign-out' }).kyc).toEqual(emptyKyc());
+  it('sign-out keeps the finished kyc; a new person starts with an empty one', () => {
+    const out = onboardingReducer(runHappyPath(), { type: 'sign-out' });
+    expect(out.kyc.status).toBe('pre-verified');
+    const other = onboardingReducer(out, { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'email', value: 'new@b.test' } });
+    expect(other.kyc).toEqual(emptyKyc());
+  });
+
+  it('TC-50: a kept card after Back is not counted as a re-read; a re-read card is', () => {
+    const atCheck = [
+      { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } },
+      { type: 'contact-verified', at: iso(T0) },
+      { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' },
+      { type: 'aadhaar-verified', last4: '2346', at: iso(T0), provider: 'demo' },
+      { type: 'documents-ready', at: iso(T0), reader: 'demo' },
+    ].reduce((s, e) => onboardingReducer(s, e as OnboardingEvent), emptyOnboarding());
+    const back = onboardingReducer(atCheck, { type: 'back-to-documents' });
+    expect(onboardingReducer(back, { type: 'documents-ready', at: iso(T0), reader: 'demo', reread: [] }).kyc.rereads).toEqual({ pan: 0, aadhaar: 0 });
+    expect(onboardingReducer(back, { type: 'documents-ready', at: iso(T0), reader: 'demo', reread: ['pan'] }).kyc.rereads).toEqual({ pan: 1, aadhaar: 0 });
+    expect(onboardingReducer(back, { type: 'documents-ready', at: iso(T0), reader: 'demo' }).kyc.rereads).toEqual({ pan: 1, aadhaar: 1 });
+  });
+
+  it('TC-21: a good read clears that card\'s failed tries (locked PDF before its password)', () => {
+    const docs = [
+      { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } },
+      { type: 'contact-verified', at: iso(T0) },
+      { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' },
+      { type: 'aadhaar-verified', last4: '2346', at: iso(T0), provider: 'demo' },
+      { type: 'read-failed', field: 'aadhaar' },
+      { type: 'read-failed', field: 'aadhaar' },
+    ].reduce((s, e) => onboardingReducer(s, e as OnboardingEvent), emptyOnboarding());
+    expect(canSendForHandCheck(docs.kyc)).toBe(true);
+    const ok = onboardingReducer(docs, { type: 'read-ok', field: 'aadhaar' });
+    expect(ok.kyc.failedReads).toEqual({ pan: 0, aadhaar: 0 });
+    expect(canSendForHandCheck(ok.kyc)).toBe(false);
+    expect(onboardingReducer(ok, { type: 'read-ok', field: 'aadhaar' })).toBe(ok);
+    expect(onboardingReducer(emptyOnboarding(), { type: 'read-ok', field: 'pan' })).toEqual(emptyOnboarding());
   });
 });
 

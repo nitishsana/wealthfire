@@ -6,7 +6,7 @@
 // go straight to their presigned upload URLs. Same steps and texts as packages/mobile-ui/src/server.tsx.
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import {
-  CONSENT_TEXT, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycFinalLabel, kycFinalReason, kycRejectedDocs, kycUploadAgainText,
+  CONSENT_TEXT, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycFinalLabel, kycFinalReason, kycRejectedDocs, kycUploadAgainText, kycUploadHint,
   maskEmail, maskMobile, needsDob,
   needsSignIn, normalizeDob, onboardingReducer, STEP_CONSENT, validateDob,
   type AppData, type ConsentPurpose, type DocFile, type DocKind, type KycStatusView, type ServerKycClient,
@@ -293,7 +293,7 @@ export function ServerKyc({ client, details }: {
       )}
       {next === 'documents' && (
         <>
-          <p className="muted small">{docLabel} (JPG, PNG or PDF; selfie JPG or PNG; up to 10 MB each).</p>
+          <p className="muted small">{kycUploadHint(docLabel === KYC_TEXT.uploadSelfieOnly)}</p>
           {uploadAgain && <p className="error small">{uploadAgain}</p>}
           {slots}
           <ConsentTicks purposes={STEP_CONSENT.documents} ticks={ticks} setTicks={setTicks} disabled={busy} />

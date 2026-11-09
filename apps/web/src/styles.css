@@ -156,6 +156,9 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
 .test-user-bar a { color: var(--accent-2); text-decoration: underline; }
 .demo-code { border: 1px dashed var(--accent); border-radius: 8px; padding: 6px 10px; margin: -4px 0 12px; color: var(--text); font-weight: 600; letter-spacing: .02em; }
 .field-warn { color: var(--warn); }
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .55); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.confirm.modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; max-width: 440px; width: 100%; color: var(--text); }
+.confirm.modal:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .link-btn { background: none; border: none; color: var(--accent-2); text-decoration: underline; cursor: pointer; font: inherit; padding: 0; }
 .account { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 8px; }
 .account dt { color: var(--muted); }

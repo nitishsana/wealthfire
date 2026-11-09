@@ -6,7 +6,7 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   canSend, checkOutcome, DOC_MESSAGES, kycDemoCodeText, MAX_REREADS, resendIn, groupAadhaar, maskAadhaar, maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan,
-  normalizeDob, onboardingReducer, OTP_RULES, DOB_HINT, DOB_LABEL, validateDob, panSurnameWarning, pruneSends, reviewFields, validateAadhaar, validateEmail, validateMobile, validateName,
+  normalizeDob, onboardingReducer, OTP_RULES, DOB_HINT, DOB_LABEL, signedOutHint, validateDob, panSurnameWarning, pruneSends, reviewFields, validateAadhaar, validateEmail, validateMobile, validateName,
   validatePan, type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OtpChannel, type OtpProvider, type OtpVerifyResult,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -199,6 +199,8 @@ function SignInStep({ onSent }: { onSent: (kind: ContactKind, value: string, at:
   return (
     <Screen feature="onboard-signin" title="Sign in">
       {notice ? <Text style={[s.text, { marginBottom: 10 }]} accessibilityLiveRegion="polite">{notice}</Text> : null}
+      {/* TC-37: after Sign out the finished onboarding is kept; this contact opens the planner again (same as web). */}
+      {signedOutHint(data.onboarding) ? <Text style={[s.muted, { marginBottom: 10 }]}>{signedOutHint(data.onboarding)}</Text> : null}
       <Text style={[s.muted, { marginBottom: 6 }]}>Sign in with</Text>
       <Chips label="Sign in with" value={kind} onChange={(k) => { setKind(k); setValue(''); setTouched(false); setSendError(''); }}
         options={[{ label: 'Mobile number', value: 'mobile' as const }, { label: 'Email', value: 'email' as const }]} />
@@ -313,7 +315,11 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   const cardName = ob.identity ? { first: ob.identity.firstName, last: ob.identity.lastName } : undefined;
   // Last successful read per card (full numbers, memory only), sent with a hand check; the store keeps masks only (minor issue 6).
   const [reads, setReads] = useState<Partial<Record<KycField, string>>>({});
-  const onReadOk = (field: KycField, value: string) => setReads((r) => ({ ...r, [field]: value }));
+  const onReadOk = (field: KycField, value: string) => {
+    setReads((r) => ({ ...r, [field]: value }));
+    // TC-21: a good read clears this card's earlier failed tries (same as web)
+    dispatch({ type: 'read-ok', field });
+  };
   const clearKyc = () => { dropDocs(docsRef.current); setDocs({}); setChecks(null); setPrevChecks(null); setAadhaar(''); setReads({}); };
   // Bug 2: every failed read is counted; after enough of them (or with the reader unavailable) a hand check is offered.
   const onReadFailed = (field: KycField, unavailable: boolean) =>
@@ -411,15 +417,16 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
     return (
       <DocumentsStep docs={docs} setDoc={setDoc} typed={{ pan: ob.identity?.pan ?? '', aadhaar }} name={cardName} verifiedLast4={ob.aadhaar.last4}
         kyc={ob.kyc} previous={prevChecks} onReadFailed={onReadFailed} onReadOk={onReadOk} onHandCheck={onHandCheck}
-        onRead={(cs, full) => {
+        onRead={(cs, full, kept) => {
           setAadhaar(full); // re-typed after a reload / Redo documents: kept for this session only
           // Re-reads already used this session or before a reload still count (Req 8.8), same as web.
-          // Bug 1: a read after Back counts as a re-read; 'documents-ready' adds it in the store, so seed the same count here.
+          // Bug 1 / TC-50: a card really read again after Back counts as a re-read; a kept card (same document) does not.
+          const reread = (['pan', 'aadhaar'] as const).filter((f) => !kept.includes(f));
           const counted = (f: KycField) =>
-            ob.kyc.returnedFromCheck ? Math.min(MAX_REREADS, ob.kyc.rereads[f] + 1) : ob.kyc.rereads[f];
+            ob.kyc.returnedFromCheck && reread.includes(f as 'pan' | 'aadhaar') ? Math.min(MAX_REREADS, ob.kyc.rereads[f] + 1) : ob.kyc.rereads[f];
           setChecks(cs.map((c) => ({ ...c, rereads: Math.min(MAX_REREADS, Math.max(c.rereads, counted(c.field))) })));
           setPrevChecks(null);
-          dispatch({ type: 'documents-ready', at: new Date().toISOString(), reader: reader.id }); }} />
+          dispatch({ type: 'documents-ready', at: new Date().toISOString(), reader: reader.id, reread }); }} />
     );
   }
 

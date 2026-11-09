@@ -173,6 +173,12 @@ export interface OnboardingState {
   aadhaarLockedUntil: string | null;
   /** Document check and review state (Part B). */
   kyc: KycState;
+  /**
+   * Set by Sign out after a finished onboarding: the contact it was finished with. The identity masks,
+   * Aadhaar last 4 and KYC status stay; signing in again with this contact opens the planner, another
+   * contact starts onboarding for a new person (the kept data is dropped then).
+   */
+  signedOut?: { kind: ContactKind; value: string; completedAt: string } | null;
 }
 
 /** Everything a user owns in the app. Stored on device only in v1. */

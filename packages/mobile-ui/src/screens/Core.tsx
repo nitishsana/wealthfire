@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { Alert, Switch, Text, View } from 'react-native';
 import {
-  ASSET_TYPE_LABELS, computeRiskScore, DEFAULT_BARISTA_SHARE, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, prefillProfileName, RISK_QUESTIONS,
+  ASSET_TYPE_LABELS, computeRiskScore, RISK_INCOMPLETE_TEXT, DEFAULT_BARISTA_SHARE, inr, inrShort, isRiskComplete, newId, PHASE_LABELS, prefillProfileName, RISK_QUESTIONS,
   type AssetType, type LiabilityType, type Profile,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -159,7 +159,7 @@ export function RiskScreen() {
             <Bar pct={result.score} label="Risk score" />
             <Btn primary title="See my portfolio" onPress={() => go('portfolio')} />
           </>
-        ) : <Text style={s.muted}>Answer all {RISK_QUESTIONS.length} questions to see your score.</Text>}
+        ) : <Text style={s.muted}>{RISK_INCOMPLETE_TEXT}</Text>}
       </Card>
     </Screen>
   );

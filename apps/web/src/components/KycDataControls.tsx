@@ -21,6 +21,13 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
   const withdrawRef = useRef<HTMLButtonElement>(null);
   const deleteRef = useRef<HTMLButtonElement>(null);
   const lastAsk = useRef<Ask>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+
+  // While the buttons are disabled (busy) the focus would drop to the page: keep it on the confirm.
+  useEffect(() => { if (busy && ask) dialogRef.current?.focus(); }, [busy, ask]);
+  // After an error the focus goes to the error line inside the confirm (item 7).
+  useEffect(() => { if (error && ask && !busy) errorRef.current?.focus(); }, [error, ask, busy]);
 
   const load = async () => {
     try { setView(await client.getStatus()); } catch { setView(null); } // no session / offline: hide the buttons
@@ -59,7 +66,18 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
     }
   }
 
-  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) setAsk(null); };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); if (!busy) setAsk(null); return; }
+    if (e.key !== 'Tab' || !dialogRef.current) return;
+    // focus trap: Tab and Shift+Tab wrap inside the confirm
+    const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex="-1"].error'));
+    if (items.length === 0) { e.preventDefault(); dialogRef.current.focus(); return; }
+    const first = items[0]!;
+    const last = items[items.length - 1]!;
+    const at = document.activeElement;
+    if (e.shiftKey && (at === first || at === dialogRef.current)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (at === last || at === dialogRef.current)) { e.preventDefault(); first.focus(); }
+  };
   // which buttons show (core rule, same on phones): no repeat withdraw / delete on a verified case this session
   const buttons = kycDataButtons(view, client.dataSession());
   const title = ask === 'withdraw' ? KYC_TEXT.withdrawTitle : KYC_TEXT.deleteTitle;
@@ -69,14 +87,20 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
     <section data-feature="kyc-data-controls" className="card kyc-data" aria-labelledby={`${id}-h`}>
       <h2 id={`${id}-h`}>{KYC_TEXT.dataTitle}</h2>
       {ask ? (
-        <div role="alertdialog" aria-modal="false" aria-labelledby={`${id}-t`} aria-describedby={`${id}-b`} className="confirm" onKeyDown={onKey}>
-          <h3 id={`${id}-t`}>{title}</h3>
-          <p id={`${id}-b`}>{body}</p>
-          <div className="row">
-            <button ref={cancelRef} type="button" className="btn" disabled={busy} onClick={() => setAsk(null)}>{KYC_TEXT.cancel}</button>
-            <button type="button" className="btn danger solid" disabled={busy} onClick={() => void confirm()}>
-              {ask === 'withdraw' ? KYC_TEXT.withdrawConfirm : KYC_TEXT.deleteConfirm}
-            </button>
+        // A real modal: backdrop, aria-modal, focus kept inside (Tab wraps), Escape closes, focus returns on close.
+        <div className="modal-backdrop">
+          <div ref={dialogRef} role="alertdialog" aria-modal="true" aria-labelledby={`${id}-t`} aria-describedby={`${id}-b`}
+            className="confirm modal" tabIndex={-1} onKeyDown={onKey}>
+            <h3 id={`${id}-t`}>{title}</h3>
+            <p id={`${id}-b`}>{body}</p>
+            {/* An error stays inside the confirm and takes the focus (not the page behind). */}
+            {error && <p ref={errorRef} tabIndex={-1} className="error" role="alert">{error}</p>}
+            <div className="row">
+              <button ref={cancelRef} type="button" className="btn" disabled={busy} onClick={() => setAsk(null)}>{KYC_TEXT.cancel}</button>
+              <button type="button" className="btn danger solid" disabled={busy} onClick={() => void confirm()}>
+                {ask === 'withdraw' ? KYC_TEXT.withdrawConfirm : KYC_TEXT.deleteConfirm}
+              </button>
+            </div>
           </div>
         </div>
       ) : buttons.withdraw || buttons.delete ? (
@@ -86,7 +110,7 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
         </div>
       ) : null}
       {done && <p className="muted" role="status">{done}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
+      {error && !ask && <p className="error" role="alert">{error}</p>}
     </section>
   );
 }

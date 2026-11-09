@@ -217,10 +217,19 @@ describe('local server end to end', () => {
 
     const page = await fetch(srv.resetUrl);
     expect(await page.text()).toContain('Reset local data');
+    expect(page.headers.get('referrer-policy')).toBe('same-origin');
     const cross = await fetch(srv.resetUrl, { method: 'POST', headers: { origin: 'https://evil.example' } });
     expect(cross.status).toBe(403);
+    // TC-81: a cross-site form post that a no-referrer page sends as Origin: null is still refused
+    const crossNull = await fetch(srv.resetUrl, { method: 'POST', headers: { origin: 'null', 'sec-fetch-site': 'cross-site' } });
+    expect(crossNull.status).toBe(403);
     expect((await api('GET', '/kyc/status', { token })).status).toBe(200);
-    const r = await fetch(srv.resetUrl, { method: 'POST', headers: { origin: srv.apiUrl } });
+    // TC-81: what Edge / Chrome send for the reset form (Origin: null + Sec-Fetch-Site: same-origin)
+    const r = await fetch(srv.resetUrl, {
+      method: 'POST',
+      headers: { origin: 'null', 'sec-fetch-site': 'same-origin', 'content-type': 'application/x-www-form-urlencoded' },
+    });
+    expect(r.status).toBe(200);
     expect(await r.text()).toContain('Local data cleared.');
     expect((await api('GET', '/kyc/status', { token })).status).toBe(401);
     expect(srv.app.files.keys()).toEqual([]);

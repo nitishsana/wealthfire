@@ -184,6 +184,20 @@ export function sanitizeOnboarding(raw: unknown, opts?: SanitizeOptions): Onboar
   if (out.step === 'check' && (reload || clamped || !out.kyc.documentsAt)) out.step = 'documents';
   out.completedAt = out.step === 'done' && isStr(r.completedAt) ? r.completedAt : null;
   if (out.step === 'done' && !out.completedAt) out.completedAt = out.aadhaar?.verifiedAt ?? null;
+  // After Sign out (TC-37): the finished onboarding's contact, kept only while signing in again and only
+  // while the finished data (identity, Aadhaar, KYC result) is still there.
+  const so = r.signedOut as Record<string, unknown> | null | undefined;
+  if (so && typeof so === 'object' && isStr(so.value) && (out.step === 'signin' || out.step === 'otp') &&
+    out.identity && out.aadhaar && out.kyc.match && out.kyc.status) {
+    const kind = so.kind === 'email' ? 'email' : so.kind === 'mobile' ? 'mobile' : null;
+    const ok = kind === 'email' ? !validateEmail(so.value) : kind === 'mobile' ? !validateMobile(so.value) : false;
+    if (kind && ok) {
+      out.signedOut = {
+        kind, value: kind === 'email' ? normalizeEmail(so.value) : normalizeMobile(so.value),
+        completedAt: isStr(so.completedAt) ? so.completedAt : out.aadhaar.verifiedAt,
+      };
+    }
+  }
   return out;
 }
 

@@ -11,12 +11,12 @@
 // names, PAN, Aadhaar last 4, date of birth and the device result only; the full Aadhaar never leaves the phone and the
 // documents (selfie, Aadhaar card, PAN card) go straight to their presigned upload URLs.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
-import { AccessibilityInfo, ActivityIndicator, findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, findNodeHandle, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { File, UploadType } from 'expo-file-system';
 import {
   CONSENT_TEXT, DOB_HINT, DOB_LABEL, hasKycCase, HttpOtpProvider, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycFinalLabel,
-  kycDataButtons, kycDeleteDone, kycDemoCodeText, kycFinalReason, kycRejectedDocs, kycUploadAgainText, kycWithdrawBody, kycWithdrawDone, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
+  kycDataButtons, kycDeleteDone, kycDemoCodeText, kycFinalReason, kycUploadHint, kycRejectedDocs, kycUploadAgainText, kycWithdrawBody, kycWithdrawDone, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
   type ConsentPurpose, type DocFile, type DocKind, type KycStatusView, type OnboardingState, type StartKycInput, type TokenStore,
 } from '@wealthfire/core';
 import { useBlockBackWhile } from './shell';
@@ -526,7 +526,7 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
       ) : null}
       {next === 'documents' ? (
         <>
-          <Text style={[s.small, { marginVertical: 6 }]}>{docLabel} (JPG, PNG or PDF; selfie JPG or PNG; up to 10 MB each).</Text>
+          <Text style={[s.small, { marginVertical: 6 }]}>{kycUploadHint(docLabel === KYC_TEXT.uploadSelfieOnly)}</Text>
           {againLine}
           {slots}
           <ConsentTicks purposes={STEP_CONSENT.documents} ticks={ticks} setTicks={setTicks} disabled={busy} />
@@ -587,12 +587,20 @@ export function KycDataControls() {
   /** F12: the last confirm did not go through (shown with the server error or 'Please sign in again.') */
   const [failed, setFailed] = useState(false);
   const titleRef = useRef<ComponentRef<typeof Text>>(null);
+  const errorRef = useRef<ComponentRef<typeof Text>>(null);
   // Screen readers: move focus to the confirm title when it opens.
   useEffect(() => {
     if (!ask) return;
     const node = titleRef.current ? findNodeHandle(titleRef.current) : null;
     if (node) AccessibilityInfo.setAccessibilityFocus(node);
   }, [ask]);
+  // After an error the focus goes to the error line inside the confirm (same as web).
+  const errNow = !ask || !server ? '' : server.error || (server.signIn ? 'signin' : failed && !server.busy ? 'failed' : '');
+  useEffect(() => {
+    if (!errNow) return;
+    const node = errorRef.current ? findNodeHandle(errorRef.current) : null;
+    if (node) AccessibilityInfo.setAccessibilityFocus(node);
+  }, [errNow]);
   if (!server || (!hasKycCase(server.view) && !done)) return null;
   const { busy, view } = server;
   // which buttons show (core rule, same as web): no repeat withdraw / delete on a verified case this session
@@ -615,24 +623,30 @@ export function KycDataControls() {
   return (
     <View testID="feature-kyc-data-controls" style={s.card}>
       <Text style={s.h2} accessibilityRole="header">{KYC_TEXT.dataTitle}</Text>
-      {ask ? (
-        <View style={st.confirm}>
-          <Text ref={titleRef} style={[s.text, { fontWeight: '800' }]} accessibilityRole="header">
-            {ask === 'withdraw' ? KYC_TEXT.withdrawTitle : KYC_TEXT.deleteTitle}
-          </Text>
-          <Text style={[s.text, { marginTop: 4 }]}>{ask === 'withdraw' ? kycWithdrawBody(view) : KYC_TEXT.deleteBody}</Text>
-          <Btn title={KYC_TEXT.cancel} disabled={busy} onPress={() => { setFailed(false); setAsk(null); }} />
-          <Btn danger solid title={ask === 'withdraw' ? KYC_TEXT.withdrawConfirm : KYC_TEXT.deleteConfirm} disabled={busy} onPress={() => void confirm()} />
+      {/* A real modal (same as web): the rest of the screen is hidden from screen readers while it is open;
+          Android Back / the iOS escape gesture cancel; an error stays inside and gets the focus. */}
+      <Modal visible={!!ask} transparent animationType="fade" onRequestClose={() => { if (!busy) { setFailed(false); setAsk(null); } }}>
+        <View style={st.backdrop}>
+          <View style={[st.confirm, st.sheet]} accessibilityViewIsModal accessibilityRole="alert">
+            <Text ref={titleRef} style={[s.text, { fontWeight: '800' }]} accessibilityRole="header">
+              {ask === 'withdraw' ? KYC_TEXT.withdrawTitle : KYC_TEXT.deleteTitle}
+            </Text>
+            <Text style={[s.text, { marginTop: 4 }]}>{ask === 'withdraw' ? kycWithdrawBody(view) : KYC_TEXT.deleteBody}</Text>
+            {failText ? <Text ref={errorRef} style={[s.text, { color: theme.bad, marginTop: 8 }]} accessibilityRole="alert" accessibilityLiveRegion="assertive">{failText}</Text> : null}
+            {busy ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}
+            <Btn title={KYC_TEXT.cancel} disabled={busy} onPress={() => { setFailed(false); setAsk(null); }} />
+            <Btn danger solid title={ask === 'withdraw' ? KYC_TEXT.withdrawConfirm : KYC_TEXT.deleteConfirm} disabled={busy} onPress={() => void confirm()} />
+          </View>
         </View>
-      ) : buttons.withdraw || buttons.delete ? (
+      </Modal>
+      {ask ? null : buttons.withdraw || buttons.delete ? (
         <>
           {buttons.withdraw ? <Btn danger title={KYC_TEXT.withdrawButton} onPress={() => { setDone(''); setAsk('withdraw'); }} /> : null}
           {buttons.delete ? <Btn danger title={KYC_TEXT.deleteButton} onPress={() => { setDone(''); setAsk('delete'); }} /> : null}
         </>
       ) : null}
-      {busy ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}
+      {busy && !ask ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}
       {done ? <Msg text={done} tone="muted" /> : null}
-      {failText ? <Msg text={failText} /> : null}
     </View>
   );
 }
@@ -643,4 +657,6 @@ const st = StyleSheet.create({
   boxOn: { borderColor: theme.accent, backgroundColor: theme.accent },
   tick: { color: theme.bg, fontWeight: '800' },
   confirm: { borderColor: theme.bad, borderWidth: 1, borderRadius: 10, padding: 12 },
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', padding: 20 },
+  sheet: { backgroundColor: theme.panel },
 });

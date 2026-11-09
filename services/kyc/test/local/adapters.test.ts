@@ -7,7 +7,7 @@ import { LocalEncryptor } from '../../src/lib/crypto';
 import { LocalTokenSigner, signAccessToken, verifyAccessToken } from '../../src/lib/tokens';
 import { CognitoStaffVerifier } from '../../src/kyc/staff';
 import { PENDING_TAGGING, signedPutHeaders } from '../../src/kyc/uploads';
-import { hasLocalConsoleBuild } from '../../src/local/app';
+import { hasLocalConsoleBuild, resetAllowed } from '../../src/local/app';
 import {
   DEMO_REVIEWER_HEADER, DEMO_REVIEWER_TOKEN, LocalDemoSender, LocalDemoStaffVerifier, maskContact,
 } from '../../src/local/demo';
@@ -263,6 +263,27 @@ describe('LocalDemoStaffVerifier', () => {
       throw new Error('no network in tests');
     });
     expect(await cognito.verify(DEMO_REVIEWER_HEADER)).toBeNull();
+  });
+});
+
+describe('resetAllowed (TC-81)', () => {
+  const own = 'http://127.0.0.1:5181';
+  it('allows own Origin, a browser same-origin post with Origin null / absent, and curl (no headers)', () => {
+    expect(resetAllowed({ origin: own }, own)).toBe(true);
+    expect(resetAllowed({ origin: own, 'sec-fetch-site': 'same-origin' }, own)).toBe(true);
+    expect(resetAllowed({ origin: 'null', 'sec-fetch-site': 'same-origin' }, own)).toBe(true);
+    expect(resetAllowed({ 'sec-fetch-site': 'same-origin' }, own)).toBe(true);
+    expect(resetAllowed({}, own)).toBe(true);
+    expect(resetAllowed({ origin: 'null' }, own)).toBe(true);
+  });
+  it('refuses any other site', () => {
+    expect(resetAllowed({ origin: 'https://evil.example' }, own)).toBe(false);
+    expect(resetAllowed({ origin: 'http://127.0.0.1:5180', 'sec-fetch-site': 'same-site' }, own)).toBe(false);
+    expect(resetAllowed({ origin: own, 'sec-fetch-site': 'cross-site' }, own)).toBe(false);
+    for (const site of ['cross-site', 'same-site', 'none']) {
+      expect(resetAllowed({ origin: 'null', 'sec-fetch-site': site }, own), site).toBe(false);
+      expect(resetAllowed({ 'sec-fetch-site': site }, own), site).toBe(false);
+    }
   });
 });
 

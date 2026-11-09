@@ -253,7 +253,7 @@ export function createLocalApp(o: LocalAppOptions): LocalApp {
         if (method === 'GET') return sendHtml(res, 200, resetPage());
         if (method === 'POST') {
           // a form on this page only: a cross-site post carries another Origin
-          if (origin !== undefined && origin !== api) return sendHtml(res, 403, page('Not allowed', '<p role="alert">Open the reset page on this server to reset.</p>'));
+          if (!resetAllowed(req.headers, api)) return sendHtml(res, 403, page('Not allowed', '<p role="alert">Open the reset page on this server to reset.</p>'));
           await readBody(req, MAX_JSON_BYTES);
           reset();
           print('Local data cleared.');
@@ -401,9 +401,23 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
     'content-security-policy': "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     'x-frame-options': 'DENY',
     'x-content-type-options': 'nosniff',
-    'referrer-policy': 'no-referrer',
+    // same-origin (not no-referrer): the reset form's POST then carries this server's Origin
+    'referrer-policy': 'same-origin',
   });
   res.end(html);
+}
+
+/**
+ * TC-81: may this POST /local/reset run? Yes when Origin is this server's own; or when Origin is
+ * absent / 'null' (a no-referrer page, curl) AND Sec-Fetch-Site is 'same-origin' or absent.
+ * Any other site (another Origin, or Sec-Fetch-Site cross-site / same-site / none) is refused.
+ */
+export function resetAllowed(headers: Record<string, string | string[] | undefined>, ownOrigin: string): boolean {
+  const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+  const origin = one(headers.origin);
+  const site = one(headers['sec-fetch-site']);
+  if (origin !== undefined && origin !== 'null') return origin === ownOrigin && (site === undefined || site === 'same-origin');
+  return site === undefined || site === 'same-origin';
 }
 
 // ---------- server ----------

@@ -138,6 +138,15 @@ export const KYC_TEXT = {
   approvedEsign: 'Approved \u2013 e-sign to finish',
 } as const;
 
+/**
+ * TC-77: the line above the upload slots. A selfie-only re-upload never mentions PDF or 'each'.
+ */
+export function kycUploadHint(selfieOnly: boolean): string {
+  return selfieOnly
+    ? 'Upload a new selfie (JPG or PNG, up to 10 MB).'
+    : `${KYC_TEXT.uploadAll} (JPG, PNG or PDF; selfie JPG or PNG; up to 10 MB each).`;
+}
+
 /** F3: the withdraw confirm text for this case (a verified case keeps its KYC). */
 export function kycWithdrawBody(view: KycStatusView | null): string {
   return view?.status === 'verified' ? KYC_TEXT.withdrawBodyVerified : KYC_TEXT.withdrawBody;

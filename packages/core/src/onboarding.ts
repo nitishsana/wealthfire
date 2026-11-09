@@ -275,7 +275,13 @@ export type OnboardingEvent =
   | { type: 'aadhaar-verified'; last4: string; at: string; provider: OtpProviderId }
   | { type: 'aadhaar-locked'; until: string }
   | { type: 'sign-out' }
-  | { type: 'documents-ready'; at: string; reader: DocReaderId }
+  /**
+   * `reread`: after Back from Check numbers, the cards really read again (a replaced document). A card
+   * whose earlier check is kept (same document) is not counted. Default: both cards.
+   */
+  | { type: 'documents-ready'; at: string; reader: DocReaderId; reread?: KycField[] }
+  /** A card was read well: earlier failed tries of that card (e.g. a locked PDF before its password) no longer count. */
+  | { type: 'read-ok'; field: KycField }
   | { type: 'back-to-documents' }
   | { type: 'reread-used'; field: KycField }
   | { type: 'check-confirmed'; match: KycMatch; pan: string; fields: ReviewRecord['fields']; at: string }
@@ -323,6 +329,15 @@ function normalizeContact(c: { kind: ContactKind; value: string }): { kind: Cont
   return validateMobile(c.value) ? null : { kind: 'mobile', value: normalizeMobile(c.value) };
 }
 
+const sameContact = (a: { kind: ContactKind; value: string }, b: { kind: ContactKind; value: string }) => a.kind === b.kind && a.value === b.value;
+
+/** Sign in after Sign out: 'Sign in with +91 ******3210 to open your planner again.', or '' when nothing is kept. */
+export function signedOutHint(s: OnboardingState): string {
+  if (!s.signedOut || s.step !== 'signin') return '';
+  const c = s.signedOut;
+  return `Sign in with ${c.kind === 'email' ? maskEmail(c.value) : maskMobile(c.value)} to open your planner again.`;
+}
+
 /** Move onboarding forward. Events from the wrong step return the state unchanged. */
 export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): OnboardingState {
   switch (e.type) {
@@ -338,8 +353,10 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       const target = next ?? keep;
       if (!target) return s;
       const same = keep && keep.kind === target.kind && keep.value === target.value;
+      // After Sign out: another contact is another person, so the kept onboarding goes (send limits stay).
+      const base = s.signedOut && !sameContact(s.signedOut, target) ? { ...emptyOnboarding(), sends: s.sends } : s;
       return {
-        ...s,
+        ...base,
         step: 'otp',
         contact: same && keep ? keep : { ...target, verifiedAt: null },
         sends: { ...s.sends, contact: addSend(s.sends.contact, e.at) },
@@ -347,6 +364,10 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
     }
     case 'contact-verified':
       if (s.step !== 'otp' || !s.contact) return s;
+      // Signed in again with the contact the onboarding was finished with: straight back to the planner.
+      if (s.signedOut && sameContact(s.signedOut, s.contact) && s.identity && s.aadhaar && s.kyc.match && s.kyc.status) {
+        return { ...s, step: 'done', contact: { ...s.contact, verifiedAt: e.at }, completedAt: s.signedOut.completedAt, signedOut: null };
+      }
       return { ...s, step: 'identity', contact: { ...s.contact, verifiedAt: e.at } };
     case 'change-contact':
       if (s.step !== 'otp') return s;
@@ -380,12 +401,12 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
     case 'documents-ready': {
       if (s.step !== 'documents' || !s.aadhaar) return s;
       // A read after Back from Check numbers is a re-read of every field (Bug 1: no bypass via Back).
-      const rereads = s.kyc.returnedFromCheck
-        ? {
-          pan: Math.min(MAX_REREADS, s.kyc.rereads.pan + 1),
-          aadhaar: Math.min(MAX_REREADS, s.kyc.rereads.aadhaar + 1),
-        }
-        : s.kyc.rereads;
+      // TC-50: only a card actually read again counts; a kept earlier check (same document) does not.
+      const again = (f: KycField) => s.kyc.returnedFromCheck && (e.reread ? e.reread.includes(f) : true);
+      const rereads = {
+        pan: again('pan') ? Math.min(MAX_REREADS, s.kyc.rereads.pan + 1) : s.kyc.rereads.pan,
+        aadhaar: again('aadhaar') ? Math.min(MAX_REREADS, s.kyc.rereads.aadhaar + 1) : s.kyc.rereads.aadhaar,
+      };
       return { ...s, step: 'check', kyc: { ...s.kyc, documentsAt: e.at, reader: e.reader, rereads, returnedFromCheck: false } };
     }
     case 'back-to-documents':
@@ -432,6 +453,12 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       const now = s.kyc.failedReads[e.field];
       const next = e.unavailable ? Math.max(now, HAND_CHECK_AFTER_FAILS) : Math.min(MAX_FAILED_READS, now + 1);
       return { ...s, kyc: { ...s.kyc, failedReads: { ...s.kyc.failedReads, [e.field]: next } } };
+    }
+    case 'read-ok': {
+      // TC-21: a good read of a card (e.g. the e-Aadhaar after its password) clears that card's failed tries.
+      if (s.step !== 'documents' && s.step !== 'check') return s;
+      if ((e.field !== 'pan' && e.field !== 'aadhaar') || s.kyc.failedReads[e.field] === 0) return s;
+      return { ...s, kyc: { ...s.kyc, failedReads: { ...s.kyc.failedReads, [e.field]: 0 } } };
     }
     case 'send-for-hand-check': {
       if (s.step !== 'documents' && s.step !== 'check') return s;
@@ -492,6 +519,15 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       // Previous review stays as history until a new one replaces it.
       return { ...s, step: 'documents', completedAt: null, kyc: { ...emptyKyc(), review: s.kyc.review } };
     case 'sign-out':
+      // TC-37: Sign out ends the session only. A finished onboarding stays on the device for the same person.
+      if (s.step === 'done' && s.contact) {
+        return {
+          ...s, step: 'signin', contact: null, completedAt: null,
+          signedOut: { kind: s.contact.kind, value: s.contact.value, completedAt: s.completedAt ?? s.aadhaar?.verifiedAt ?? '' },
+        };
+      }
+      // Signing out again before signing back in keeps the finished onboarding.
+      if (s.signedOut) return { ...s, step: 'signin', contact: null };
       return emptyOnboarding();
     default:
       return s;

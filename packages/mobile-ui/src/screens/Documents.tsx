@@ -7,7 +7,7 @@ import { Image, StyleSheet, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import {
-  applyReread, canReread, canSendForHandCheck, confirmAadhaarRetype, countsAsFailedRead, DOC_MESSAGES, groupAadhaar, initialChecks, maskAadhaar, MAX_REREADS, normalizeAadhaar, normalizePan, validateAadhaar,
+  applyReread, canReread, canSendForHandCheck, checkRowState, rereadsLeftText, confirmAadhaarRetype, countsAsFailedRead, DOC_MESSAGES, groupAadhaar, initialChecks, maskAadhaar, MAX_REREADS, normalizeAadhaar, normalizePan, validateAadhaar,
   readBlocked, sameDocument, takeDocumentNumber, validateDocFile, validatePan, type DocFile, type DocKind, type DocMime, type FieldCheck, type KycField,
   type KycState, type ReadResult,
 } from '@wealthfire/core';
@@ -254,8 +254,11 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
   kyc: KycState;
   /** Checks from before Back to Upload documents (screen state only), reused for fields whose reads are used up. */
   previous: FieldCheck[] | null;
-  /** `aadhaar`: the full number used for the checks (memory only; the parent keeps it for this session). */
-  onRead: (checks: FieldCheck[], aadhaar: string) => void;
+  /**
+   * `aadhaar`: the full number used for the checks (memory only; the parent keeps it for this session).
+   * `kept`: cards whose earlier check was kept as it is (not read again).
+   */
+  onRead: (checks: FieldCheck[], aadhaar: string, kept: KycField[]) => void;
 }) {
   // No demo UI on this step (Req 7.2): the demo reader mode comes only from dev config (reader.tsx).
   const reader = useDocReader();
@@ -295,7 +298,12 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
   }
 
   // A field whose re-reads are used up keeps its earlier read, so its file is locked (review bug 7).
-  const keptFor = (f: KycField) => (readBlocked(kyc, f) ? previous?.find((c) => c.field === f) : undefined);
+  const lockedFor = (f: KycField) => (readBlocked(kyc, f) ? previous?.find((c) => c.field === f) : undefined);
+  // TC-50: after Back, a card whose document was not replaced keeps its whole earlier check (the PAN chosen
+  // with "Use number from document" included) and is not read again or counted. Same as web.
+  const [replaced, setReplaced] = useState<Partial<Record<KycField, boolean>>>({});
+  const keptFor = (f: KycField) => lockedFor(f)
+    ?? (!replaced[f] && (f === 'pan' || !needRetype) ? previous?.find((c) => c.field === f) : undefined);
   const sameAsOther = (k: DocKind) => (d: DocFile): string | null => {
     const other = OTHER_CARD[k] ? docs[OTHER_CARD[k]!] : undefined;
     return other && sameDocument(d, other) ? DOC_MESSAGES.sameFile : null;
@@ -315,7 +323,8 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
         const fresh = initialChecks({ pan: typed.pan, aadhaar: aadhaarTyped }, { pan: pan.value, aadhaar: aadhaar.value },
           { pan: pan.nameMatch, aadhaar: aadhaar.nameMatch });
         setRetype('');
-        onRead(fresh.map((c) => (c.field === 'pan' ? keptPan : keptAadhaar) ?? c), aadhaarTyped);
+        const kept = (['pan', 'aadhaar'] as const).filter((f) => (f === 'pan' ? keptPan : keptAadhaar) !== undefined);
+        onRead(fresh.map((c) => (c.field === 'pan' ? keptPan : keptAadhaar) ?? c), aadhaarTyped, kept);
       }
     } catch {
       setError(DOC_MESSAGES.couldNotReadDocs);
@@ -329,8 +338,11 @@ export function DocumentsStep({ docs, setDoc, typed, name, verifiedLast4, kyc, p
       {(['selfie', 'aadhaar', 'pan'] as const).map((k, i) => (
         <Card key={k}><DocSlot kind={k} number={i + 1} doc={docs[k]} disabled={busy} error={k === 'selfie' ? undefined : errors[k]}
           reject={k === 'selfie' ? undefined : sameAsOther(k)}
-          locked={k !== 'selfie' && keptFor(k) ? DOC_MESSAGES.noRereadsLeft : undefined}
-          onChange={(d) => { setDoc(k, d); if (k !== 'selfie') setErrors((e) => ({ ...e, [k]: undefined })); }} /></Card>
+          locked={k !== 'selfie' && lockedFor(k) ? DOC_MESSAGES.noRereadsLeft : undefined}
+          onChange={(d) => {
+            setDoc(k, d);
+            if (k !== 'selfie') { setErrors((e) => ({ ...e, [k]: undefined })); setReplaced((r) => ({ ...r, [k]: true })); }
+          }} /></Card>
       ))}
       {/* After the slots, same place as web. */}
       {needRetype ? (
@@ -419,7 +431,10 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
   const matchText = numbersMatch ? DOC_MESSAGES.matchLabel : DOC_MESSAGES.mismatchLabel;
   // Review bugs 9 and E: after "Use number from document" without a name match (false, or null = not checked, which
   // also goes to review), "Upload again" stays while re-reads are left.
-  const nameRetry = tookDocument && check.nameMatch !== true && canReread(check);
+  // TC-50 / TC-31: same row rules as web (core checkRowState). Numbers equal but the name not passed
+  // (also after "Use number from document" + a re-read): "Upload again" while a re-check is left.
+  const row = checkRowState(check);
+  const nameRetry = numbersMatch && row.review;
 
   const uploadAgain = mode === 'upload' ? (
     <View style={{ marginTop: 10 }}>
@@ -463,8 +478,8 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
         <>
           {mode === 'idle' ? (
             <>
-              <Btn title="Upload again" disabled={busy} onPress={() => { setError(''); setMode('upload'); }} />
-              <Text style={[s.small, { marginTop: 6 }]}>{left} re-check{left === 1 ? '' : 's'} left</Text>
+              {row.uploadAgain ? <Btn title="Upload again" disabled={busy} onPress={() => { setError(''); setMode('upload'); }} /> : null}
+              <Text style={[s.small, { marginTop: 6 }]}>{row.leftText}</Text>
             </>
           ) : null}
           {uploadAgain}
@@ -476,7 +491,7 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
           <Msg text={doesntMatch(f)} />
           {(check.rereads > 0 || (locked && !canReread(check))) && check.nameMatch === true ? <Msg text={BY_HAND} tone="warn" /> : null}
           {/* Locked Aadhaar with no re-reads left: nothing to choose, it goes to manual review (same as web). */}
-          {mode === 'idle' && (!locked || canReread(check)) ? (
+          {mode === 'idle' ? (
             <>
               {/* Aadhaar is locked to the OTP-verified number (design C1): only "Upload again". PAN keeps all three. */}
               {locked ? null : <Btn title="Use number from document" disabled={busy} onPress={() => onChange(takeDocumentNumber(check), false)} />}
@@ -487,7 +502,7 @@ function FieldCard({ check, doc, otherDoc, name, typedField, hidden, setHidden, 
                   <Btn title="Upload again" disabled={busy} onPress={() => { setError(''); setMode('upload'); }} />
                 </>
               ) : null}
-              <Text style={[s.small, { marginTop: 6 }]}>{left} re-check{left === 1 ? '' : 's'} left</Text>
+              <Text style={[s.small, { marginTop: 6 }]}>{rereadsLeftText(left)}</Text>
             </>
           ) : null}
           {mode === 'edit' ? (
