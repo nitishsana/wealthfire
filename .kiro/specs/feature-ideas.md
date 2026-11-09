@@ -57,3 +57,33 @@ It builds on the existing **Buckets** page (3 pots with time- and market-based m
 - Fixed returns only, or also a "bad years" or historical-returns scenario to show the crash rule working?
 - Taxes, exit loads and fund costs: ignore for v1 or include?
 - Show results as a year-by-year table, a chart, or both, on web, Android and iOS.
+
+---
+
+## Idea 2: Risk profile right after KYC, inside Profile, and locked identity
+
+Added 2026-11-09 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+1. **Risk profile straight after KYC (mandatory).** As soon as KYC is completed, show the risk profile questions as cards, so every question gets answered. Answering all of them is mandatory before any investing happens.
+2. **Risk moves into Profile.** The separate Risk tab goes away. Risk profile becomes a section inside the Profile tab.
+3. **Toggle (collapsed by default).** Inside Profile, the risk profile section is always collapsed. Clicking it expands it; clicking again collapses it.
+4. **Name and age locked after KYC.** Once KYC is completed, Profile shows the name and age as read-only. They can never be edited after that.
+
+### Links to what exists today
+
+- Risk today: its own tab, 6 questions plus age, a score out of 100, five profiles (FEATURES.md, "Risk"). Since PR #10 there is no score until all 6 questions are answered.
+- KYC today: the device check gives Pre-verified; Verified comes only from final KYC on the KYC server. Investing requires Verified (`isEligibleToInvest`).
+- Profile today: name and age are editable fields; the name also comes from onboarding ("Your details").
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- Which "KYC completed" starts the cards: the end of onboarding (Pre-verified or Under review), or final KYC Verified? (The note says "KYA"; this is read as KYC.)
+- Can the user skip the cards and use the planner meanwhile, with only investing blocked? Or must they finish the cards before anything else?
+- One question per card with Next/Back, or all cards on one screen? And can answers be changed later in Profile, with a new score?
+- Age: is it worked out from the date of birth given in onboarding (so it updates every birthday), or stored once? Should the date of birth be shown and locked too?
+- Name: show the name as typed in "Your details", or the name read from the PAN card?
+- If a user deletes KYC data or withdraws consent, do name and age become editable again?
+- Old users who answered Risk before this change: keep their answers, or ask again?
+- Home tiles and links that point to the Risk tab today need a new target. Same layout on web, Android and iOS.
