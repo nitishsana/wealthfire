@@ -36,14 +36,14 @@ export const startBody = (pan: string, over: Record<string, unknown> = {}) => ({
 /** Records a consent row for every purpose (what the apps do before each paid step). */
 export async function grantAllConsents(repos: { consents: ConsentRepo }, userId: string, at = '2026-01-01T00:00:00.000Z'): Promise<void> {
   for (const purpose of CONSENT_PURPOSES) {
-    await repos.consents.record({ userId, sk: `${purpose}#${at}#seed`, purpose, action: 'given', at });
+    await repos.consents.record({ userId, sk: `${purpose}#${at}#000000`, purpose, action: 'given', at });
   }
 }
 
 /**
  * `consents: false` signs users in without any consent rows (S2 tests).
- * `documents: 'uploaded'` makes the review routes list only what was really uploaded (default: a
- * stub that always has the selfie, Aadhaar and PAN).
+ * `documents` is ignored (F2: the review routes read the case's linked documents only; tests that
+ * approve upload and link all three first); kept so older calls still compile.
  */
 export function env(cfg: Partial<KycConfig> = {}, opts: { consents?: boolean; documents?: 'stub' | 'uploaded' } = {}) {
   const a = authSetup();
@@ -61,17 +61,10 @@ export function env(cfg: Partial<KycConfig> = {}, opts: { consents?: boolean; do
   const review = reviewRoutes({
     cases: reviewCaseStore(repos.cases),
     audit: repos.audit,
-    documents: {
-      list: async (id: string) => opts.documents === 'uploaded'
-        // what the fake S3 holds under kyc/<userId>/ (the review console's S3DocumentStore layout)
-        ? uploads.keys().filter((k) => k.startsWith(`kyc/${id}/`)).map((key) => {
-          const file = key.slice(`kyc/${id}/`.length);
-          return { kind: file.slice(0, file.indexOf('-')) as 'selfie' | 'aadhaar' | 'pan', key };
-        })
-        // default stub: all three documents present, so staff Approve is allowed (R1)
-        : (['selfie', 'aadhaar', 'pan'] as const).map((kind) => ({ kind, key: `kyc/${id}/${kind}-stub.jpg` })),
-    },
+    // F2: document links and the Approve check come from the case's LINKED documents
+    docKey: (u: string, id: string) => svc.docKey(u, id),
     signer: { sign: async () => 'https://signed.invalid/x' },
+    linkDocuments: (id: string) => svc.linkDocuments(id),
     clock: a.clock,
     onApproved: async (userId) => void (await svc.uploadToKra(userId)),
   });
@@ -85,6 +78,7 @@ export function env(cfg: Partial<KycConfig> = {}, opts: { consents?: boolean; do
     review,
     staff,
     allowedOrigins: [ORIGIN],
+    appOrigins: [ORIGIN],
     logger,
     clock: a.clock,
   });

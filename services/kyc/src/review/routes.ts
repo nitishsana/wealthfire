@@ -7,6 +7,7 @@
 // same transaction as the case update; opening a case (which signs document links) is audited too.
 import { randomUUID } from 'node:crypto';
 import { KycTransitionError, staffDecide, type StaffAction } from '../decide';
+import { DEFAULT_DOCS_PREFIX } from '../kyc/service';
 import type { Clock } from '../lib/clock';
 import type { CheckName, CheckResult, KycCase, NextStep } from '../types';
 import { looksLikeIdNumber, maskAadhaar, maskPan } from './mask';
@@ -55,7 +56,24 @@ export type Handler = (req: ReviewRequest) => Promise<ReviewResponse>;
 export interface ReviewDeps {
   cases: ReviewCaseStore;
   audit: AuditLog;
-  documents: DocumentStore;
+  /**
+   * @deprecated Ignored. F2/S#3: document links and the Approve check come from the case's own
+   * `documents` entries with state 'linked', never from a raw S3 listing. Optional only so older
+   * wiring still compiles.
+   */
+  documents?: DocumentStore;
+  /**
+   * S3 key of one upload; must match the KYC routes' layout (KycService.docKey). Default
+   * `<DEFAULT_DOCS_PREFIX><userId>/<uploadId>`.
+   */
+  docKey?: (userId: string, uploadId: string) => string;
+  /**
+   * F2: the KYC routes' link step (type-check pending uploads and mark them linked / rejected).
+   * Run before an Under-review case's document links are signed and before the Approve check, so
+   * files the user sent since their last status read count. Optional; a failure is ignored (the
+   * routes then use what is already linked, so Approve can only be refused, never wrongly allowed).
+   */
+  linkDocuments?: (userId: string) => Promise<void>;
   signer: DownloadSigner;
   clock: Clock;
   /** audit ts nonce; injectable for tests */
@@ -199,6 +217,42 @@ function listCases(deps: ReviewDeps): Handler {
 export const REQUIRED_DOCUMENTS: readonly DocumentKind[] = ['selfie', 'aadhaar', 'pan'];
 const DOC_NAMES: Record<string, string> = { selfie: 'selfie', aadhaar: 'Aadhaar', pan: 'PAN' };
 
+/** An upload id the KYC routes issue: `<kind>-<id>.<ext>`; anything else is never signed. */
+const UPLOAD_ID_RE = /^(selfie|aadhaar|pan)-[A-Za-z0-9-]{1,64}\.(jpg|png|pdf)$/;
+
+/**
+ * F2/S#3: the case's linked documents (checked against their type and kept), one per required kind,
+ * in REQUIRED_DOCUMENTS order. Built only from `case.documents[kind]` with state 'linked' — never
+ * from a raw S3 listing, so pending, unchecked, refused or archived-case files never count or get
+ * signed. An entry whose upload id is malformed or names another kind is ignored.
+ */
+function linkedDocuments(c: ReviewCase): { kind: DocumentKind; uploadId: string }[] {
+  const out: { kind: DocumentKind; uploadId: string }[] = [];
+  for (const kind of REQUIRED_DOCUMENTS) {
+    const link = c.documents?.[kind];
+    if (!link || link.state !== 'linked' || typeof link.uploadId !== 'string') continue;
+    const m = UPLOAD_ID_RE.exec(link.uploadId);
+    if (!m || m[1] !== kind) continue;
+    out.push({ kind, uploadId: link.uploadId });
+  }
+  return out;
+}
+
+/** Runs the link step for an Under-review case, then re-reads it. Never throws on a link failure. */
+async function withLinkedDocuments(deps: ReviewDeps, c: ReviewCase): Promise<ReviewCase> {
+  if (!deps.linkDocuments || c.status !== 'under-review') return c;
+  try {
+    await deps.linkDocuments(c.userId);
+  } catch {
+    return c; // fall back to what is already linked
+  }
+  return (await deps.cases.get(c.userId)) ?? c;
+}
+
+function keyFor(deps: ReviewDeps, userId: string, uploadId: string): string {
+  return deps.docKey ? deps.docKey(userId, uploadId) : `${DEFAULT_DOCS_PREFIX}${userId}/${uploadId}`;
+}
+
 /** R1: e-signed before staff decided (the webhook / KYC routes record it). */
 function isEsigned(c: ReviewCase): boolean {
   return c.evidence?.esign === 'done' || c.checks?.esign === 'pass';
@@ -212,22 +266,23 @@ function isEsigned(c: ReviewCase): boolean {
 function getCase(deps: ReviewDeps): Handler {
   return guarded(async (req) => {
     const id = caseId(req);
-    const c = await deps.cases.get(id);
-    if (!c) throw new ReviewError('not_found');
+    const found = await deps.cases.get(id);
+    if (!found) throw new ReviewError('not_found');
+    const c = await withLinkedDocuments(deps, found);
     const now = deps.clock.now();
     // Audit before handing out document links: no audit row, no links.
     await deps.audit.write({
       userId: id, ts: auditTs(deps), actor: staffActor(req), action: 'review.view', before: snapshot(c), after: null,
     });
     const documentsAvailable = c.status === 'under-review';
-    const docs = documentsAvailable ? await deps.documents.list(id) : [];
+    // F2/S#3: only the case's linked documents, never the raw S3 listing.
+    const docs = documentsAvailable ? linkedDocuments(c) : [];
     const expiresAt = new Date(now + DOC_URL_TTL_SEC * 1000).toISOString();
     const documents = await Promise.all(
-      docs.map(async (d, i) => ({
-        id: `${d.kind}-${i + 1}`,
+      docs.map(async (d) => ({
+        id: `${d.kind}-1`,
         kind: d.kind,
-        ...(d.uploadedAt ? { uploadedAt: d.uploadedAt } : {}),
-        url: await deps.signer.sign(d.key, DOC_URL_TTL_SEC),
+        url: await deps.signer.sign(keyFor(deps, id, d.uploadId), DOC_URL_TTL_SEC),
         expiresAt,
       })),
     );
@@ -282,25 +337,22 @@ function decideCase(deps: ReviewDeps): Handler {
       throw new ReviewError('bad_request');
     }
 
-    const before = await deps.cases.get(id);
-    if (!before) throw new ReviewError('not_found');
+    const found = await deps.cases.get(id);
+    if (!found) throw new ReviewError('not_found');
+    // the staff member decided on what they saw at `expected`; linking documents bumps the version
+    if (expected !== undefined && expected !== found.version) throw new ReviewError('conflict');
+    const before = action.kind === 'approve' ? await withLinkedDocuments(deps, found) : found;
+    // newly linked files the reviewer has not seen: reload first, never approve them blind
     if (expected !== undefined && expected !== before.version) throw new ReviewError('conflict');
 
     // throws on illegal moves. R1: KRA upload only once the case is e-signed, so an unsigned
     // approval waits with next 'esign' (the user e-signs, then the upload runs).
     const d = staffDecide({ status: before.status, path: before.path, esigned: isEsigned(before) }, action);
     const next: NextStep = action.kind === 'approve' && !isEsigned(before) ? 'esign' : d.next;
-    // R1: Approve needs all three documents.
+    // R1 + F2/S#3: Approve needs a LINKED selfie, Aadhaar and PAN on the case itself (checked by
+    // type, kept). Pending, refused or archived-case uploads never count; S3 is not listed.
     if (action.kind === 'approve') {
-      // A document whose content failed the S14 type check does not count.
-      const refused = new Set(
-        Object.entries(before.documents ?? {})
-          .filter(([, link]) => link?.state === 'rejected')
-          .map(([kind]) => kind),
-      );
-      const kinds = new Set(
-        (await deps.documents.list(id)).map((x) => x.kind).filter((k) => !refused.has(k)),
-      );
+      const kinds = new Set(linkedDocuments(before).map((d) => d.kind));
       const missing = REQUIRED_DOCUMENTS.filter((k) => !kinds.has(k));
       if (missing.length > 0) {
         throw new ReviewError(

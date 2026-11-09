@@ -25,14 +25,22 @@ export function snapshot(c: KycCase): CaseSnapshot {
   return snapshotOf(c);
 }
 
-type RefKey = keyof KycCase['partnerRefs'];
+/**
+ * The partnerRefs slot an event must match. S#10: PAN and face results are ref-bound too: the API
+ * gets them synchronously and stores no ref for them, so a webhook `pan` / `face` result is always
+ * refused unless a matching ref is stored for it under `partnerRefs.pan` / `partnerRefs.face`.
+ */
+type RefKey = keyof KycCase['partnerRefs'] | 'pan' | 'face';
 
-function refKeyFor(e: PartnerEvent): RefKey | undefined {
+function refKeyFor(e: PartnerEvent): RefKey {
   if (e.type === 'esign.completed') return 'esign';
   if (e.type === 'kra.upload') return 'kraUpload';
-  if (e.data.check === 'kra') return 'kra';
-  if (e.data.check === 'aadhaar') return 'aadhaar';
-  return undefined;
+  return e.data.check;
+}
+
+function storedRefFor(c: KycCase, key: RefKey): string | undefined {
+  const v = (c.partnerRefs as Partial<Record<RefKey, unknown>>)[key];
+  return typeof v === 'string' ? v : undefined;
 }
 
 /** S17: the event's ref must equal the ref this case stored for the step (both present). */
@@ -132,14 +140,14 @@ export function applyEvent(
     return { kind: 'ignored', outcome: 'ignored-terminal', ...withCheck };
   }
 
-  // S17: an event for a ref-bound step (KRA lookup, Aadhaar, e-sign, KRA upload) must carry the
-  // partner ref this case stored when it started that step. A missing ref, a case with no stored
-  // ref (e.g. a late KRA result after the lookup timed out) or a different session's ref is
+  // S17 + S#10: every event must carry the partner ref this case stored when it started that step
+  // (KRA lookup, Aadhaar, e-sign, KRA upload; PAN / face only if a ref was stored for them, which
+  // the API never does today). A missing ref, a case with no stored ref (e.g. a late KRA result
+  // after the lookup timed out, or any PAN / face result) or a different session's ref is
   // refused: audited + logged as 'ignored-ref-mismatch', and the case stays as it is (an
-  // under-review case stays with staff). PAN and face results have no ref of their own.
+  // under-review case stays with staff).
   const refKey = refKeyFor(e);
-  const storedRef = refKey ? before.partnerRefs[refKey] : undefined;
-  if (refKey && !refMatches(storedRef, e.ref)) {
+  if (!refMatches(storedRefFor(before, refKey), e.ref)) {
     return { kind: 'ignored', outcome: 'ignored-ref-mismatch', ...withCheck };
   }
 

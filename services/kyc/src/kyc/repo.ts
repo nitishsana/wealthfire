@@ -11,8 +11,11 @@
 //                               one row per paid check (month = yyyy-mm); `cap#<yyyy-mm-dd>` /
 //                               `<userId>` rows hold the per-user daily paid-check counter;
 //                               `sign#<yyyy-mm-dd>` / `<userId>` rows the daily upload-signing counter (S11)
-//   consents  pk userId, sk `<purpose>#<iso time>#<nonce>` (CONSENTS_TABLE, S2)
-//                               append-only: a 'given' or 'withdrawn' row per user action
+//                               (both counters carry `expiresAt`, the table TTL attribute: 2 days, S#14)
+//   consents  pk userId, sk `<purpose>#<iso time>#<seq>` (CONSENTS_TABLE, S2, S#11)
+//                               append-only: a 'given' or 'withdrawn' row per user action, plus
+//                               'case-closed' rows when a case is archived or deleted; never
+//                               updated or deleted (DELETE /kyc/data keeps them)
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ENV, requireEnv, TABLE_ENV, type Env } from '../lib/env';
 import type { DocClient } from '../lib/repo';
@@ -28,7 +31,7 @@ export type KycEvidence = CaseEvidence;
 /** One audit row (shared shape). */
 export type KycAuditRow = AuditRow;
 /** The part of the shared case store the KYC routes use. */
-export type KycCaseRepo = Pick<CaseStore, 'get' | 'save' | 'claimPan' | 'releasePan' | 'archive' | 'remove'>;
+export type KycCaseRepo = Pick<CaseStore, 'get' | 'save' | 'claimPan' | 'releasePan' | 'archive' | 'remove' | 'removeArchived'>;
 export type KycAuditRepo = AuditStore;
 
 /** S18: idempotency records live 24 h. */
@@ -81,19 +84,40 @@ export interface CostRepo {
 export const CONSENT_PURPOSES = ['digilocker', 'aadhaar-otp', 'pan-check', 'face-match', 'esign', 'kra-upload'] as const;
 export type ConsentPurpose = (typeof CONSENT_PURPOSES)[number];
 
+/**
+ * 'given' / 'withdrawn': the user's own action. 'case-closed' (S#11): appended for every purpose
+ * when a case is archived or deleted, so a NEW case needs fresh 'given' rows.
+ */
+export type ConsentAction = 'given' | 'withdrawn' | 'case-closed';
+
 export interface ConsentRow {
   userId: string;
-  /** `<purpose>#<iso time>#<nonce>` */
+  /** `<purpose>#<iso time>#<seq>`, seq a 6-digit counter: monotonic per (user, purpose) (S#11) */
   sk: string;
   purpose: ConsentPurpose;
-  action: 'given' | 'withdrawn';
+  action: ConsentAction;
   at: string;
-  ip?: string;
+  /** S#11: the live case when the row was written (absent before the first case exists) */
+  caseId?: string;
+  /** S#14: hmacLookup(mac, 'ip', ip), never the raw IP */
+  ipHash?: string;
+}
+
+/** S#11: the sort key of a consent row. */
+export function consentSk(purpose: ConsentPurpose, at: string, seq: number): string {
+  return `${purpose}#${at}#${String(seq).padStart(6, '0')}`;
+}
+
+/** S#11: the (time, seq) of a consent sort key; seq is -1 for an older nonce-style key. */
+export function parseConsentSk(sk: string): { at: string; seq: number } {
+  const parts = sk.split('#');
+  const seq = parts[2] !== undefined && /^\d{6}$/.test(parts[2]) ? Number(parts[2]) : -1;
+  return { at: parts[1] ?? '', seq };
 }
 
 export interface ConsentRepo {
-  /** Appends one row (rows are never changed or deleted by the app). */
-  record(row: ConsentRow): Promise<void>;
+  /** Appends one row (rows are never changed or deleted by the app). False when the sort key is already taken. */
+  record(row: ConsentRow): Promise<boolean>;
   /** The newest row for this purpose, or null. */
   latest(userId: string, purpose: ConsentPurpose): Promise<ConsentRow | null>;
 }
@@ -153,8 +177,10 @@ export class MemoryCostRepo implements CostRepo {
 
 export class MemoryConsentRepo implements ConsentRepo {
   readonly rows: ConsentRow[] = [];
-  async record(row: ConsentRow): Promise<void> {
+  async record(row: ConsentRow): Promise<boolean> {
+    if (this.rows.some((r) => r.userId === row.userId && r.sk === row.sk)) return false;
     this.rows.push(clone(row));
+    return true;
   }
   async latest(userId: string, purpose: ConsentPurpose): Promise<ConsentRow | null> {
     const mine = this.rows.filter((r) => r.userId === userId && r.purpose === purpose).sort((a, b) => (a.sk < b.sk ? -1 : a.sk > b.sk ? 1 : 0));
@@ -202,6 +228,19 @@ export function kycTablesFromEnv(env: Env = process.env): KycTableNames {
 
 const CAP_PREFIX = 'cap#';
 const SIGN_PREFIX = 'sign#';
+/** S#14: daily counter rows live this long after their India day starts. */
+export const COUNTER_TTL_SEC = 2 * 24 * 60 * 60;
+
+/**
+ * S#14: `expiresAt` (epoch seconds, the costs table TTL attribute) of a `cap#<day>` / `sign#<day>`
+ * counter row: 2 days after the start of that India day (yyyy-mm-dd). Per-check cost rows never
+ * get one (billing record).
+ */
+export function counterExpiresAt(day: string): number {
+  const start = Date.parse(`${day}T00:00:00.000+05:30`);
+  if (Number.isNaN(start)) throw new Error('bad day');
+  return Math.floor(start / 1000) + COUNTER_TTL_SEC;
+}
 
 export class DynamoIdempotencyRepo implements IdempotencyRepo {
   constructor(private readonly doc: DocClient, private readonly table: string) {}
@@ -264,10 +303,10 @@ export class DynamoCostRepo implements CostRepo {
       await this.doc.send(new UpdateCommand({
         TableName: this.table,
         Key: { month: CAP_PREFIX + day, checkId: userId },
-        UpdateExpression: 'ADD #n :one',
+        UpdateExpression: 'ADD #n :one SET #e = if_not_exists(#e, :exp)',
         ConditionExpression: 'attribute_not_exists(#n) OR #n < :max',
-        ExpressionAttributeNames: { '#n': 'count' },
-        ExpressionAttributeValues: { ':one': 1, ':max': max },
+        ExpressionAttributeNames: { '#n': 'count', '#e': 'expiresAt' },
+        ExpressionAttributeValues: { ':one': 1, ':max': max, ':exp': counterExpiresAt(day) },
       }));
       return true;
     } catch (e) {
@@ -293,10 +332,10 @@ export class DynamoCostRepo implements CostRepo {
       await this.doc.send(new UpdateCommand({
         TableName: this.table,
         Key: { month: SIGN_PREFIX + day, checkId: userId },
-        UpdateExpression: 'ADD #n :n',
+        UpdateExpression: 'ADD #n :n SET #e = if_not_exists(#e, :exp)',
         ConditionExpression: 'attribute_not_exists(#n) OR #n <= :room',
-        ExpressionAttributeNames: { '#n': 'count' },
-        ExpressionAttributeValues: { ':n': n, ':room': max - n },
+        ExpressionAttributeNames: { '#n': 'count', '#e': 'expiresAt' },
+        ExpressionAttributeValues: { ':n': n, ':room': max - n, ':exp': counterExpiresAt(day) },
       }));
       return true;
     } catch (e) {
@@ -309,8 +348,14 @@ export class DynamoCostRepo implements CostRepo {
 export class DynamoConsentRepo implements ConsentRepo {
   constructor(private readonly doc: DocClient, private readonly table: string) {}
 
-  async record(row: ConsentRow): Promise<void> {
-    await this.doc.send(new PutCommand({ TableName: this.table, Item: { ...row }, ConditionExpression: 'attribute_not_exists(sk)' }));
+  async record(row: ConsentRow): Promise<boolean> {
+    try {
+      await this.doc.send(new PutCommand({ TableName: this.table, Item: { ...row }, ConditionExpression: 'attribute_not_exists(sk)' }));
+      return true;
+    } catch (e) {
+      if (isConditionFailure(e)) return false;
+      throw e;
+    }
   }
 
   async latest(userId: string, purpose: ConsentPurpose): Promise<ConsentRow | null> {

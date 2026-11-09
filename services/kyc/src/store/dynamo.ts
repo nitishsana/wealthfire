@@ -3,7 +3,7 @@
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { DocClient } from '../lib/repo';
 import {
-  BadCursorError, PAN_PREFIX, archiveKey, archivedRecord, isCaseKey,
+  BadCursorError, PAN_PREFIX, archiveIndexKey, archiveKey, archivedRecord, isCaseKey,
   type AuditRow, type AuditStore, type CasePage, type CaseStore, type CaseUpdate, type KycCaseRecord,
 } from './types';
 
@@ -180,6 +180,14 @@ export class DynamoCaseStore implements CaseStore {
             },
           },
           { Put: auditPut(this.auditTable, audit) },
+          // index of this user's archives, so DELETE /kyc/data finds them without a scan
+          {
+            Update: {
+              TableName: this.table, Key: { userId: archiveIndexKey(userId) },
+              UpdateExpression: 'ADD #a :a', ExpressionAttributeNames: { '#a': 'archivedAts' },
+              ExpressionAttributeValues: { ':a': new Set([archivedAt]) },
+            },
+          },
         ],
       }));
       return true;
@@ -187,6 +195,18 @@ export class DynamoCaseStore implements CaseStore {
       if (isConditionFailure(e)) return false;
       throw e;
     }
+  }
+
+  async removeArchived(userId: string): Promise<number> {
+    if (!isCaseKey(userId)) return 0;
+    const idx = await this.doc.send(new GetCommand({ TableName: this.table, Key: { userId: archiveIndexKey(userId) }, ConsistentRead: true }));
+    const raw = idx.Item?.archivedAts as Set<string> | string[] | undefined;
+    const ats = raw ? [...raw] : [];
+    for (const at of ats) {
+      await this.doc.send(new DeleteCommand({ TableName: this.table, Key: { userId: archiveKey(userId, at) } }));
+    }
+    if (idx.Item) await this.doc.send(new DeleteCommand({ TableName: this.table, Key: { userId: archiveIndexKey(userId) } }));
+    return ats.length;
   }
 
   async remove(userId: string, expectedVersion: number, audit: AuditRow): Promise<boolean> {

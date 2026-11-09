@@ -1,9 +1,10 @@
 // Deploy wrapper: `npx tsx infra/deploy.ts <stack> -c budgetEmail=<address> [cdk deploy args...]`.
 // Refuses to run without a valid budgetEmail (S18), then prints the account steps from DEPLOY.md
 // and runs `cdk deploy`. Deploying needs Nitish's OK; agents never run this.
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { EMAIL } from './stack.js';
+import { EMAIL, SYNTH_ONLY_CONTEXT } from './stack.js';
 
 /** Context values passed as `-c k=v`, `--context k=v` or `--context=k=v`. */
 export function contextArgs(args: readonly string[]): Record<string, string> {
@@ -22,7 +23,10 @@ export function contextArgs(args: readonly string[]): Record<string, string> {
 
 /** Why the deploy must not run, or null when it may. */
 export function deployRefusal(args: readonly string[]): string | null {
-  const email = contextArgs(args).budgetEmail;
+  const ctx = contextArgs(args);
+  // S12: synthOnly turns off the stack's budgetEmail check; it is for `npm run synth`, never a deploy.
+  if (SYNTH_ONLY_CONTEXT in ctx) return `Refusing to deploy: -c ${SYNTH_ONLY_CONTEXT} is for synth only.`;
+  const email = ctx.budgetEmail;
   if (email === undefined || email.trim() === '') {
     return 'Refusing to deploy: pass -c budgetEmail=<address> so the budget and cost alarms email someone.';
   }
@@ -36,6 +40,25 @@ export const ACCOUNT_STEPS = [
   'Confirm the budget / cost-alarm email subscription after the first deploy.',
 ];
 
+/** The CDK app command cdk runs (a fixed string; no operator input goes into it). */
+export const CDK_APP = 'npx tsx infra/app.ts';
+
+/**
+ * S12: the `cdk deploy` process. No shell, so args are passed to cdk verbatim and cannot inject
+ * shell commands. It runs the local aws-cdk bin with this Node: `npx.cmd` cannot be spawned without
+ * a shell on Windows (Node refuses .cmd files with shell: false, EINVAL).
+ */
+export function deployCommand(
+  args: readonly string[],
+  cdkBin: string = createRequire(import.meta.url).resolve('aws-cdk/bin/cdk'),
+): { command: string; args: string[]; options: SpawnSyncOptions } {
+  return {
+    command: process.execPath,
+    args: [cdkBin, 'deploy', '--app', CDK_APP, ...args],
+    options: { stdio: 'inherit', shell: false },
+  };
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   const refusal = deployRefusal(args);
@@ -45,8 +68,9 @@ function main(): void {
   }
   console.log('Account steps (see infra/DEPLOY.md):');
   for (const s of ACCOUNT_STEPS) console.log(`- ${s}`);
-  // shell: npx is a .cmd on Windows. Args are the operator's own; quote the one with spaces.
-  const r = spawnSync('npx', ['cdk', 'deploy', '--app', '"npx tsx infra/app.ts"', ...args], { stdio: 'inherit', shell: true });
+  const cmd = deployCommand(args);
+  const r = spawnSync(cmd.command, cmd.args, cmd.options);
+  if (r.error) console.error(`cdk deploy did not start: ${r.error.message}`);
   process.exit(r.status ?? 1);
 }
 

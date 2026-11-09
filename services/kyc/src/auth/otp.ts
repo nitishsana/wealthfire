@@ -28,8 +28,13 @@ export const OTP_LIMITS = {
   targetDayWindowMs: DAY,
   maxSendsPerIp: 20,
   ipWindowMs: HOUR,
-  /** failed challenges per target (in failWindowMs) that start a lockout */
+  /**
+   * failed challenges per (target, caller IP) in failWindowMs that start a lockout for that pair
+   * (S#7: a stranger typing wrong codes from their own IP does not lock the owner out)
+   */
   maxFailedChallenges: 3,
+  /** failed challenges per target from ANY IP in failWindowMs that lock the target everywhere */
+  maxFailedChallengesGlobal: 10,
   failWindowMs: DAY,
   lockoutMs: HOUR,
   /** verify calls per IP per hour */
@@ -164,7 +169,7 @@ export class OtpService {
       this.fail('send-limited', kind);
       throw e;
     }
-    await this.assertNotLocked(targetHash, kind);
+    await this.assertNotLocked(targetHash, ipHash, kind);
 
     const challengeId = randomToken(16);
     let previous: string | undefined;
@@ -208,8 +213,9 @@ export class OtpService {
     if (typeof input.code !== 'string' || !new RegExp(`^\\d{${OTP_LIMITS.length}}$`).test(input.code)) throw new AuthError('bad_request');
     const device = typeof input.device === 'string' && input.device.length <= 100 ? input.device : undefined;
 
+    const ipHash = await this.ipHash(input.ip);
     try {
-      await this.reserve(`v:${await this.ipHash(input.ip)}`, [{ windowMs: OTP_LIMITS.verifyIpWindowMs, max: OTP_LIMITS.maxVerifiesPerIp }], 0);
+      await this.reserve(`v:${ipHash}`, [{ windowMs: OTP_LIMITS.verifyIpWindowMs, max: OTP_LIMITS.maxVerifiesPerIp }], 0);
     } catch (e) {
       this.fail('verify-limited');
       throw e;
@@ -220,7 +226,7 @@ export class OtpService {
       this.fail('dead-challenge');
       throw new AuthError('invalid_code', { triesLeft: 0 });
     }
-    await this.assertNotLocked(c.targetHash, c.contactKind);
+    await this.assertNotLocked(c.targetHash, ipHash, c.contactKind);
     if (clock.now() >= c.expiresAt) {
       await repos.otp.deleteChallenge(c.challengeId);
       this.fail('dead-challenge', c.contactKind);
@@ -237,7 +243,7 @@ export class OtpService {
       let left = OTP_LIMITS.maxTries - tries;
       // A challenge counts as failed at its first wrong code (once per challenge), so resending
       // before the tries run out cannot dodge the lockout.
-      if (tries === 1 && (await this.recordFailedChallenge(c.targetHash))) {
+      if (tries === 1 && (await this.recordFailedChallenge(c.targetHash, ipHash))) {
         this.fail('lockout-started', c.contactKind);
         left = 0;
       }
@@ -259,33 +265,57 @@ export class OtpService {
     return { tokens: await tokens.issue(user.userId, device), isNewUser: created };
   }
 
-  /** Throws rate_limited while the target is locked out (3 failed challenges in 24 h -> 1 h). */
-  private async assertNotLocked(targetHash: string, kind: ContactKind): Promise<void> {
+  /**
+   * The two failed-challenge logs (S#7): per (target, caller IP), threshold 3; per target from any
+   * IP, threshold 10. Each locks for lockoutMs after its latest failure once its threshold is met.
+   */
+  private failLogs(targetHash: string, ipHash: string): { key: string; max: number }[] {
+    return [
+      { key: `f:${targetHash}:${ipHash}`, max: OTP_LIMITS.maxFailedChallenges },
+      { key: `fg:${targetHash}`, max: OTP_LIMITS.maxFailedChallengesGlobal },
+    ];
+  }
+
+  /** Throws rate_limited while the (target, IP) pair or the whole target is locked out. */
+  private async assertNotLocked(targetHash: string, ipHash: string, kind: ContactKind): Promise<void> {
     const now = this.deps.clock.now();
-    const log = await this.deps.repos.otp.getSendLog(`f:${targetHash}`);
-    const fails = (log?.sends ?? []).filter((t) => now - t < OTP_LIMITS.failWindowMs && t <= now).sort((a, b) => a - b);
-    if (fails.length < OTP_LIMITS.maxFailedChallenges) return;
-    const last = fails[fails.length - 1]!;
-    if (now - last < OTP_LIMITS.lockoutMs) {
+    let wait = 0;
+    for (const { key, max } of this.failLogs(targetHash, ipHash)) {
+      const log = await this.deps.repos.otp.getSendLog(key);
+      const fails = (log?.sends ?? []).filter((t) => now - t < OTP_LIMITS.failWindowMs && t <= now).sort((a, b) => a - b);
+      if (fails.length < max) continue;
+      const last = fails[fails.length - 1]!;
+      if (now - last < OTP_LIMITS.lockoutMs) wait = Math.max(wait, last + OTP_LIMITS.lockoutMs - now);
+    }
+    if (wait > 0) {
       this.fail('locked', kind);
-      throw new AuthError('rate_limited', { retryAfterMs: last + OTP_LIMITS.lockoutMs - now });
+      throw new AuthError('rate_limited', { retryAfterMs: wait });
     }
   }
 
-  /** Records a failed challenge for the target; true when this failure starts a lockout. */
-  private async recordFailedChallenge(targetHash: string): Promise<boolean> {
+  /** Records a failed challenge in both logs; true when this failure starts a lockout in either. */
+  private async recordFailedChallenge(targetHash: string, ipHash: string): Promise<boolean> {
+    let started = false;
+    for (const { key, max } of this.failLogs(targetHash, ipHash)) {
+      if (await this.appendFailure(key, max)) started = true;
+    }
+    return started;
+  }
+
+  /** Appends `now` to the failure log at `key`; true when the log reaches `max` in the window. */
+  private async appendFailure(key: string, max: number): Promise<boolean> {
     const { repos, clock } = this.deps;
-    const key = `f:${targetHash}`;
     for (let attempt = 0; attempt < CAS_RETRIES; attempt++) {
       const now = clock.now();
       const log = await repos.otp.getSendLog(key);
       const fails = (log?.sends ?? []).filter((t) => now - t < OTP_LIMITS.failWindowMs && t <= now);
       const next = { key, sends: [...fails, now] };
       if (await repos.otp.putSendLog(next, log?.version ?? 0, now + OTP_LIMITS.failWindowMs)) {
-        return next.sends.length >= OTP_LIMITS.maxFailedChallenges;
+        return next.sends.length >= max;
       }
     }
-    // Could not record under contention: fail closed with a lockout.
+    // Could not record under contention: fail closed with a lockout. The log was not written, so
+    // this caller's challenge is ended (triesLeft 0) but no later sign-in is blocked by it.
     return true;
   }
 

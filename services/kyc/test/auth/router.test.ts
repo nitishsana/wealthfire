@@ -3,9 +3,12 @@ import { createRouter, CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS, type DevPartnerHa
 import { silentLogger } from '../../src/kyc/log';
 import type { KycHandler } from '../../src/kyc/routes';
 import { devPartnerRoutes } from '../../src/partner/devPages';
+import { ENV, listEnv } from '../../src/lib/env';
 import { MOBILE, setup } from './helpers';
 
 const ORIGIN = 'https://nitishsana.github.io';
+const CONSOLE = 'https://d1234.cloudfront.net';
+const DEV_PREVIEW = 'http://127.0.0.1:5180';
 
 function make(over: Partial<RouterDeps> = {}) {
   const s = setup();
@@ -21,7 +24,8 @@ function make(over: Partial<RouterDeps> = {}) {
     kyc: { 'DELETE /kyc/data': kycHandler('delete'), 'POST /kyc/consent': kycHandler('consent'), 'POST /kyc/brand-new': kycHandler('new') },
     review: {},
     staff: { verify: async () => null },
-    allowedOrigins: [ORIGIN],
+    allowedOrigins: [ORIGIN, CONSOLE, DEV_PREVIEW],
+    appOrigins: [ORIGIN],
     logger: silentLogger,
     clock: s.clock,
     ...over,
@@ -139,5 +143,44 @@ describe('router: refresh cookie (R2/S6, S4)', () => {
     expect(v.statusCode).toBe(403);
     expect(v.cookies).toEqual([]);
     expect(v.body).not.toMatch(/Token/);
+  });
+
+  it('S#8: a CORS-only origin (review console, dev preview) cannot use the cookie', async () => {
+    const e = make();
+    for (const origin of [CONSOLE, DEV_PREVIEW]) {
+      // still a CORS origin for its own calls
+      const pre = await e.call('OPTIONS', '/auth/refresh', { origin });
+      expect(pre.headers['access-control-allow-origin']).toBe(origin);
+      e.clock.advance(11 * 60_000); // resend cooldown
+      const v = await webSignIn(e, { 'x-wf-client': 'web', origin });
+      expect(v.statusCode, origin).toBe(403);
+      expect(v.cookies).toEqual([]);
+      expect(v.body).not.toMatch(/Token/);
+      const r = await e.call('POST', '/auth/refresh', { 'x-wf-client': 'web', origin, cookie: 'wf_rt=x' });
+      expect(r.statusCode, origin).toBe(403);
+      expect(r.cookies).toEqual([]);
+    }
+  });
+
+  it('S#8: no appOrigins = cookie mode off, never the CORS list', async () => {
+    for (const appOrigins of [undefined, []]) {
+      const e = make({ appOrigins });
+      const v = await webSignIn(e, { 'x-wf-client': 'web', origin: ORIGIN });
+      expect(v.statusCode).toBe(403);
+      expect(v.cookies).toEqual([]);
+      // phones (body mode) are unaffected
+      e.clock.advance(11 * 60_000); // resend cooldown
+      const p = await webSignIn(e, {});
+      expect(p.statusCode).toBe(200);
+      expect(JSON.parse(p.body).refreshToken).toEqual(expect.any(String));
+    }
+  });
+});
+
+describe('env: APP_ORIGINS (S#8)', () => {
+  it('is its own variable, separate from ALLOWED_ORIGINS', () => {
+    expect(ENV.appOrigins).toBe('APP_ORIGINS');
+    expect(ENV.appOrigins).not.toBe(ENV.allowedOrigins);
+    expect(listEnv({ APP_ORIGINS: ' https://a.example , ,https://b.example' }, ENV.appOrigins)).toEqual(['https://a.example', 'https://b.example']);
   });
 });

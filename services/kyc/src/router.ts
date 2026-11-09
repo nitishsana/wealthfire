@@ -63,8 +63,13 @@ export interface RouterDeps {
   kyc: Record<string, KycHandler>;
   review: Record<string, ReviewHandler>;
   staff: StaffVerifier;
-  /** CORS allow-list (exact origins); also the Origin allow-list for the refresh cookie */
+  /** CORS allow-list (exact origins: app + review console, dev preview). NOT used for the refresh cookie. */
   allowedOrigins: readonly string[];
+  /**
+   * Web app origins allowed to use the refresh cookie (env APP_ORIGINS, S#8). Unset or empty =
+   * cookie mode off: `x-wf-client: web` is refused with 403. Never falls back to allowedOrigins.
+   */
+  appOrigins?: readonly string[];
   logger: Logger;
   clock: { now(): number };
   /** env STAGE; dev partner pages are registered only when this is exactly 'dev' */
@@ -153,7 +158,7 @@ export function createRouter(deps: RouterDeps): (req: HttpRequest) => Promise<Ht
   const reviewKeys = Object.keys(deps.review);
   const dev = deps.stage === 'dev' ? (deps.devPartner ?? {}) : {};
   const devKeys = Object.keys(dev);
-  const authDeps: AuthRouteDeps = { ...deps.auth, allowedOrigins: deps.allowedOrigins };
+  const authDeps: AuthRouteDeps = { ...deps.auth, appOrigins: deps.appOrigins ?? [] };
 
   const respond = (req: HttpRequest, status: number, body: unknown, extra: Record<string, string> = {}, cookies: string[] = []): HttpResponse => {
     const headers: Record<string, string> = { ...SECURITY_HEADERS, ...extra };

@@ -301,12 +301,12 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
 
   it('timeout: PAN check timeout → partner-timeout; retry via start continues the full KYC', async () => {
     const e = env();
-    // the webhook's PAN check (2 tries) and the status read's auto-retry (2 tries) both time out
-    e.partner.failNext('verifyPan', 4);
+    // the webhook's PAN check (2 tries) and the status read's auto-retry (F9: 1 try) all time out
+    e.partner.failNext('verifyPan', 3);
     const token = await e.signIn();
     const { afterPan } = await fullKyc(e, token);
     expect(afterPan.json).toMatchObject({ status: 'under-review', reason: 'partner-timeout', unclear: ['pan'] });
-    expect(e.partner.calls.verifyPan).toBe(4);
+    expect(e.partner.calls.verifyPan).toBe(3);
     const r = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
     expect(r.json).toMatchObject({ status: 'under-review', reason: 'partner-timeout', next: 'selfie' });
     const f = await e.call('POST', '/kyc/selfie', { token, body: { uploadId: await e.uploadSelfie(token) } });

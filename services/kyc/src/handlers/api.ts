@@ -5,7 +5,7 @@ import type {
   APIGatewayProxyEvent, APIGatewayProxyEventV2, APIGatewayProxyResult, APIGatewayProxyStructuredResultV2,
 } from 'aws-lambda';
 import { KMSClient } from '@aws-sdk/client-kms';
-import { S3Client } from '@aws-sdk/client-s3';
+import { S3Client, type S3ClientConfig } from '@aws-sdk/client-s3';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { SNSClient } from '@aws-sdk/client-sns';
 import { loadConfig } from '../config';
@@ -29,7 +29,7 @@ import { FakePartner, type FakePartnerOptions } from '../partner/fake';
 import { secretFrom } from './webhook';
 import type { KycPartner } from '../partner/types';
 import { reviewRoutes } from '../review/routes';
-import { S3DocumentStore, S3DownloadSigner } from '../review/s3';
+import { S3DownloadSigner } from '../review/s3';
 import { reviewCaseStore } from '../store/views';
 import { createRouter, type HttpRequest, type HttpResponse } from '../router';
 
@@ -96,6 +96,17 @@ export function devPartnerSetup(
   };
 }
 
+/**
+ * S#1: the S3 client for the docs bucket (upload PUT presigns, review GET presigns, tagging,
+ * content checks). `requestChecksumCalculation: 'WHEN_REQUIRED'` stops the SDK adding
+ * x-amz-checksum-* / x-amz-sdk-checksum-algorithm (of an empty body) to presigned PUT URLs, which
+ * the apps' real upload body would not match. Operations S3 itself requires a checksum for
+ * (PutObjectTagging, DeleteObjects) still get one.
+ */
+export function createDocsS3Client(extra: S3ClientConfig = {}): S3Client {
+  return new S3Client({ ...extra, requestChecksumCalculation: 'WHEN_REQUIRED' });
+}
+
 async function readWebhookSecret(arn: string): Promise<string> {
   const out = await new SecretsManagerClient({}).send(new GetSecretValueCommand({ SecretId: arn }));
   if (!out.SecretString) throw new Error('webhook secret is empty');
@@ -114,7 +125,7 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
   const clock = systemClock;
   const doc = createDocClient();
   const kms = new KMSClient({});
-  const s3 = new S3Client({});
+  const s3 = createDocsS3Client();
   const mac = new KmsMacSigner(kms, requireEnv(env, ENV.hmacKeyId));
   // S9: PAN / contact envelopes use the field key (api role only); the Encryptor sends the
   // required {purpose: 'pan' | 'contact', ...} encryption context to KMS on every call.
@@ -144,7 +155,10 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
   const review = reviewRoutes({
     cases: reviewCaseStore(repos.cases),
     audit: repos.audit,
-    documents: new S3DocumentStore(s3, bucket, docsPrefix),
+    // F2/S#3: links come from the case's linked documents, keyed exactly like the KYC routes
+    docKey: (userId, uploadId) => kyc.docKey(userId, uploadId),
+    // F1/F2: link pending uploads before review links are signed and before Approve counts them
+    linkDocuments: (userId) => kyc.linkDocuments(userId),
     signer: new S3DownloadSigner(s3, bucket),
     clock,
     onApproved: async (userId) => void (await kyc.uploadToKra(userId)),
@@ -161,6 +175,8 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
     review,
     staff,
     allowedOrigins: listEnv(env, ENV.allowedOrigins),
+    // S#8: refresh-cookie origins are the app origins only (never the full CORS list)
+    appOrigins: listEnv(env, ENV.appOrigins),
     logger: new ConsoleLogger(),
     clock,
     ...(env[ENV.stage] !== undefined ? { stage: env[ENV.stage] } : {}),

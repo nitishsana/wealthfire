@@ -107,6 +107,18 @@ export class MemoryCaseStore implements CaseStore {
     return true;
   }
 
+  async removeArchived(userId: string): Promise<number> {
+    const prefix = archiveKey(userId, '');
+    let n = 0;
+    for (const k of [...this.archived.keys()]) {
+      if (k.startsWith(prefix)) {
+        this.archived.delete(k);
+        n++;
+      }
+    }
+    return n;
+  }
+
   /** @internal test hook: who holds a PAN claim */
   panOwner(panHash: string): string | undefined {
     return this.pans.get(panHash);

@@ -21,7 +21,10 @@ export type AuditEntry = AuditRow;
  */
 export type ReviewCase = KycCase & {
   evidence?: { esign?: string };
-  /** S14: per-kind upload link; a 'rejected' one failed the type check and does not count for Approve */
+  /**
+   * S11 + S14: per-kind upload link, written by the KYC routes. The review routes show and count
+   * ONLY 'linked' entries (checked, kept); a 'rejected' one failed the type check.
+   */
   documents?: Partial<Record<string, { uploadId: string; state: 'linked' | 'rejected' }>>;
 };
 
@@ -52,7 +55,10 @@ export interface StoredDocument {
   uploadedAt?: string;
 }
 
-/** Lists a case's uploaded documents. */
+/**
+ * Lists a case's raw S3 objects. Not used by the review routes any more (F2/S#3: they read the
+ * case's own `documents` links); kept for the S3 adapter and its tests.
+ */
 export interface DocumentStore {
   list(userId: string): Promise<StoredDocument[]>;
 }

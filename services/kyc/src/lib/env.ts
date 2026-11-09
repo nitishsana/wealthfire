@@ -16,6 +16,11 @@ export const ENV = {
   stage: 'STAGE',
   /** CORS allow-list (comma-separated exact origins) */
   allowedOrigins: 'ALLOWED_ORIGINS',
+  /**
+   * Web APP origins only (comma-separated exact origins) allowed to use the `wf_rt` refresh cookie.
+   * Never the review console or other CORS-only origins (S#8). Empty = cookie mode off (web gets 403).
+   */
+  appOrigins: 'APP_ORIGINS',
   /** DigiLocker / e-sign return URL prefixes (comma-separated) */
   returnUrlPrefixes: 'RETURN_URL_PREFIXES',
   docsBucket: 'DOCS_BUCKET',

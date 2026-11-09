@@ -8,9 +8,23 @@ import type { KycCase } from '../../src/types';
 
 const ID = '11111111-1111-4111-8111-111111111111';
 
-/** The three documents R1 requires before an Approve. */
-function withDocs(s: ReturnType<typeof setup>, kinds: readonly ('selfie' | 'aadhaar' | 'pan')[] = ['selfie', 'aadhaar', 'pan']) {
-  s.documents.docs.set(ID, kinds.map((k) => ({ kind: k, key: `kyc/${ID}/${k}-1.${k === 'selfie' ? 'jpg' : 'pdf'}` })));
+type Kind = 'selfie' | 'aadhaar' | 'pan';
+const uploadIdFor = (k: Kind) => `${k}-0000000${k.length}-aaaa-4aaa-8aaa-aaaaaaaaaaaa.${k === 'selfie' ? 'jpg' : 'pdf'}`;
+
+/**
+ * F2/S#3: the case's own document links (what the KYC routes write after the type check). The
+ * stored case must exist first; `state` defaults to 'linked'.
+ */
+function withDocs(
+  s: ReturnType<typeof setup>,
+  kinds: readonly Kind[] = ['selfie', 'aadhaar', 'pan'],
+  state: 'linked' | 'rejected' = 'linked',
+) {
+  const c = s.cases.map.get(ID);
+  if (!c) throw new Error('put the case first');
+  const documents = { ...((c as ReviewCase).documents ?? {}) };
+  for (const k of kinds) documents[k] = { uploadId: uploadIdFor(k), state };
+  s.cases.put({ ...c, documents } as KycCase);
 }
 
 function route(s: ReturnType<typeof setup>, key: string): Handler {
@@ -98,10 +112,7 @@ describe('GET /review/cases/{id}', () => {
   it('returns checks, masked values, 5-minute document links and history; audits the view', async () => {
     const s = setup();
     s.cases.put(makeCase());
-    s.documents.docs.set(ID, [
-      { kind: 'selfie', key: `kyc/${ID}/selfie.jpg` },
-      { kind: 'pan', key: `kyc/${ID}/pan.pdf` },
-    ]);
+    withDocs(s, ['selfie', 'pan']);
     const r = await route(s, 'GET /review/cases/{id}')(req({ params: { id: ID } }));
     expect(r.status).toBe(200);
     const body = r.body as {
@@ -111,6 +122,7 @@ describe('GET /review/cases/{id}', () => {
     };
     expect(body.case.checks).toEqual({ aadhaar: 'pass', pan: 'pass', 'face-match': 'unclear' });
     expect(body.documents.map((d) => d.kind)).toEqual(['selfie', 'pan']);
+    expect(s.signer.calls.map((c) => c.key)).toEqual([`kyc/${ID}/${uploadIdFor('selfie')}`, `kyc/${ID}/${uploadIdFor('pan')}`]);
     expect(s.signer.calls.every((c) => c.expiresInSec === DOC_URL_TTL_SEC && c.expiresInSec === 300)).toBe(true);
     expect(body.documents[0]?.expiresAt).toBe(new Date(s.clock.now() + 300_000).toISOString());
     expect(JSON.stringify(body)).not.toContain('kyc/'); // S3 keys stay server-side
@@ -276,22 +288,137 @@ describe('R1: staff Approve needs documents; KRA upload only after e-sign', () =
 
   it('a document refused by the type check does not count for approve', async () => {
     const s = setup();
-    const refused: ReviewCase = { ...makeCase(), documents: { pan: { uploadId: 'u-pan', state: 'rejected' } } };
-    s.cases.put(refused as KycCase);
-    withDocs(s, ['selfie', 'aadhaar', 'pan']);
+    s.cases.put(makeCase());
+    withDocs(s, ['selfie', 'aadhaar']);
+    withDocs(s, ['pan'], 'rejected');
     const r = await post(s, { action: 'approve' });
     expect(r.status).toBe(409);
     expect(r.body).toEqual({ error: 'documents_missing', message: 'Approve needs the selfie, Aadhaar and PAN documents. Missing: PAN.' });
     expect(s.cases.map.get(ID)?.status).toBe('under-review');
   });
 
-  it('an "other" file does not count as a required document', async () => {
+  it('F2/S#3: raw S3 objects never count; only the case\'s linked documents do', async () => {
     const s = setup();
     s.cases.put(makeCase());
-    s.documents.docs.set(ID, [
-      { kind: 'selfie', key: 'k1' }, { kind: 'aadhaar', key: 'k2' }, { kind: 'other', key: 'k3' },
-    ]);
-    expect((await post(s, { action: 'approve' })).status).toBe(409);
+    // pending / unchecked / archived-case objects under kyc/<userId>/ — the old S3 listing counted these
+    s.documents.docs.set(ID, (['selfie', 'aadhaar', 'pan'] as const).map((k) => ({ kind: k, key: `kyc/${ID}/${uploadIdFor(k)}` })));
+    const r = await post(s, { action: 'approve' });
+    expect(r.body).toMatchObject({ error: 'documents_missing' });
+    expect(s.audit.rows).toHaveLength(0);
+    const g = await route(s, 'GET /review/cases/{id}')(req({ params: { id: ID } }));
+    expect(g.body).toMatchObject({ documents: [], documentsAvailable: true });
+    expect(s.signer.calls).toHaveLength(0);
+  });
+
+  it('F2/S#3: malformed or wrong-kind upload ids on the case are ignored (never signed, never counted)', async () => {
+    const s = setup();
+    s.cases.put({
+      ...makeCase(),
+      documents: {
+        selfie: { uploadId: uploadIdFor('selfie'), state: 'linked' },
+        aadhaar: { uploadId: '../other-user/aadhaar-x.pdf', state: 'linked' },
+        pan: { uploadId: uploadIdFor('aadhaar'), state: 'linked' },
+        other: { uploadId: 'other-1.pdf', state: 'linked' },
+      },
+    } as ReviewCase as KycCase);
+    const r = await post(s, { action: 'approve' });
+    expect(r.body).toEqual({ error: 'documents_missing', message: 'Approve needs the selfie, Aadhaar and PAN documents. Missing: Aadhaar, PAN.' });
+    const g = await route(s, 'GET /review/cases/{id}')(req({ params: { id: ID } }));
+    expect((g.body as { documents: { kind: string }[] }).documents.map((d) => d.kind)).toEqual(['selfie']);
+    expect(s.signer.calls.map((c) => c.key)).toEqual([`kyc/${ID}/${uploadIdFor('selfie')}`]);
+  });
+
+  it('F2/S#3: a refused newer upload hides the kind (the KYC routes keep the last state per kind)', async () => {
+    const s = setup();
+    s.cases.put(makeCase());
+    withDocs(s);
+    withDocs(s, ['aadhaar'], 'rejected');
+    const g = await route(s, 'GET /review/cases/{id}')(req({ params: { id: ID } }));
+    expect((g.body as { documents: { kind: string }[] }).documents.map((d) => d.kind)).toEqual(['selfie', 'pan']);
+    expect((await post(s, { action: 'approve' })).body).toMatchObject({ error: 'documents_missing' });
+  });
+
+  it('F2/S#3: a custom docKey (the KYC routes\' prefix) is used for the signed links', async () => {
+    const s = setup();
+    s.cases.put(makeCase());
+    withDocs(s);
+    const routes = reviewRoutes({
+      cases: s.cases, audit: s.audit, signer: s.signer, clock: s.clock,
+      docKey: (u, id) => `docs/${u}/${id}`,
+    });
+    const g = await routes['GET /review/cases/{id}']!(req({ params: { id: ID } }));
+    expect(g.status).toBe(200);
+    expect(s.signer.calls.map((c) => c.key)).toEqual((['selfie', 'aadhaar', 'pan'] as const).map((k) => `docs/${ID}/${uploadIdFor(k)}`));
+    expect(JSON.stringify(g.body)).not.toContain('docs/');
+  });
+
+  describe('F2: linkDocuments runs the KYC link step first', () => {
+    /** a link step that marks the three uploads linked (bumping the version, as the store does) */
+    const linking = (s: ReturnType<typeof setup>, calls: string[]) => reviewRoutes({
+      cases: s.cases, audit: s.audit, signer: s.signer, clock: s.clock, nonce: () => 'n',
+      linkDocuments: async (userId) => {
+        calls.push(userId);
+        const c = s.cases.map.get(userId)!;
+        if ((c as ReviewCase).documents?.pan) return;
+        withDocs(s);
+        s.cases.put({ ...s.cases.map.get(userId)!, version: c.version + 1 } as KycCase);
+      },
+    });
+
+    it('approve without a version: files linked just now count', async () => {
+      const s = setup();
+      s.cases.put(makeCase());
+      const calls: string[] = [];
+      const r = await linking(s, calls)['POST /review/cases/{id}']!(req({ params: { id: ID }, body: { action: 'approve' } }));
+      expect(r.status).toBe(200);
+      expect(calls).toEqual([ID]);
+      expect(s.cases.map.get(ID)).toMatchObject({ status: 'verified', version: 5 });
+    });
+
+    it('approve with the version the reviewer saw: newly linked files -> 409 conflict (reload first)', async () => {
+      const s = setup();
+      s.cases.put(makeCase());
+      const r = await linking(s, [])['POST /review/cases/{id}']!(req({ params: { id: ID }, body: { action: 'approve', version: 3 } }));
+      expect(r.body).toMatchObject({ error: 'conflict' });
+      expect(s.cases.map.get(ID)?.status).toBe('under-review');
+      expect(s.audit.rows.filter((a) => a.action.startsWith('review.'))).toHaveLength(0);
+    });
+
+    it('GET links first, so the reviewer sees the new files and their version', async () => {
+      const s = setup();
+      s.cases.put(makeCase());
+      const routes = linking(s, []);
+      const g = await routes['GET /review/cases/{id}']!(req({ params: { id: ID } }));
+      const body = g.body as { case: { version: number }; documents: { kind: string }[] };
+      expect(body.documents.map((d) => d.kind)).toEqual(['selfie', 'aadhaar', 'pan']);
+      expect(body.case.version).toBe(4);
+      const r = await routes['POST /review/cases/{id}']!(req({ params: { id: ID }, body: { action: 'approve', version: 4 } }));
+      expect(r.status).toBe(200);
+    });
+
+    it('not called for non-under-review cases or a reject; a failing link step falls back safely', async () => {
+      const s = setup();
+      s.cases.put(makeCase({ status: 'verified' }));
+      const calls: string[] = [];
+      await linking(s, calls)['GET /review/cases/{id}']!(req({ params: { id: ID } }));
+      expect(calls).toEqual([]);
+
+      const s2 = setup();
+      s2.cases.put(makeCase());
+      const calls2: string[] = [];
+      await linking(s2, calls2)['POST /review/cases/{id}']!(req({ params: { id: ID }, body: { action: 'reject', reason: 'blurry' } }));
+      expect(calls2).toEqual([]);
+
+      const s3 = setup();
+      s3.cases.put(makeCase());
+      const broken = reviewRoutes({
+        cases: s3.cases, audit: s3.audit, signer: s3.signer, clock: s3.clock,
+        linkDocuments: async () => { throw new Error('s3 down'); },
+      });
+      const r = await broken['POST /review/cases/{id}']!(req({ params: { id: ID }, body: { action: 'approve' } }));
+      expect(r.body).toMatchObject({ error: 'documents_missing' });
+      expect((await broken['GET /review/cases/{id}']!(req({ params: { id: ID } }))).status).toBe(200);
+    });
   });
 
   it('reject does not need documents', async () => {

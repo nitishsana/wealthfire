@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { REPLAY_WINDOW_MS } from '../../src/webhook/handler';
-import { baseCase, baseEvidence, REFS, setup, UPLOAD_REF, USER } from './helpers';
+import { baseCase, baseEvidence, REFS, setup, UPLOAD_REF, USER, withResultRefs } from './helpers';
 
 const kraOk = { check: 'kra', status: 'validated', name: 'NITISH SANA', dob: '1990-08-15' };
 
@@ -84,7 +84,7 @@ describe('webhook: replay and duplicates', () => {
   });
 
   it('a duplicate face event does not count twice towards the liveness reject', async () => {
-    const t = setup();
+    const t = setup({ kycCase: withResultRefs() });
     const e = t.event('kyc.result', { check: 'face', match: 0.9, live: false });
     await t.send(e);
     await t.send(e);
@@ -148,26 +148,30 @@ describe('webhook: event types', () => {
     expect((await t.stored()).kycCase).toMatchObject({ status: 'under-review', reason: 'check-unclear', version: 2 });
   });
 
-  it('full KYC: not-found → aadhaar → pan → face → esign → verified (full-kyc)', async () => {
-    const t = setup();
-    const steps: [string, Record<string, unknown>, string][] = [
-      ['kyc.result', { check: 'kra', status: 'not-found' }, 'aadhaar'],
-      ['kyc.result', { check: 'aadhaar', verified: true, last4: '1234' }, 'pan'],
-      ['kyc.result', { check: 'pan', valid: true, nameMatch: true, aadhaarLinked: true }, 'face'],
-      ['kyc.result', { check: 'face', match: 0.95, live: true }, 'esign'],
+  it('full KYC: not-found → aadhaar → (pan + face via the API) → esign → verified (full-kyc)', async () => {
+    // S#10: PAN and face results reach the case synchronously through the API, never the webhook
+    const t = setup({
+      evidence: baseEvidence({ pan: { valid: true, nameMatch: true, aadhaarLinked: true }, face: [{ match: 0.95, live: true }] }),
+    });
+    const steps: [string, Record<string, unknown>][] = [
+      ['kyc.result', { check: 'kra', status: 'not-found' }],
+      ['kyc.result', { check: 'aadhaar', verified: true, last4: '1234' }],
     ];
     for (const [type, data] of steps) {
       expect((await t.send(t.event(type, data))).body.outcome).toBe('applied');
       expect((await t.stored()).kycCase.status).toBe('pre-verified');
       t.clock.advance(1000);
     }
+    // a webhook PAN / face result in the middle changes nothing
+    expect((await t.send(t.event('kyc.result', { check: 'face', match: 0.1, live: false }))).body.outcome).toBe('ignored-ref-mismatch');
     await t.send(t.event('esign.completed', { status: 'done' }, { ref: 'es_1' }));
     const s = await t.stored();
-    expect(s.kycCase).toMatchObject({ status: 'verified', path: 'full-kyc', reason: 'full-kyc-passed', version: 6 });
+    expect(s.kycCase).toMatchObject({ status: 'verified', path: 'full-kyc', reason: 'full-kyc-passed', version: 4 });
     expect(s.kycCase.checks).toMatchObject({ aadhaar: 'pass', pan: 'pass', 'face-match': 'pass', liveness: 'pass', esign: 'pass' });
+    expect(s.evidence!.face).toEqual([{ match: 0.95, live: true }]);
     expect(s.kycCase.partnerRefs.esign).toBe('es_1');
     expect(t.applied().map((a: { action: string }) => a.action)).toEqual([
-      'webhook.kyc-result', 'webhook.kyc-result', 'webhook.kyc-result', 'webhook.kyc-result', 'webhook.esign',
+      'webhook.kyc-result', 'webhook.kyc-result', 'webhook.esign',
     ]);
   });
 
@@ -185,14 +189,14 @@ describe('webhook: event types', () => {
     expect(s.evidence!.aadhaarFailed).toBe(true);
   });
 
-  it('kyc.result pan invalid → rejected', async () => {
-    const t = setup();
+  it('kyc.result pan invalid (stored PAN ref matches) → rejected', async () => {
+    const t = setup({ kycCase: withResultRefs() });
     await t.send(t.event('kyc.result', { check: 'pan', valid: false, nameMatch: false, aadhaarLinked: false }));
     expect((await t.stored()).kycCase).toMatchObject({ status: 'rejected', reason: 'pan-invalid' });
   });
 
-  it('kyc.result face: two liveness fails → rejected', async () => {
-    const t = setup();
+  it('kyc.result face (stored face ref matches): two liveness fails → rejected', async () => {
+    const t = setup({ kycCase: withResultRefs() });
     await t.send(t.event('kyc.result', { check: 'face', match: 0.9, live: false }));
     t.clock.advance(1000);
     await t.send(t.event('kyc.result', { check: 'face', match: 0.9, live: false }));
@@ -246,7 +250,7 @@ describe('webhook: event types', () => {
 
 describe('webhook: out-of-order and ignored events', () => {
   it('an older result for the same check arriving later is ignored', async () => {
-    const t = setup();
+    const t = setup({ kycCase: withResultRefs() });
     const now = t.clock.now();
     await t.send(t.event('kyc.result', { check: 'pan', valid: true, nameMatch: true, aadhaarLinked: true }, { occurredAt: now }));
     const res = await t.send(
@@ -268,7 +272,7 @@ describe('webhook: out-of-order and ignored events', () => {
   });
 
   it('results for different checks in any order reach the same decision', async () => {
-    const t = setup();
+    const t = setup({ kycCase: withResultRefs() });
     const evts = [
       t.event('esign.completed', { status: 'done' }),
       t.event('kyc.result', { check: 'face', match: 0.95, live: true }),
@@ -284,7 +288,7 @@ describe('webhook: out-of-order and ignored events', () => {
   });
 
   it('face attempts are kept in event-time order (latest attempt decides)', async () => {
-    const t = setup({ evidence: baseEvidence({ kra: { status: 'not-found' } }) });
+    const t = setup({ kycCase: withResultRefs(), evidence: baseEvidence({ kra: { status: 'not-found' } }) });
     const now = t.clock.now();
     await t.send(t.event('kyc.result', { check: 'face', match: 0.95, live: true }, { occurredAt: now }));
     await t.send(t.event('kyc.result', { check: 'face', match: 0.95, live: false }, { occurredAt: now - 30_000 }));
@@ -421,9 +425,44 @@ describe('webhook: S17 partner ref binding', () => {
     expect(record(t).evidence.kraUpload).toEqual({ status: 'uploaded' });
   });
 
-  it('PAN and face results have no ref and are still applied', async () => {
+  it.each([
+    ['PAN with a ref', { check: 'pan', valid: false, nameMatch: false, aadhaarLinked: false }, {}],
+    ['PAN without a ref', { check: 'pan', valid: false, nameMatch: false, aadhaarLinked: false }, { ref: undefined }],
+    ['face with a ref', { check: 'face', match: 0.1, live: false }, {}],
+    ['face without a ref', { check: 'face', match: 0.1, live: false }, { ref: undefined }],
+    ['PAN timeout', { check: 'pan', timeout: true }, {}],
+  ] as const)('S#10: a webhook %s result is refused when no PAN / face ref is stored (the API default)', async (_l, data, extra) => {
     const t = setup();
-    expect((await t.send(t.event('kyc.result', { check: 'pan', valid: true, nameMatch: true, aadhaarLinked: true }))).body.outcome).toBe('applied');
+    const res = await t.send(t.event('kyc.result', data, extra));
+    expect(res).toEqual({ status: 200, body: { ok: true, outcome: 'ignored-ref-mismatch' } });
+    const s = await t.stored();
+    expect(s.kycCase).toMatchObject({ status: 'pre-verified', version: 1 });
+    expect(s.evidence!.pan).toBeUndefined();
+    expect(s.evidence!.face).toBeUndefined();
+    expect(t.applied()).toHaveLength(0);
+    expect(t.ignored()[0]).toMatchObject({ outcome: 'ignored-ref-mismatch', check: data.check });
+    expect(t.logs.at(-1)).toMatchObject({ msg: 'webhook.refused', outcome: 'ignored-ref-mismatch', status: 200 });
+  });
+
+  it('S#10: a webhook PAN / face result cannot overturn the API\'s synchronous result', async () => {
+    const t = setup({
+      evidence: baseEvidence({ pan: { valid: true, nameMatch: true, aadhaarLinked: true }, face: [{ match: 0.95, live: true }] }),
+    });
+    await t.send(t.event('kyc.result', { check: 'pan', valid: false, nameMatch: false, aadhaarLinked: false }));
+    await t.send(t.event('kyc.result', { check: 'face', match: 0.1, live: false }));
+    await t.send(t.event('kyc.result', { check: 'face', match: 0.1, live: false }));
+    const s = await t.stored();
+    expect(s.evidence!.pan).toEqual({ valid: true, nameMatch: true, aadhaarLinked: true });
+    expect(s.evidence!.face).toEqual([{ match: 0.95, live: true }]);
+    expect(s.kycCase).toMatchObject({ status: 'pre-verified', version: 1 });
+  });
+
+  it('S#10: with a stored PAN / face ref, only the matching ref is applied', async () => {
+    const t = setup({ kycCase: withResultRefs() });
+    const pan = { check: 'pan', valid: true, nameMatch: true, aadhaarLinked: true };
+    expect((await t.send(t.event('kyc.result', pan, { ref: 'pan_other' }))).body.outcome).toBe('ignored-ref-mismatch');
+    expect((await t.send(t.event('kyc.result', pan))).body.outcome).toBe('applied');
+    expect((await t.send(t.event('kyc.result', { check: 'face', match: 0.9, live: true }, { ref: 'face_other' }))).body.outcome).toBe('ignored-ref-mismatch');
     expect((await t.send(t.event('kyc.result', { check: 'face', match: 0.9, live: true }))).body.outcome).toBe('applied');
   });
 

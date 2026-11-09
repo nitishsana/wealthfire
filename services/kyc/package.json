@@ -8,7 +8,7 @@
                     "test": "vitest run --passWithNoTests",
                     "typecheck":  "tsc --noEmit",
                     "build":  "node scripts/bundle.mjs",
-                    "synth":  "cdk synth --app \"npx tsx infra/app.ts\" --quiet",
+                    "synth":  "cdk synth --app \"npx tsx infra/app.ts\" -c synthOnly=true --quiet",
                     "deploy":  "npx tsx infra/deploy.ts"
                 },
     "dependencies":  {

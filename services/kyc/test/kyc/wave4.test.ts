@@ -96,19 +96,19 @@ describe('R3: POST /kyc/retry and the status auto-retry', () => {
     const token = await e.signIn();
     await e.call('POST', '/kyc/start', { token, body: startBody(PANS.timeout) });
     expect(e.partner.calls.lookupKyc).toBe(2);
-    await e.call('GET', '/kyc/status', { token }); // first read: retried (2 tries, still timing out)
-    expect(e.partner.calls.lookupKyc).toBe(4);
+    await e.call('GET', '/kyc/status', { token }); // first read: retried (F9: one try, still timing out)
+    expect(e.partner.calls.lookupKyc).toBe(3);
     await e.call('GET', '/kyc/status', { token });
     e.clock.advance(AUTO_RETRY_MS - 1);
     await e.call('GET', '/kyc/status', { token });
-    expect(e.partner.calls.lookupKyc).toBe(4); // inside the 10 minutes: no paid call
+    expect(e.partner.calls.lookupKyc).toBe(3); // inside the 10 minutes: no paid call
     e.clock.advance(1);
     e.partner.setScenario(PANS.timeout, 'kra-validated');
     const st = await e.call('GET', '/kyc/status', { token });
-    expect(e.partner.calls.lookupKyc).toBe(5);
+    expect(e.partner.calls.lookupKyc).toBe(4);
     expect(st.json).toMatchObject({ status: 'verified', path: 'kra-validated' });
     // every auto-retry counted toward the cap and was logged
-    expect(e.repos.costs.rows.filter((r) => r.check === 'kra-lookup')).toHaveLength(5);
+    expect(e.repos.costs.rows.filter((r) => r.check === 'kra-lookup')).toHaveLength(4);
     expect(e.repos.audit.all().filter((r) => r.action === 'kyc.auto-retry')).toHaveLength(2);
   });
 
@@ -165,8 +165,12 @@ describe('S2: consent records', () => {
     const c = await e.call('POST', '/kyc/consent', { token, body: { purpose: 'pan-check' } });
     expect(c.statusCode).toBe(200);
     expect(c.json).toMatchObject({ purpose: 'pan-check', consent: 'given', kyc: { status: null, next: 'start' } });
-    expect(e.repos.consents.rows).toEqual([expect.objectContaining({ userId, purpose: 'pan-check', action: 'given', ip: '203.0.113.7' })]);
-    expect(e.repos.consents.rows[0]!.sk).toMatch(/^pan-check#2026-11-06T/);
+    expect(e.repos.consents.rows).toEqual([expect.objectContaining({ userId, purpose: 'pan-check', action: 'given' })]);
+    // S#14: a keyed hash of the IP, never the raw IP; S#11: no case yet, so no caseId; monotonic sk
+    expect(e.repos.consents.rows[0]!.ipHash).toMatch(/^[A-Za-z0-9_-]{20,}$/);
+    expect(JSON.stringify(e.repos.consents.rows)).not.toContain('203.0.113.7');
+    expect(e.repos.consents.rows[0]).not.toHaveProperty('caseId');
+    expect(e.repos.consents.rows[0]!.sk).toMatch(/^pan-check#2026-11-06T[^#]+#000000$/);
     expect((await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) })).statusCode).toBe(200);
 
     // Aadhaar: the consent follows the mode
@@ -245,6 +249,11 @@ describe('S2: consent records', () => {
     expect(archived[0]![0]).toMatch(new RegExp(`^arch#${userId}#`));
     expect(archived[0]![1]).toMatchObject({ status: 'rejected', reason: 'consent-withdrawn' });
     expect(archived[0]![1]).not.toHaveProperty('panEnc');
+    // S#11: the new case needs fresh consent rows: case 1's pan-check consent no longer counts
+    expect((await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) })).json.error).toBe('consent-required');
+    expect(await e.svc.hasConsent(userId, 'pan-check')).toBe(false);
+    expect(await e.svc.hasConsent(userId, 'esign')).toBe(true); // given after the archive
+    await e.call('POST', '/kyc/consent', { token, body: { purpose: 'pan-check' } });
     // the same PAN can be used again for the new case
     const s = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
     expect(s.json).toMatchObject({ status: 'pre-verified', next: 'aadhaar' });
@@ -264,7 +273,7 @@ describe('S2: consent records', () => {
     }
   });
 
-  it('after a withdrawal, status says next start and POST /kyc/start makes a NEW case (old one archived)', async () => {
+  it('after a withdrawal, status says next start; POST /kyc/start needs a FRESH consent, then makes a NEW case (old one archived)', async () => {
     const e = env();
     const token = await e.signIn();
     const userId = await e.userIdOf(token);
@@ -272,15 +281,56 @@ describe('S2: consent records', () => {
     await e.call('POST', '/kyc/consent/withdraw', { token, body: { purpose: 'face-match' } });
     const st = await e.call('GET', '/kyc/status', { token });
     expect(st.json).toMatchObject({ status: 'rejected', reason: 'consent-withdrawn', next: 'start', eligibleToInvest: false });
+    // S#11: case 1's pan-check consent does not carry over to a new case
+    const refused = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
+    expect(refused.json.error).toBe('consent-required');
+    expect((await e.repos.cases.get(userId))!.reason).toBe('consent-withdrawn');
+    expect(e.partner.calls.lookupKyc).toBe(1);
+    await e.call('POST', '/kyc/consent', { token, body: { purpose: 'pan-check' } });
     const s = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
     expect(s.statusCode).toBe(200);
     expect(s.json).toMatchObject({ status: 'pre-verified', next: 'aadhaar', reason: 'in-progress' });
     expect([...e.repos.cases.archived.values()]).toEqual([expect.objectContaining({ userId, reason: 'consent-withdrawn' })]);
-    // the new case still needs the withdrawn consent at its step
-    await e.call('POST', '/kyc/aadhaar', { token, body: { mode: 'digilocker', returnUrl: RETURN_URL } });
+    // every other purpose needs a fresh row too
+    expect((await e.call('POST', '/kyc/aadhaar', { token, body: { mode: 'digilocker', returnUrl: RETURN_URL } })).json.error)
+      .toBe('consent-required');
+    await e.call('POST', '/kyc/consent', { token, body: { purpose: 'digilocker' } });
+    expect((await e.call('POST', '/kyc/aadhaar', { token, body: { mode: 'digilocker', returnUrl: RETURN_URL } })).statusCode).toBe(200);
     await e.svc.recordAadhaar(userId, { verified: true, last4: '1234' });
     const id = await e.uploadSelfie(token);
     expect((await e.call('POST', '/kyc/selfie', { token, body: { uploadId: id } })).json.error).toBe('consent-required');
+    // consents given on the live case carry its caseId
+    const caseId = (await e.repos.cases.get(userId))!.caseId;
+    expect(caseId).toMatch(/^[0-9a-f-]{36}$/);
+    await e.call('POST', '/kyc/consent', { token, body: { purpose: 'face-match' } });
+    expect(e.repos.consents.rows.at(-1)).toMatchObject({ purpose: 'face-match', action: 'given', caseId });
+    // 'case-closed' rows were appended (never edited) for every purpose case 1 still had
+    const closed = e.repos.consents.rows.filter((r) => r.action === 'case-closed').map((r) => r.purpose).sort();
+    expect(closed).toEqual(['aadhaar-otp', 'digilocker', 'esign', 'kra-upload', 'pan-check']);
+  });
+
+  it('S#11: a consent row bound to another case never counts; same-millisecond rows keep their order', async () => {
+    const e = env({}, { consents: false });
+    const token = await e.signIn();
+    const userId = await e.userIdOf(token);
+    await e.call('POST', '/kyc/consent', { token, body: { purpose: 'pan-check' } });
+    await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
+    const caseId = (await e.repos.cases.get(userId))!.caseId!;
+    expect(await e.svc.hasConsent(userId, 'pan-check')).toBe(true);
+    expect(await e.svc.hasConsent(userId, 'pan-check', 'another-case')).toBe(true); // unbound pre-case row
+    // same millisecond: withdraw then give then withdraw; the newest action wins
+    await e.call('POST', '/kyc/consent', { token, body: { purpose: 'esign' } });
+    await e.call('POST', '/kyc/consent/withdraw', { token, body: { purpose: 'esign' } });
+    // (the withdrawal stopped the case; read the rows directly)
+    const rows = e.repos.consents.rows.filter((r) => r.purpose === 'esign');
+    expect(rows.map((r) => r.sk.slice(-6))).toEqual(['000000', '000001']);
+    expect(rows.map((r) => r.caseId)).toEqual([caseId, caseId]);
+    expect((await e.repos.consents.latest(userId, 'esign'))!.action).toBe('withdrawn');
+    // a 'given' row bound to case X does not count for case Y
+    await e.repos.consents.record({ userId, sk: 'kra-upload#2026-11-06T12:00:00.000Z#000000', purpose: 'kra-upload', action: 'given', at: 'x', caseId: 'X' });
+    expect(await e.svc.hasConsent(userId, 'kra-upload', 'X')).toBe(true);
+    expect(await e.svc.hasConsent(userId, 'kra-upload', 'Y')).toBe(false);
+    expect(await e.svc.hasConsent(userId, 'kra-upload')).toBe(false); // the live case is not X
   });
 
   it('a new start after withdrawing pan-check is refused (consent-required) and leaves the old case as it was', async () => {
@@ -317,7 +367,7 @@ describe('S2: DELETE /kyc/data', () => {
     await e.uploads.markUploaded(`kyc/${other}/pan-x.jpg`);
     const r = await e.call('DELETE', '/kyc/data', { token });
     expect(r.statusCode).toBe(200);
-    expect(r.json.deleted).toEqual({ documents: 2, case: 'deleted' });
+    expect(r.json.deleted).toEqual({ documents: 2, case: 'deleted', archived: 0 });
     expect(r.json.kept.map((k: { what: string }) => k.what)).toEqual(['consent-records', 'audit-log', 'paid-check-costs']);
     for (const k of r.json.kept) expect(k.reason).toMatch(/\w/);
     expect(e.uploads.keys()).toEqual([`kyc/${other}/pan-x.jpg`]);
@@ -336,7 +386,7 @@ describe('S2: DELETE /kyc/data', () => {
     const userId = await e.userIdOf(token);
     await e.call('POST', '/kyc/start', { token, body: startBody(PANS.kraValidated) });
     const r = await e.call('DELETE', '/kyc/data', { token });
-    expect(r.json.deleted).toEqual({ documents: 0, case: 'minimised' });
+    expect(r.json.deleted).toEqual({ documents: 0, case: 'minimised', archived: 0 });
     expect(r.json.kept.map((k: { what: string }) => k.what)).toContain('kyc-record');
     const rec = (await e.repos.cases.get(userId))!;
     expect(rec).toMatchObject({ status: 'verified', masks: { pan: 'XXXXXX001K' }, panEnc: '' });
@@ -350,7 +400,7 @@ describe('S2: DELETE /kyc/data', () => {
     const e = env();
     const token = await e.signIn();
     const r = await e.call('DELETE', '/kyc/data', { token });
-    expect(r.json.deleted).toEqual({ documents: 0, case: 'none' });
+    expect(r.json.deleted).toEqual({ documents: 0, case: 'none', archived: 0 });
     expect(e.repos.audit.all().filter((x) => x.action === 'kyc.data-deleted')).toHaveLength(1);
   });
 });

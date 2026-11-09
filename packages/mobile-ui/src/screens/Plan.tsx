@@ -7,7 +7,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import {
   BUCKET_NAMES, categorize, DEFAULT_ASSUMPTIONS, DEFAULT_BARISTA_SHARE, demoData, emptyData, EXPENSE_CATEGORIES, inr, inrShort, makeSnapshot,
-  canFinalApprove, kycStatusLabel, maskAadhaar, reviewRowReasonText, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
+  kycStatusLabel, maskAadhaar, showDemoReviewer, reviewRowReasonText, maskEmail, maskMobile, maskPan, newId, onboardingReducer, parseStatement, PHASE_LABELS, todayIso, upsertSnapshot,
   type Assumptions, type BucketState, type ExpenseCategory,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -350,10 +350,11 @@ function DemoReviewerCard() {
   const { data, update } = useStore();
   const [reason, setReason] = useState('');
   const [touched, setTouched] = useState(false);
-  if (!__DEV__ || !reader.isDemo) return null;
+  const server = useKycServer();
   const kyc = data.onboarding.kyc;
-  // Same as web: shown only while a final KYC approval can be given (pre-verified or under review), hidden once verified.
-  if (!canFinalApprove(kyc)) return null;
+  // Same as web: shown only while a final KYC approval can be given (pre-verified or under review), hidden once
+  // verified, and never with a KYC server (F8: Verified then comes only from the server).
+  if (!showDemoReviewer({ dev: __DEV__, demoReader: reader.isDemo, serverConfigured: !!server, kyc })) return null;
   // Pre-verified: the device checks passed, so only the final KYC approval is simulated (no Reject, no earlier review).
   const pre = kyc.status === 'pre-verified';
   const pending = kyc.status === 'under-review' ? kyc.review : null;

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  canFinalApprove, DEFAULT_ASSUMPTIONS, demoData, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewRowReasonText, serialize,
+  DEFAULT_ASSUMPTIONS, demoData, showDemoReviewer, emptyData, kycStatusLabel, maskAadhaar, maskEmail, maskMobile, maskPan, onboardingReducer, reviewRowReasonText, serialize,
   type Assumptions,
 } from '@wealthfire/core';
 import { useStore } from '../store';
@@ -71,8 +71,9 @@ export function SettingsPage() {
         </Card>
       </div>
       {/* G2: dev builds only; the production bundle drops the Demo reviewer entirely. */}
-      {/* Shown only while a final KYC approval can be given (pre-verified or under review). */}
-      {import.meta.env.DEV && documentReader.isDemo && canFinalApprove(ob.kyc) && <DemoReviewer />}
+      {/* Shown only while a final KYC approval can be given (pre-verified or under review), and never with a
+          KYC server (F8: Verified then comes only from the server). */}
+      {showDemoReviewer({ dev: import.meta.env.DEV, demoReader: documentReader.isDemo, serverConfigured: !!kycServer, kyc: ob.kyc }) && <DemoReviewer />}
       <Card title="Assumptions (% per year)">
         <div className="form-grid">
           {FIELDS.map((f) => (

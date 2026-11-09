@@ -204,8 +204,61 @@ describe('OTP abuse limits (S3)', () => {
   it('limits are 10 sends per target per day, 3 failed challenges -> 1 h lockout, 30 verifies per IP per hour', () => {
     expect(OTP_LIMITS).toMatchObject({
       maxSendsPerTargetDay: 10, targetDayWindowMs: 86_400_000, maxFailedChallenges: 3, failWindowMs: 86_400_000,
-      lockoutMs: 3_600_000, maxVerifiesPerIp: 30, verifyIpWindowMs: 3_600_000,
+      lockoutMs: 3_600_000, maxVerifiesPerIp: 30, verifyIpWindowMs: 3_600_000, maxFailedChallengesGlobal: 10,
     });
+  });
+
+  it('S#7: 3 failed challenges from one IP lock only that (target, IP) pair; the owner elsewhere still signs in', async () => {
+    const { otp, sender, clock, metrics } = setup();
+    const ATTACKER = '198.51.100.66';
+    const OWNER = '203.0.113.200';
+    for (let i = 0; i < 3; i++) {
+      const a = await otp.send({ kind: 'mobile', contact: MOBILE, ip: ATTACKER });
+      await errOf(otp.verify({ challengeId: a.challengeId, code: wrongOf(sender.lastCode!), ip: ATTACKER }));
+      clock.advance(11 * 60_000);
+    }
+    expect(metrics.count('lockout-started')).toBe(1);
+    // the attacker's IP is locked for this target (send and verify)
+    expect((await errOf(otp.send({ kind: 'mobile', contact: MOBILE, ip: ATTACKER }))).code).toBe('rate_limited');
+    // the owner on another IP sends and verifies normally
+    const own = await otp.send({ kind: 'mobile', contact: MOBILE, ip: OWNER });
+    const ownCode = sender.lastCode!;
+    // a wrong code from the locked IP on the owner's challenge is refused before it is checked
+    expect((await errOf(otp.verify({ challengeId: own.challengeId, code: wrongOf(ownCode), ip: ATTACKER }))).code).toBe('rate_limited');
+    await expect(otp.verify({ challengeId: own.challengeId, code: ownCode, ip: OWNER })).resolves.toMatchObject({ isNewUser: true });
+  });
+
+  it('S#7: 10 failed challenges in 24 h from any mix of IPs lock the target everywhere for 1 h', async () => {
+    const { otp, sender, clock, metrics } = setup();
+    for (let i = 0; i < 9; i++) {
+      const ip = `198.51.100.${10 + i}`;
+      const a = await otp.send({ kind: 'mobile', contact: MOBILE, ip });
+      await errOf(otp.verify({ challengeId: a.challengeId, code: wrongOf(sender.lastCode!), ip }));
+      clock.advance(11 * 60_000);
+    }
+    // 9 failures, each from its own IP: no lockout yet, a fresh IP can still sign in
+    expect(metrics.count('lockout-started')).toBe(0);
+    const tenth = await otp.send({ kind: 'mobile', contact: MOBILE, ip: '198.51.100.99' });
+    const e = await errOf(otp.verify({ challengeId: tenth.challengeId, code: wrongOf(sender.lastCode!), ip: '198.51.100.99' }));
+    expect(e).toMatchObject({ code: 'invalid_code', triesLeft: 0 });
+    expect(metrics.count('lockout-started')).toBe(1);
+    // a brand-new IP is locked out by the global threshold (lock checked before the daily cap)
+    clock.advance(60_000);
+    const before = metrics.count('locked');
+    const locked = await errOf(otp.send({ kind: 'mobile', contact: MOBILE, ip: '192.0.2.250' }));
+    expect(locked).toMatchObject({ code: 'rate_limited', retryAfterMs: 59 * 60_000 });
+    expect(metrics.count('locked')).toBe(before + 1);
+    // other targets are untouched
+    await expect(otp.send({ kind: 'mobile', contact: '9123456789', ip: '192.0.2.250' })).resolves.toBeTruthy();
+  });
+
+  it('S#7: the daily send cap stays 10 per target across IPs', async () => {
+    const { otp, clock } = setup();
+    for (let i = 0; i < 10; i++) {
+      await otp.send({ kind: 'email', contact: EMAIL, ip: `198.51.100.${30 + i}` });
+      clock.advance(11 * 60_000);
+    }
+    expect((await errOf(otp.send({ kind: 'email', contact: EMAIL, ip: '192.0.2.77' }))).code).toBe('rate_limited');
   });
 
   it('caps sends per target at 10 per 24 h', async () => {

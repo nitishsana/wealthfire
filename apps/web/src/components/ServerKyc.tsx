@@ -6,7 +6,8 @@
 // go straight to their presigned upload URLs. Same steps and texts as packages/mobile-ui/src/server.tsx.
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import {
-  CONSENT_TEXT, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycReasonText, kycStatusLabel, maskEmail, maskMobile, needsDob,
+  CONSENT_TEXT, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycFinalLabel, kycFinalReason, kycRejectedDocs, kycUploadAgainText,
+  maskEmail, maskMobile, needsDob,
   needsSignIn, normalizeDob, onboardingReducer, STEP_CONSENT, validateDob,
   type AppData, type ConsentPurpose, type DocFile, type DocKind, type KycStatusView, type ServerKycClient,
 } from '@wealthfire/core';
@@ -108,7 +109,8 @@ export function ServerKyc({ client, details }: {
   async function run(task: () => Promise<void>) {
     if (busy) return;
     setBusy(true); setError(''); setNotice('');
-    try { await task(); } finally { setBusy(false); }
+    // a status read or a refused selfie can change what counts as sent (F5)
+    try { await task(); } finally { setBusy(false); setSent(client.sentDocuments()); }
   }
 
   /** Error handling shared by every step: a dead session asks for an OTP; others show a fixed text. */
@@ -227,7 +229,9 @@ export function ServerKyc({ client, details }: {
     }
   });
 
-  const reason = kycReasonText(view?.reason);
+  const reason = kycFinalReason(view);
+  // F5: refused files (not a photo or PDF) are asked again
+  const uploadAgain = needed.length > 0 ? kycUploadAgainText(kycRejectedDocs(view, sent)) : '';
   const contact = data.onboarding.contact;
   const docLabel = next === 'documents' && needed.length === 1 ? KYC_TEXT.uploadSelfieOnly : KYC_TEXT.uploadAll;
   const slots = (
@@ -241,7 +245,7 @@ export function ServerKyc({ client, details }: {
       {back && !view && !error && !signIn && <p className="muted" role="status">Welcome back. Checking your status…</p>}
       {view && (
         <p role="status">
-          Final KYC: <strong>{kycStatusLabel(view.status)}</strong>
+          Final KYC: <strong>{kycFinalLabel(view)}</strong>
           {reason ? <> ({reason})</> : null}
         </p>
       )}
@@ -290,6 +294,7 @@ export function ServerKyc({ client, details }: {
       {next === 'documents' && (
         <>
           <p className="muted small">{docLabel} (JPG, PNG or PDF; selfie JPG or PNG; up to 10 MB each).</p>
+          {uploadAgain && <p className="error small">{uploadAgain}</p>}
           {slots}
           <ConsentTicks purposes={STEP_CONSENT.documents} ticks={ticks} setTicks={setTicks} disabled={busy} />
           <button type="button" className="btn primary" disabled={busy || !ticked(STEP_CONSENT.documents) || needed.some((k) => !docs[k])}
@@ -318,6 +323,7 @@ export function ServerKyc({ client, details }: {
       {view?.status === 'under-review' && needed.length > 0 && (
         <div className="server-review-docs">
           <p className="muted small">{KYC_TEXT.docsNeeded}{view.documents ? '' : ` ${KYC_TEXT.docsUnknownHint}`}</p>
+          {uploadAgain && <p className="error small">{uploadAgain}</p>}
           {slots}
           <button type="button" className="btn" disabled={busy || needed.some((k) => !docs[k])} onClick={sendForReview}>{KYC_TEXT.sendDocs}</button>
         </div>

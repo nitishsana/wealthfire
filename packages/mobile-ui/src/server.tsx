@@ -15,8 +15,8 @@ import { AccessibilityInfo, ActivityIndicator, findNodeHandle, Pressable, StyleS
 import * as WebBrowser from 'expo-web-browser';
 import { File, UploadType } from 'expo-file-system';
 import {
-  CONSENT_TEXT, DOB_HINT, DOB_LABEL, hasKycCase, HttpOtpProvider, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycReasonText,
-  kycStatusLabel, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
+  CONSENT_TEXT, DOB_HINT, DOB_LABEL, hasKycCase, HttpOtpProvider, isConsentRequired, isServerError, KYC_TEXT, kycDocsNeeded, kycFinalLabel,
+  kycFinalReason, kycRejectedDocs, kycUploadAgainText, kycWithdrawBody, kycWithdrawDone, maskEmail, maskMobile, needsSignIn, normalizeDob, onboardingReducer, OTP_RULES, ServerKycClient, STEP_CONSENT, validateDob,
   type ConsentPurpose, type DocFile, type DocKind, type KycStatusView, type OnboardingState, type StartKycInput, type TokenStore,
 } from '@wealthfire/core';
 import { useBlockBackWhile } from './shell';
@@ -217,9 +217,10 @@ function ServerProvider({ client, origins, children }: { client: ServerKycClient
       return false;
     } finally {
       running.current = false;
-      if (alive.current) setBusy(false);
+      // a status read or a refused selfie can change what counts as sent (F5)
+      if (alive.current) { setBusy(false); setSent(client.sentDocuments()); }
     }
-  }, []);
+  }, [client]);
 
   /** Opens a partner page in an auth session if its origin is allow-listed; then the server decides (status read). */
   const open = useCallback(async (url: string | undefined) => {
@@ -288,16 +289,19 @@ function ServerProvider({ client, origins, children }: { client: ServerKycClient
     if (alive.current) setNotice(KYC_TEXT.docsSent);
   }, KYC_TEXT.uploadFailed), [run, uploadDocs]);
 
+  // The status read after a withdraw / delete is not part of it: if only the read fails, the action still counts (same as web).
+  const reread = useCallback(async () => { try { show(await client.getStatus()); } catch { /* keep the last view */ } }, [client]);
+
   const withdrawConsent = useCallback(() => run(async () => {
     await client.withdrawConsent();
-    show(await client.getStatus());
-  }, FAILED), [client, run]);
+    await reread();
+  }, FAILED), [client, reread, run]);
 
   const deleteData = useCallback(() => run(async () => {
     await client.deleteKycData();
     if (alive.current) setSent(client.sentDocuments());
-    show(await client.getStatus());
-  }, FAILED), [client, run]);
+    await reread();
+  }, FAILED), [client, reread, run]);
 
   const signedIn = useCallback(async () => {
     setSignIn(false);
@@ -451,9 +455,12 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
   useEffect(() => { setTicks({}); }, [next, server?.retryConsent]);
   if (!server) return null;
   const { view, busy, error, notice } = server;
-  const reason = kycReasonText(view?.reason);
+  const reason = kycFinalReason(view);
   const dobErr = validateDob(dob);
   const needed = kycDocsNeeded(view, server.sent);
+  // F5: refused files (not a photo or PDF) are asked again
+  const uploadAgain = needed.length > 0 ? kycUploadAgainText(kycRejectedDocs(view, server.sent)) : '';
+  const againLine = uploadAgain ? <Text style={[s.small, { color: theme.bad, marginVertical: 4 }]}>{uploadAgain}</Text> : null;
   const ticked = (ps: readonly ConsentPurpose[]) => ps.every((p) => ticks[p]);
   const setDoc = (k: DocKind, d: DocFile | undefined) => setDocs((cur) => {
     const old = cur[k];
@@ -471,7 +478,7 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
     <View style={{ marginTop: 10 }} accessibilityState={{ busy }}>
       {view ? (
         <Text style={s.text} accessibilityLiveRegion="polite">
-          Final KYC: <Text style={{ fontWeight: '800' }}>{kycStatusLabel(view.status)}</Text>{reason ? ` (${reason})` : ''}
+          Final KYC: <Text style={{ fontWeight: '800' }}>{kycFinalLabel(view)}</Text>{reason ? ` (${reason})` : ''}
         </Text>
       ) : null}
       {busy ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}
@@ -517,6 +524,7 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
       {next === 'documents' ? (
         <>
           <Text style={[s.small, { marginVertical: 6 }]}>{docLabel} (JPG, PNG or PDF; selfie JPG or PNG; up to 10 MB each).</Text>
+          {againLine}
           {slots}
           <ConsentTicks purposes={STEP_CONSENT.documents} ticks={ticks} setTicks={setTicks} disabled={busy} />
           <Btn primary title={KYC_TEXT.uploadContinue} disabled={busy || !allPicked || !ticked(STEP_CONSENT.documents)}
@@ -545,6 +553,7 @@ export function ServerKycPanel({ details }: { details: StartDetails | null }) {
       {view?.status === 'under-review' && needed.length > 0 ? (
         <View style={{ marginTop: 8 }}>
           <Text style={[s.small, { marginVertical: 6 }]}>{KYC_TEXT.docsNeeded}{view.documents ? '' : ` ${KYC_TEXT.docsUnknownHint}`}</Text>
+          {againLine}
           {slots}
           <Btn title={KYC_TEXT.sendDocs} disabled={busy || !allPicked} onPress={() => void server.sendForReview(docs, needed).finally(dropSent)} />
         </View>
@@ -572,6 +581,8 @@ export function KycDataControls() {
   const server = useKycServer();
   const [ask, setAsk] = useState<Ask>(null);
   const [done, setDone] = useState('');
+  /** F12: the last confirm did not go through (shown with the server error or 'Please sign in again.') */
+  const [failed, setFailed] = useState(false);
   const titleRef = useRef<ComponentRef<typeof Text>>(null);
   // Screen readers: move focus to the confirm title when it opens.
   useEffect(() => {
@@ -586,9 +597,16 @@ export function KycDataControls() {
   const confirm = async () => {
     const what = ask;
     if (!what) return;
+    const before = view;
+    setFailed(false);
     const ok = what === 'withdraw' ? await server.withdrawConsent() : await server.deleteData();
-    if (ok) { setDone(what === 'withdraw' ? KYC_TEXT.withdrawDone : KYC_TEXT.deleteDone); setAsk(null); }
+    if (!ok) { setFailed(true); return; }
+    // F3: a verified case keeps its KYC, so no 'stopped' line after a withdraw
+    setDone(what === 'withdraw' ? kycWithdrawDone(before) : KYC_TEXT.deleteDone);
+    setAsk(null);
   };
+  // F12: never fail silently: the server's error, the ended session, or a fixed text (another action was running)
+  const failText = !ask ? '' : server.error || (server.signIn ? KYC_TEXT.signInAgain : failed && !busy ? FAILED : '');
 
   return (
     <View testID="feature-kyc-data-controls" style={s.card}>
@@ -598,8 +616,8 @@ export function KycDataControls() {
           <Text ref={titleRef} style={[s.text, { fontWeight: '800' }]} accessibilityRole="header">
             {ask === 'withdraw' ? KYC_TEXT.withdrawTitle : KYC_TEXT.deleteTitle}
           </Text>
-          <Text style={[s.text, { marginTop: 4 }]}>{ask === 'withdraw' ? KYC_TEXT.withdrawBody : KYC_TEXT.deleteBody}</Text>
-          <Btn title={KYC_TEXT.cancel} disabled={busy} onPress={() => setAsk(null)} />
+          <Text style={[s.text, { marginTop: 4 }]}>{ask === 'withdraw' ? kycWithdrawBody(view) : KYC_TEXT.deleteBody}</Text>
+          <Btn title={KYC_TEXT.cancel} disabled={busy} onPress={() => { setFailed(false); setAsk(null); }} />
           <Btn danger solid title={ask === 'withdraw' ? KYC_TEXT.withdrawConfirm : KYC_TEXT.deleteConfirm} disabled={busy} onPress={() => void confirm()} />
         </View>
       ) : hasKycCase(view) ? (
@@ -610,7 +628,7 @@ export function KycDataControls() {
       ) : null}
       {busy ? <ActivityIndicator color={theme.accent} style={{ marginVertical: 8 }} /> : null}
       {done ? <Msg text={done} tone="muted" /> : null}
-      {ask && server.error ? <Msg text={server.error} /> : null}
+      {failText ? <Msg text={failText} /> : null}
     </View>
   );
 }

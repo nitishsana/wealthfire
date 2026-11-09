@@ -3,7 +3,8 @@
 // (other than the caller's own new ones), contacts or account-exists hints.
 //
 // Refresh-token transport (R2/S6, S4):
-// - Cookie mode: the request has `x-wf-client: web` AND an `Origin` on the CORS allow-list. The
+// - Cookie mode: the request has `x-wf-client: web` AND an `Origin` on the app-origin list (env
+//   APP_ORIGINS: web app origins only, never the console or other CORS-only origins). The
 //   refresh token travels only in the `wf_rt` cookie (Path=/; HttpOnly; Secure; SameSite=None;
 //   Partitioned); it is never in a response body and a body token is ignored.
 // - Body mode: no `x-wf-client: web` header (phones). The token travels only in the JSON body and
@@ -51,8 +52,8 @@ export interface AuthRouteDeps {
   otp: OtpService;
   tokens: TokenService;
   clock: { now(): number };
-  /** exact web origins allowed to use the refresh cookie (the router passes its CORS list) */
-  allowedOrigins?: readonly string[];
+  /** exact web APP origins allowed to use the refresh cookie (env APP_ORIGINS; not the CORS list) */
+  appOrigins?: readonly string[];
 }
 
 export type AuthHandler = (req: RouteRequest, deps: AuthRouteDeps) => Promise<RouteResponse>;
@@ -87,7 +88,7 @@ type Transport = 'cookie' | 'body';
 function transport(req: RouteRequest, deps: AuthRouteDeps): Transport {
   if (header(req, CLIENT_HEADER) !== 'web') return 'body';
   const origin = header(req, 'origin');
-  if (origin && (deps.allowedOrigins ?? []).includes(origin)) return 'cookie';
+  if (origin && (deps.appOrigins ?? []).includes(origin)) return 'cookie';
   throw new AuthError('forbidden');
 }
 

@@ -10,7 +10,8 @@
 // - phones (`client: 'app'`): in the JSON body; kept through `tokens.getRefresh / setRefresh`
 //   (expo-secure-store).
 // On a 401 from a /kyc route the client refreshes once (or calls `opts.refresh`) and retries.
-import type { KycStatus } from './types';
+import type { KycState, KycStatus } from './types';
+import { canFinalApprove, kycStatusLabel } from './kyc';
 import type { OtpProvider, OtpSendRequest, OtpSendResult, OtpVerifyResult } from './otp';
 import { OTP_MESSAGES } from './otp';
 import type { OtpProviderId } from './types';
@@ -37,6 +38,8 @@ export interface KycStatusView {
   next: ServerNext;
   /** Document kinds the server already holds for this case, when the server says (else unknown). */
   documents?: DocKind[];
+  /** Kinds whose latest upload the server refused (not a photo or PDF): upload them again. */
+  rejectedDocuments?: DocKind[];
   /** The server's eligibleToInvest; false e.g. for a staff-approved case still waiting for e-sign. */
   eligibleToInvest?: boolean;
 }
@@ -115,8 +118,12 @@ export const KYC_TEXT = {
   withdrawButton: 'Withdraw consent',
   withdrawTitle: 'Withdraw consent?',
   withdrawBody: 'We will stop your KYC. You can\u2019t invest until you finish KYC again.',
+  /** F3 (Nitish, final): a verified case stays verified after a withdraw; no 'stopped' message after it */
+  withdrawBodyVerified: 'Your KYC stays complete. We won\'t run new checks that need this consent.',
   withdrawConfirm: 'Withdraw',
   withdrawDone: 'You withdrew consent, so we stopped your KYC.',
+  /** F3: shown after a withdraw on a verified case (nothing was stopped) */
+  withdrawRecorded: 'We recorded your withdrawal.',
   deleteButton: 'Delete my KYC data',
   deleteTitle: 'Delete your KYC data?',
   deleteBody: 'We delete your documents and details. Some records stay if the law needs them.',
@@ -124,7 +131,58 @@ export const KYC_TEXT = {
   deleteDone: 'We deleted your KYC data.',
   cancel: 'Cancel',
   dataTitle: 'Your KYC data',
+  /** F7: staff approved, e-sign still open (eligibleToInvest false) */
+  approvedEsign: 'Approved \u2013 e-sign to finish',
 } as const;
+
+/** F3: the withdraw confirm text for this case (a verified case keeps its KYC). */
+export function kycWithdrawBody(view: KycStatusView | null): string {
+  return view?.status === 'verified' ? KYC_TEXT.withdrawBodyVerified : KYC_TEXT.withdrawBody;
+}
+
+/** F3: the line after a withdraw; a verified case gets a neutral line (nothing was stopped). */
+export function kycWithdrawDone(before: KycStatusView | null): string {
+  return before?.status === 'verified' ? KYC_TEXT.withdrawRecorded : KYC_TEXT.withdrawDone;
+}
+
+/** F7: the 'Final KYC:' label. A staff-approved case still waiting for e-sign is not shown as Verified. */
+export function kycFinalLabel(view: KycStatusView): string {
+  return awaitingEsign(view) ? KYC_TEXT.approvedEsign : kycStatusLabel(view.status);
+}
+
+/** F7: the reason in brackets after the label, or undefined (the approved-e-sign label already says it). */
+export function kycFinalReason(view: KycStatusView | null): string | undefined {
+  return view && awaitingEsign(view) ? undefined : kycReasonText(view?.reason);
+}
+
+function awaitingEsign(view: KycStatusView): boolean {
+  return view.status === 'verified' && view.eligibleToInvest === false && view.next.type === 'esign';
+}
+
+/**
+ * F8: the dev-only Demo reviewer sets the device status, so it shows only in dev builds with the demo
+ * reader, while a final approval can be given, and never when a KYC server is configured (Verified
+ * then comes only from the server).
+ */
+export function showDemoReviewer(o: { dev: boolean; demoReader: boolean; serverConfigured: boolean; kyc: KycState }): boolean {
+  return o.dev && o.demoReader && !o.serverConfigured && canFinalApprove(o.kyc);
+}
+
+const DOC_NAME: Record<DocKind, string> = { selfie: 'selfie', aadhaar: 'Aadhaar card', pan: 'PAN card' };
+
+/** F5: the refused kinds the user has not sent again in this session. */
+export function kycRejectedDocs(view: KycStatusView | null, sent: ReadonlySet<DocKind> = new Set()): DocKind[] {
+  if (!view || view.status === 'verified' || view.status === 'rejected') return [];
+  return ALL_DOCS.filter((k) => view.rejectedDocuments?.includes(k) && !sent.has(k));
+}
+
+/** F5: 'Upload your PAN card again. …' for the refused kinds, or '' when none. */
+export function kycUploadAgainText(kinds: readonly DocKind[]): string {
+  if (kinds.length === 0) return '';
+  const names = kinds.map((k) => DOC_NAME[k]);
+  const list = names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]!}`;
+  return `Upload your ${list} again. ${kinds.length === 1 ? 'It doesn\'t' : 'They don\'t'} look like a photo or PDF.`;
+}
 
 /** True when the error means the session has ended (refresh cookie / token missing or refused). */
 export function needsSignIn(e: unknown): boolean {
@@ -146,9 +204,12 @@ const ALL_DOCS: readonly DocKind[] = ['selfie', 'aadhaar', 'pan'];
  */
 export function kycDocsNeeded(view: KycStatusView | null, sent: ReadonlySet<DocKind> = new Set()): DocKind[] {
   if (!view || view.status === null || view.status === 'verified' || view.status === 'rejected') return [];
-  const held = new Set<DocKind>([...(view.documents ?? []), ...sent]);
+  // F5: a refused kind is needed again until it is sent again
+  const refused = new Set(kycRejectedDocs(view, sent));
+  const held = new Set<DocKind>([...(view.documents ?? []).filter((k) => !refused.has(k)), ...sent]);
   if (view.next.type === 'documents') return ALL_DOCS.filter((k) => k === 'selfie' || !held.has(k));
-  if (view.status === 'under-review') return ALL_DOCS.filter((k) => !held.has(k));
+  // F10: a partner timeout is retried, nobody reviews documents for it
+  if (view.status === 'under-review' && view.reason !== 'partner-timeout') return ALL_DOCS.filter((k) => !held.has(k));
   return [];
 }
 
@@ -242,6 +303,8 @@ export const SERVER_ERROR_MESSAGES: Record<string, string> = {
   consent_required: 'Tick the box to continue.',
   'consent-required': 'Tick the box to continue.',
   upload_failed: 'Could not upload your documents. Try again.',
+  upload_rejected: 'This file doesn\'t look like a photo or PDF. Upload it again.',
+  under_age: 'You must be 18 or older to invest.',
   payload_too_large: 'That request is too large.',
   forbidden: 'You do not have access to this.',
   internal: 'Something went wrong. Try again.',
@@ -292,6 +355,10 @@ export function toKycStatusView(body: unknown): KycStatusView {
   if (typeof b.eligibleToInvest === 'boolean') view.eligibleToInvest = b.eligibleToInvest;
   if (Array.isArray(b.documents)) {
     view.documents = ALL_DOCS.filter((k) => (b.documents as unknown[]).includes(k));
+  }
+  if (Array.isArray(b.rejectedDocuments)) {
+    const refused = ALL_DOCS.filter((k) => (b.rejectedDocuments as unknown[]).includes(k));
+    if (refused.length > 0) view.rejectedDocuments = refused;
   }
   return view;
 }
@@ -410,16 +477,19 @@ export class ServerKycClient {
 
   /**
    * POST /kyc/consent/withdraw for each purpose (default: all of them, since the server holds the
-   * record). The server stops the KYC with reason 'consent-withdrawn'. A purpose with no row
-   * (404 not_found) counts as withdrawn.
+   * record). The first withdrawal already stops an open case ('consent-withdrawn'), so only an error
+   * before any success is thrown (F11); later errors are skipped and the rest are still sent.
    */
   async withdrawConsent(purposes: readonly ConsentPurpose[] = CONSENT_PURPOSES): Promise<void> {
+    let any = false;
     for (const purpose of purposes) {
       try {
         await this.call({ method: 'POST', path: '/kyc/consent/withdraw', body: { purpose }, auth: true });
       } catch (e) {
-        if (!(isServerError(e) && e.status === 404)) throw e;
+        if (!any) throw e;
+        continue;
       }
+      any = true;
       this.consents.delete(purpose);
     }
   }
@@ -508,7 +578,19 @@ export class ServerKycClient {
   /** POST /kyc/selfie (paid): face match + liveness on an uploaded selfie. Records 'face-match' consent first. */
   async submitSelfie(uploadId: string): Promise<KycStatusView> {
     await this.consentFor(STEP_CONSENT.documents);
-    return toKycStatusView(await this.call({ method: 'POST', path: '/kyc/selfie', body: { uploadId }, auth: true, idempotent: true }));
+    try {
+      return this.seen(toKycStatusView(await this.call({ method: 'POST', path: '/kyc/selfie', body: { uploadId }, auth: true, idempotent: true })));
+    } catch (e) {
+      // F5: the selfie was refused (not a photo): it has to be sent again
+      if (isServerError(e) && e.code === 'upload_rejected') this.sent.delete('selfie');
+      throw e;
+    }
+  }
+
+  /** F5: kinds the server reports refused are no longer counted as sent (the latest upload was refused). */
+  private seen(view: KycStatusView): KycStatusView {
+    for (const k of view.rejectedDocuments ?? []) this.sent.delete(k);
+    return view;
   }
 
   /** POST /kyc/esign (paid). `next.url` is the e-sign page. */
@@ -531,7 +613,7 @@ export class ServerKycClient {
   async retry(withConsent = false): Promise<KycStatusView> {
     if (withConsent) await this.consentFor(STEP_CONSENT.retry);
     const b = await this.call({ method: 'POST', path: '/kyc/retry', body: {}, auth: true, idempotent: true });
-    const view = toKycStatusView(b);
+    const view = this.seen(toKycStatusView(b));
     if (view.status === 'verified' || view.status === 'rejected') return view;
     const redo = b.redo === 'aadhaar' ? 'digilocker' : b.redo === 'selfie' ? 'documents' : b.redo === 'esign' ? 'esign' : null;
     return redo ? { ...view, next: { type: redo } } : view;
@@ -539,7 +621,7 @@ export class ServerKycClient {
 
   /** GET /kyc/status */
   async getStatus(): Promise<KycStatusView> {
-    return toKycStatusView(await this.call({ method: 'GET', path: '/kyc/status', auth: true }));
+    return this.seen(toKycStatusView(await this.call({ method: 'GET', path: '/kyc/status', auth: true })));
   }
 
   // ----- plumbing -----
@@ -627,7 +709,7 @@ export class ServerKycClient {
     if (token) headers.authorization = `Bearer ${token}`;
     if (idemKey) headers['idempotency-key'] = idemKey;
     const init: ServerFetchInit = { method: o.method, headers, ...(o.body !== undefined ? { body: JSON.stringify(o.body) } : {}) };
-    // the refresh cookie lives on the API's /auth path
+    // the refresh cookie is Path=/, but only /auth/* reads it, so only those requests send cookies
     if (this.web && o.path.startsWith('/auth/')) init.credentials = 'include';
     let res: ServerFetchResponse;
     try {

@@ -34,8 +34,9 @@ import { isPartnerTimeout, type KycPartner, type PaidCheck } from '../partner/ty
 import type { CheckName, CheckResult, KycPath, KycStatus, NextStep, ReasonCode } from '../types';
 import { KycError } from './errors';
 import {
-  CONSENT_PURPOSES, IDEMPOTENCY_TTL_SEC,
-  type CaseSnapshot, type ConsentPurpose, type DocumentKind, type KycAuditRow, type KycCaseRecord, type KycEvidence, type KycRepos,
+  CONSENT_PURPOSES, IDEMPOTENCY_TTL_SEC, consentSk, parseConsentSk,
+  type CaseSnapshot, type ConsentAction, type ConsentPurpose, type DocumentKind, type KycAuditRow, type KycCaseRecord, type KycEvidence,
+  type KycRepos,
 } from './repo';
 import { checkUploadContent, type UploadSigner } from './uploads';
 
@@ -62,6 +63,8 @@ export const DEFAULT_DOCS_PREFIX = 'kyc/';
 export const MAX_SIGNINGS_PER_DAY = 9;
 /** R3: GET /kyc/status re-runs a timed-out system step at most this often. */
 export const AUTO_RETRY_MS = 10 * 60_000;
+/** F9: GET /kyc/status auto-retries at most this many times per India day, one partner attempt each. */
+export const MAX_AUTO_RETRIES_PER_DAY = 3;
 /**
  * S2: the consent each paid partner call needs. The KRA lookup has no purpose of its own in the
  * contract; it uses the PAN, so it needs 'pan-check' (see QUESTIONS in the wave-4 report).
@@ -76,6 +79,7 @@ export const CHECK_CONSENT: Readonly<Record<Exclude<PaidCheck, 'aadhaar'>, Conse
 });
 const SAVE_RETRIES = 3;
 const IST_OFFSET_MS = 330 * 60_000;
+const IP_HASH_CACHE_MAX = 256;
 
 const DOC_TYPES: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'application/pdf': 'pdf' };
 const DOC_KINDS = ['selfie', 'aadhaar', 'pan'] as const satisfies readonly DocumentKind[];
@@ -205,6 +209,30 @@ export function retainsKycRecord(rec: KycCaseRecord): boolean {
   return rec.status === 'verified';
 }
 
+/**
+ * Clears what a case holds beyond its outcome: the encrypted PAN, the typed name / date of birth,
+ * the partner name / DOB results and the Aadhaar last 4 the user typed; drops pending signings.
+ * Kept: masks, refs, checks, the device / PAN-type flags and the e-sign state.
+ */
+function minimise(w: KycCaseRecord): void {
+  w.panEnc = '';
+  w.evidence = {
+    typed: { firstName: '', lastName: '', dob: '' },
+    deviceHandCheck: w.evidence.deviceHandCheck,
+    panIndividual: w.evidence.panIndividual,
+    otpAadhaarLast4: '',
+    ...(w.evidence.esign !== undefined ? { esign: w.evidence.esign } : {}),
+  };
+  delete w.pendingUploads;
+}
+
+/** True when minimise() (plus dropping the document links) would change nothing. */
+function isMinimised(r: KycCaseRecord): boolean {
+  return r.panEnc === '' && r.evidence.typed.firstName === '' && r.evidence.typed.dob === '' && r.evidence.otpAadhaarLast4 === ''
+    && r.evidence.kra === undefined && r.evidence.pan === undefined && r.evidence.aadhaar === undefined && r.evidence.face === undefined
+    && !r.pendingUploads?.length && !r.documents;
+}
+
 const panMask = (last4: string): string => `XXXXXX${last4}`;
 const aadhaarMask = (last4: string): string => `XXXX XXXX ${last4}`;
 
@@ -247,12 +275,20 @@ const kindOf = (uploadId: string): DocumentKind => uploadId.slice(0, uploadId.in
 /** Audit action of a KYC-route system write. */
 type KycAction = `kyc.${string}`;
 
+interface PaidOptions {
+  /** the case the consent must belong to (default: the live case; start passes its new case's id) */
+  caseId?: string;
+  /** partner tries (default and maximum: the service's partnerAttempts; F9 auto-retries use 1) */
+  attempts?: number;
+}
+
 // ---------- service ----------
 
 export class KycService {
   private readonly attempts: number;
   private readonly prefix: string;
   private readonly newId: () => string;
+  private readonly ipHashes = new Map<string, string>();
 
   constructor(private readonly deps: KycServiceDeps) {
     this.attempts = Math.max(1, deps.partnerAttempts ?? DEFAULT_PARTNER_ATTEMPTS);
@@ -314,67 +350,148 @@ export class KycService {
 
   // ----- consent (S2) -----
 
-  /** True when the newest consent row for this purpose is 'given'. */
-  async hasConsent(userId: string, purpose: ConsentPurpose): Promise<boolean> {
-    return (await this.deps.repos.consents.latest(userId, purpose))?.action === 'given';
+  // ----- IP (S#14) -----
+
+  /** hmacLookup('ip', ip): consent and audit rows never hold the raw IP. Cached per container. */
+  private async ipHash(ip?: string): Promise<string | undefined> {
+    if (typeof ip !== 'string' || ip === '') return undefined;
+    const hit = this.ipHashes.get(ip);
+    if (hit !== undefined) return hit;
+    const h = await hmacLookup(this.deps.mac, 'ip', ip);
+    if (this.ipHashes.size >= IP_HASH_CACHE_MAX) this.ipHashes.clear();
+    this.ipHashes.set(ip, h);
+    return h;
   }
 
-  private async recordConsent(userId: string, purpose: ConsentPurpose, action: 'given' | 'withdrawn', ip?: string): Promise<string> {
-    const at = this.iso();
-    await this.deps.repos.consents.record({
-      userId, sk: `${purpose}#${at}#${this.newId()}`, purpose, action, at, ...(ip ? { ip } : {}),
-    });
-    return at;
+  /** A system audit row (ts = ISO time + nonce; the caller's IP only as its keyed hash). */
+  private async auditRow(
+    userId: string, action: KycAction, before: CaseSnapshot | null, after: CaseSnapshot | null, ip?: string,
+  ): Promise<KycAuditRow> {
+    const ipHash = await this.ipHash(ip);
+    return { userId, ts: `${this.iso()}#${this.newId()}`, actor: 'system', action, before, after, ...(ipHash ? { ipHash } : {}) };
   }
 
-  /** POST /kyc/consent: records a consent; after a withdrawal it also starts a new case (old one archived). */
+  // ----- consent (S2, S#11) -----
+
+  /**
+   * True when the newest consent row for this purpose is 'given' and belongs to this case: a row
+   * bound to another case (S#11) never counts. `caseId` defaults to the user's live case.
+   */
+  async hasConsent(userId: string, purpose: ConsentPurpose, caseId?: string): Promise<boolean> {
+    const row = await this.deps.repos.consents.latest(userId, purpose);
+    if (row?.action !== 'given') return false;
+    const live = caseId ?? (await this.deps.repos.cases.get(userId))?.caseId;
+    return row.caseId === undefined || live === undefined || row.caseId === live;
+  }
+
+  /**
+   * Appends one consent row. S#11: the sort key `<purpose>#<iso>#<seq>` is monotonic per (user,
+   * purpose): same millisecond (or a clock behind the newest row) -> the newest row's time with the
+   * next seq; a taken key (a parallel write) is retried.
+   */
+  private async recordConsent(
+    userId: string, purpose: ConsentPurpose, action: ConsentAction, ip?: string, caseId?: string,
+  ): Promise<string> {
+    const { consents } = this.deps.repos;
+    const ipHash = await this.ipHash(ip);
+    for (let i = 0; i < SAVE_RETRIES + 2; i++) {
+      const prev = await consents.latest(userId, purpose);
+      let at = this.iso();
+      let seq = 0;
+      if (prev) {
+        const p = parseConsentSk(prev.sk);
+        if (at < p.at) at = p.at;
+        if (at === p.at) seq = p.seq + 1;
+      }
+      const ok = await consents.record({
+        userId, sk: consentSk(purpose, at, seq), purpose, action, at, ...(caseId ? { caseId } : {}), ...(ipHash ? { ipHash } : {}),
+      });
+      if (ok) return at;
+    }
+    throw new KycError('conflict');
+  }
+
+  /**
+   * S#11: a case was archived or deleted: every purpose still 'given' gets a 'case-closed' row, so
+   * a NEW case needs fresh consent rows.
+   */
+  private async closeConsents(userId: string, caseId: string | undefined, ip?: string): Promise<void> {
+    for (const purpose of CONSENT_PURPOSES) {
+      if ((await this.deps.repos.consents.latest(userId, purpose))?.action === 'given') {
+        await this.recordConsent(userId, purpose, 'case-closed', ip, caseId);
+      }
+    }
+  }
+
+  /**
+   * POST /kyc/consent: records a consent (bound to the live case, S#11). After a withdrawal the old
+   * case is archived FIRST, so this consent is the first one of the new case.
+   */
   async giveConsent(userId: string, b: Record<string, unknown>, ip?: string): Promise<Record<string, unknown>> {
     const purpose = parsePurpose(b.purpose);
-    const at = await this.recordConsent(userId, purpose, 'given', ip);
-    const rec = await this.deps.repos.cases.get(userId);
-    if (rec && newConsentStartsNewCase(rec)) await this.archiveCase(rec, ip);
+    let rec = await this.deps.repos.cases.get(userId);
+    if (rec && newConsentStartsNewCase(rec)) {
+      await this.archiveCase(rec, ip);
+      rec = null;
+    }
+    const at = await this.recordConsent(userId, purpose, 'given', ip, rec?.caseId);
     return { purpose, consent: 'given', at, kyc: statusView(await this.read(userId)) };
   }
 
-  /** POST /kyc/consent/withdraw: records the withdrawal and stops an open case ('consent-withdrawn'). */
+  /**
+   * POST /kyc/consent/withdraw: records the withdrawal.
+   * - A case the retention rule does not keep (anything but verified) is stopped if still open
+   *   ('consent-withdrawn'), its documents under `kyc/<userId>/` are deleted and its encrypted PAN
+   *   and typed details blanked (S#5). Withdrawing again repeats the delete (safe).
+   * - A verified case keeps its KYC (F3): the withdrawal is recorded, and a follow-up it still
+   *   waits for (e-sign / KRA upload) needs that consent, so it waits.
+   */
   async withdrawConsent(userId: string, b: Record<string, unknown>, ip?: string): Promise<Record<string, unknown>> {
     const purpose = parsePurpose(b.purpose);
-    const at = await this.recordConsent(userId, purpose, 'withdrawn', ip);
     let rec = await this.deps.repos.cases.get(userId);
-    if (rec && !TERMINAL.has(rec.status)) {
-      rec = await this.commit(userId, 'kyc.consent-withdrawn', (w) => {
-        if (TERMINAL.has(w.status)) throw new KycError('decided');
-        w.status = 'rejected';
-        w.reason = 'consent-withdrawn';
-        w.next = 'none';
-        delete w.unclear;
-      }, { ip, redecide: false });
+    const at = await this.recordConsent(userId, purpose, 'withdrawn', ip, rec?.caseId);
+    if (rec && !retainsKycRecord(rec)) {
+      if (!TERMINAL.has(rec.status) || !isMinimised(rec)) {
+        rec = await this.commit(userId, 'kyc.consent-withdrawn', (w) => {
+          if (retainsKycRecord(w)) throw new KycError('conflict'); // verified meanwhile: keep it
+          if (!TERMINAL.has(w.status)) {
+            w.status = 'rejected';
+            w.reason = 'consent-withdrawn';
+            w.next = 'none';
+            delete w.unclear;
+          }
+          minimise(w);
+          delete w.documents;
+        }, { ip, redecide: false });
+      }
+      await this.deps.uploads.deletePrefix(`${this.prefix}${userId}/`);
     }
     return { purpose, consent: 'withdrawn', at, kyc: statusView(rec) };
   }
 
-  /** Moves a stopped case aside so the user can start a new one; frees its PAN claim. */
+  /** Moves a stopped case aside so the user can start a new one; frees its PAN claim; closes its consents (S#11). */
   private async archiveCase(rec: KycCaseRecord, ip?: string): Promise<void> {
     const at = this.iso();
-    const audit: KycAuditRow = {
-      userId: rec.userId, ts: `${at}#${this.newId()}`, actor: 'system', action: 'kyc.case-archived',
-      before: snapshot(rec), after: null, ...(ip ? { ip } : {}),
-    };
+    const audit = await this.auditRow(rec.userId, 'kyc.case-archived', snapshot(rec), null, ip);
     if (!(await this.deps.repos.cases.archive(rec.userId, rec.version, at, audit))) throw new KycError('conflict');
     await this.deps.repos.cases.releasePan(rec.panHash, rec.userId);
+    await this.closeConsents(rec.userId, rec.caseId, ip);
   }
 
   /**
-   * DELETE /kyc/data: deletes the user's documents (S3 `kyc/<userId>/`) and case data, except what
-   * the retention rule keeps (retainsKycRecord), and says why each kept item is kept. Audited.
+   * DELETE /kyc/data: deletes the user's documents (S3 `kyc/<userId>/`), case data and archived
+   * cases (`arch#<userId>#*`), except what the retention rule keeps (retainsKycRecord), and says
+   * why each kept item is kept. A verified case keeps only the documents it references (S#5).
+   * Consent rows are never deleted (append-only proof). Audited.
    */
   async deleteData(userId: string, ip?: string): Promise<Record<string, unknown>> {
-    const rec = await this.deps.repos.cases.get(userId);
+    let rec = await this.deps.repos.cases.get(userId);
     const kept: { what: string; reason: string }[] = [
       { what: 'consent-records', reason: 'Proof of the consents you gave and withdrew.' },
       { what: 'audit-log', reason: 'Record of every change to your KYC (no ID numbers or documents).' },
       { what: 'paid-check-costs', reason: 'Billing record of partner checks (no ID numbers).' },
     ];
+    const prefix = `${this.prefix}${userId}/`;
     let documents = 0;
     let caseResult: 'deleted' | 'minimised' | 'none' = 'none';
     if (rec && retainsKycRecord(rec)) {
@@ -382,36 +499,30 @@ export class KycService {
         what: 'kyc-record',
         reason: 'Your verified KYC result, masked numbers and documents are kept for the regulatory retention period.',
       });
-      await this.commit(userId, 'kyc.data-minimised', (w) => {
-        w.panEnc = '';
-        w.evidence = {
-          typed: { firstName: '', lastName: '', dob: '' },
-          deviceHandCheck: w.evidence.deviceHandCheck,
-          panIndividual: w.evidence.panIndividual,
-          otpAadhaarLast4: '',
-          ...(w.evidence.esign !== undefined ? { esign: w.evidence.esign } : {}),
-        };
-        delete w.pendingUploads;
-      }, { ip, redecide: false });
+      // F1: uploads of this verified case that were never linked are its KYC documents too
+      if (rec.pendingUploads?.length) await this.linkPendingUploads(userId);
+      rec = await this.commit(userId, 'kyc.data-minimised', (w) => minimise(w), { ip, redecide: false });
+      const keep = new Set<string>();
+      for (const k of DOC_KINDS) {
+        const d = rec.documents?.[k];
+        if (d?.state === 'linked') keep.add(this.docKey(userId, d.uploadId));
+      }
+      documents = await this.deps.uploads.deletePrefix(prefix, keep);
       caseResult = 'minimised';
     } else {
-      documents = await this.deps.uploads.deletePrefix(`${this.prefix}${userId}/`);
+      documents = await this.deps.uploads.deletePrefix(prefix);
       if (rec) {
-        const audit: KycAuditRow = {
-          userId, ts: `${this.iso()}#${this.newId()}`, actor: 'system', action: 'kyc.data-deleted',
-          before: snapshot(rec), after: null, ...(ip ? { ip } : {}),
-        };
+        const audit = await this.auditRow(userId, 'kyc.data-deleted', snapshot(rec), null, ip);
         if (!(await this.deps.repos.cases.remove(userId, rec.version, audit))) throw new KycError('conflict');
         await this.deps.repos.cases.releasePan(rec.panHash, userId);
         caseResult = 'deleted';
       } else {
-        await this.deps.repos.audit.write({
-          userId, ts: `${this.iso()}#${this.newId()}`, actor: 'system', action: 'kyc.data-deleted', before: null, after: null,
-          ...(ip ? { ip } : {}),
-        });
+        await this.deps.repos.audit.write(await this.auditRow(userId, 'kyc.data-deleted', null, null, ip));
       }
+      await this.closeConsents(userId, rec?.caseId, ip);
     }
-    return { deleted: { documents, case: caseResult }, kept };
+    const archived = await this.deps.repos.cases.removeArchived(userId);
+    return { deleted: { documents, case: caseResult, archived }, kept };
   }
 
   // ----- paid calls -----
@@ -429,12 +540,15 @@ export class KycService {
    * before the first try that is `limit_reached`; before a retry the call ends as 'timeout' (a
    * later retry continues it). Every attempt is logged in `costs`.
    */
-  private async paid<T>(userId: string, check: PaidCheck, purpose: ConsentPurpose, fn: () => Promise<T>): Promise<T | 'timeout'> {
-    if (!(await this.hasConsent(userId, purpose))) throw new KycError('consent-required');
+  private async paid<T>(
+    userId: string, check: PaidCheck, purpose: ConsentPurpose, fn: () => Promise<T>, opts: PaidOptions = {},
+  ): Promise<T | 'timeout'> {
+    if (!(await this.hasConsent(userId, purpose, opts.caseId))) throw new KycError('consent-required');
     const { costs } = this.deps.repos;
     const { day, month, at } = this.day();
     const costInr = this.deps.costs?.[check] ?? DEFAULT_CHECK_COSTS[check];
-    for (let i = 0; i < this.attempts; i++) {
+    const attempts = Math.max(1, Math.min(opts.attempts ?? this.attempts, this.attempts));
+    for (let i = 0; i < attempts; i++) {
       if (!(await costs.reserve(userId, day, this.deps.config.maxPaidChecksPerDay))) {
         if (i === 0) throw new KycError('limit_reached');
         return 'timeout';
@@ -487,9 +601,8 @@ export class KycService {
     return out;
   }
 
-  private audit(before: KycCaseRecord | null, after: KycCaseRecord, action: KycAction, ip?: string): KycAuditRow {
-    const ts = `${this.iso()}#${this.newId()}`;
-    return { userId: after.userId, ts, actor: 'system', action, before: snapshot(before), after: snapshot(after), ...(ip ? { ip } : {}) };
+  private audit(before: KycCaseRecord | null, after: KycCaseRecord, action: KycAction, ip?: string): Promise<KycAuditRow> {
+    return this.auditRow(after.userId, action, snapshot(before), snapshot(after), ip);
   }
 
   /**
@@ -508,7 +621,7 @@ export class KycService {
       const after = opts.redecide === false ? work : this.decided(before, work);
       after.version = before.version + 1;
       after.updatedAt = this.iso();
-      if (await this.deps.repos.cases.save(after, before.version, this.audit(before, after, action, opts.ip))) return after;
+      if (await this.deps.repos.cases.save(after, before.version, await this.audit(before, after, action, opts.ip))) return after;
     }
     throw new KycError('conflict');
   }
@@ -534,9 +647,11 @@ export class KycService {
    * (null): the step stays as `next` and GET /kyc/status runs it later, so the user's own step
    * still succeeds.
    */
-  private async systemPaid<T>(userId: string, check: PaidCheck, purpose: ConsentPurpose, fn: () => Promise<T>): Promise<T | 'timeout' | null> {
+  private async systemPaid<T>(
+    userId: string, check: PaidCheck, purpose: ConsentPurpose, fn: () => Promise<T>, opts: PaidOptions = {},
+  ): Promise<T | 'timeout' | null> {
     try {
-      return await this.paid(userId, check, purpose, fn);
+      return await this.paid(userId, check, purpose, fn, opts);
     } catch (e) {
       if (e instanceof KycError && (e.code === 'limit_reached' || e.code === 'consent-required')) return null;
       throw e;
@@ -550,12 +665,13 @@ export class KycService {
 
   /**
    * System follow-ups after a change: PAN check when it is next; e-sign gate; KRA upload once
-   * verified. A case under review gets its uploaded documents linked (tagged `state=linked`) right
-   * away, so the 1-day `pending` lifecycle never deletes what staff need.
+   * verified. Any case that is not rejected (open, under review OR verified, F1) gets its uploaded
+   * documents linked (tagged `state=linked`) first, so the 1-day `pending` lifecycle never deletes
+   * documents staff or the retention rule need.
    */
   private async advance(userId: string): Promise<KycCaseRecord> {
     const first = await this.load(userId);
-    if (first.status === 'under-review' && first.pendingUploads?.length) await this.linkPendingUploads(userId);
+    if (first.status !== 'rejected' && first.pendingUploads?.length) await this.linkPendingUploads(userId);
     let rec = await this.load(userId);
     if (rec.next === 'pan-check' && !TERMINAL.has(rec.status)) {
       const pan = await this.pan(rec);
@@ -633,9 +749,12 @@ export class KycService {
    * 'system': deferred quietly (cap, missing consent, partner down) for a later status read.
    * Returns true when at least one call was made.
    */
-  private async rerunSystemChecks(userId: string, mode: 'user' | 'system', ip?: string): Promise<boolean> {
-    const call = <T>(check: PaidCheck, fn: () => Promise<T>): Promise<T | 'timeout' | null> =>
-      mode === 'user' ? this.paid(userId, check, CHECK_CONSENT[check as Exclude<PaidCheck, 'aadhaar'>], fn) : this.systemPaid(userId, check, CHECK_CONSENT[check as Exclude<PaidCheck, 'aadhaar'>], fn);
+  private async rerunSystemChecks(userId: string, mode: 'user' | 'system', ip?: string, attempts?: number): Promise<boolean> {
+    const opts: PaidOptions = attempts !== undefined ? { attempts } : {};
+    const call = <T>(check: PaidCheck, fn: () => Promise<T>): Promise<T | 'timeout' | null> => {
+      const purpose = CHECK_CONSENT[check as Exclude<PaidCheck, 'aadhaar'>];
+      return mode === 'user' ? this.paid(userId, check, purpose, fn, opts) : this.systemPaid(userId, check, purpose, fn, opts);
+    };
     let ran = false;
     try {
       let rec = await this.load(userId);
@@ -669,25 +788,36 @@ export class KycService {
     return ran;
   }
 
-  /** R3: a timed-out (or still missing pre-check) system step that GET /kyc/status may re-run now. */
+  /** Automatic retries already used on today's India day (F9). */
+  private autoRetriesToday(rec: KycCaseRecord): number {
+    return rec.autoRetries?.day === this.day().day ? rec.autoRetries.count : 0;
+  }
+
+  /**
+   * R3 + F9: a timed-out (or still missing pre-check) system step that GET /kyc/status may re-run
+   * now: at most once per 10 minutes and MAX_AUTO_RETRIES_PER_DAY times per India day.
+   */
   private autoRetryDue(rec: KycCaseRecord): boolean {
     if (TERMINAL.has(rec.status)) return false;
     if (!this.needsKra(rec) && !this.needsPan(rec)) return false;
+    if (this.autoRetriesToday(rec) >= MAX_AUTO_RETRIES_PER_DAY) return false;
     return this.now() - (rec.autoRetryAt ?? 0) >= AUTO_RETRY_MS;
   }
 
   private async autoRetry(userId: string): Promise<void> {
     try {
-      // claim the 10-minute slot first, so parallel status reads never pay twice
+      // claim the 10-minute slot (and one of today's retries) first, so parallel reads never pay twice
       await this.commit(userId, 'kyc.auto-retry', (w) => {
         if (!this.autoRetryDue(w)) throw new KycError('conflict');
         w.autoRetryAt = this.now();
+        w.autoRetries = { day: this.day().day, count: this.autoRetriesToday(w) + 1 };
       }, { redecide: false });
     } catch (e) {
       if (e instanceof KycError) return;
       throw e;
     }
-    await this.rerunSystemChecks(userId, 'system');
+    // F9: one partner attempt per automatic retry
+    await this.rerunSystemChecks(userId, 'system', undefined, 1);
   }
 
   // ----- routes -----
@@ -699,14 +829,11 @@ export class KycService {
    */
   async start(userId: string, input: StartInput, ip?: string): Promise<StatusView> {
     assertAdult(input.dob, this.now());
-    let existing = await this.deps.repos.cases.get(userId);
-    if (existing && newConsentStartsNewCase(existing)) {
-      // a NEW case after a consent withdrawal; the old one is archived as consent-withdrawn. Check
-      // the start's own consent first, so a refused start leaves the old case as it was.
-      if (!(await this.hasConsent(userId, CHECK_CONSENT['kra-lookup']))) throw new KycError('consent-required');
-      await this.archiveCase(existing, ip);
-      existing = null;
-    }
+    const existing = await this.deps.repos.cases.get(userId);
+    // S#11: a NEW case after a withdrawal needs fresh consent. A fresh POST /kyc/consent archives the
+    // stopped case, so a stopped case still here means no consent was given since: refuse, and
+    // leave the old case as it was.
+    if (existing && newConsentStartsNewCase(existing)) throw new KycError('consent-required');
     if (existing) return this.retryStart(existing, ip);
 
     const { mac, encryptor } = this.deps;
@@ -723,6 +850,7 @@ export class KycService {
       updatedAt: now,
       version: 1,
       createdAt: now,
+      caseId: this.newId(),
       panEnc: await encryptor.encrypt(input.pan, { purpose: 'pan', userId }),
       panHash: await hmacLookup(mac, 'pan', input.pan),
       evidence: {
@@ -744,12 +872,14 @@ export class KycService {
         if (!claimed) rec = { ...draft, status: 'under-review', path: null, reason: 'pan-in-use', next: 'wait', checks: {} };
       }
       if (rec.next === 'kra-lookup') {
-        const r = await this.paid(userId, 'kra-lookup', CHECK_CONSENT['kra-lookup'], () => this.deps.partner.lookupKyc(input.pan));
+        const r = await this.paid(userId, 'kra-lookup', CHECK_CONSENT['kra-lookup'], () => this.deps.partner.lookupKyc(input.pan), {
+          caseId: draft.caseId,
+        });
         if (!isTimeout(r)) draft.partnerRefs.kra = r.ref;
         draft.evidence.kra = isTimeout(r) ? r : { status: r.status, ...(r.name ? { name: r.name } : {}), ...(r.dob ? { dob: r.dob } : {}) };
         rec = this.decided(null, draft);
       }
-      if (!(await this.deps.repos.cases.save(rec, 0, this.audit(null, rec, 'kyc.start', ip)))) {
+      if (!(await this.deps.repos.cases.save(rec, 0, await this.audit(null, rec, 'kyc.start', ip)))) {
         claimed = false; // a parallel start saved this user's case: the claim is that case's
         throw new KycError('already_started');
       }
@@ -874,11 +1004,12 @@ export class KycService {
    * S11 + S14: links the case's uploaded-but-pending documents. Each is checked (magic bytes vs its
    * type): a match is tagged `linked` and becomes the case's document of that kind; a mismatch is
    * marked 'rejected' and stays `pending` (deleted by the lifecycle). Expired, never-uploaded
-   * signings are dropped.
+   * signings are dropped. F1: runs for open, under-review AND verified cases (a verified case's
+   * documents are the KYC record the retention rule keeps); never for a rejected case.
    */
   private async linkPendingUploads(userId: string): Promise<void> {
     const rec = await this.deps.repos.cases.get(userId);
-    if (!rec || TERMINAL.has(rec.status) || !rec.pendingUploads?.length) return;
+    if (!rec || rec.status === 'rejected' || !rec.pendingUploads?.length) return;
     const done = new Set<string>();
     const set: Partial<Record<DocumentKind, { uploadId: string; state: 'linked' | 'rejected' }>> = {};
     for (const p of rec.pendingUploads) {
@@ -909,6 +1040,14 @@ export class KycService {
     } catch (e) {
       if (!(e instanceof KycError)) throw e; // a concurrent change: the next status read links again
     }
+  }
+
+  /**
+   * F2 hook for the review routes (ReviewDeps.linkDocuments): the link step above, run before staff
+   * open or approve a case, so documents sent since the user's last status read count.
+   */
+  async linkDocuments(userId: string): Promise<void> {
+    await this.linkPendingUploads(userId);
   }
 
   /** POST /kyc/selfie: face match + liveness of an uploaded selfie against the Aadhaar photo. */
@@ -948,6 +1087,8 @@ export class KycService {
     const returnUrl = this.assertReturnUrl(b.returnUrl);
     const rec = await this.load(userId);
     if (!this.esignOpen(rec)) throw new KycError('wrong_step');
+    // F1: the e-sign result can verify the case by webhook; link the Aadhaar / PAN uploads now
+    if (rec.pendingUploads?.length) await this.linkPendingUploads(userId);
     const r = await this.paid(userId, 'esign', CHECK_CONSENT.esign, () => this.deps.partner.startEsign(userId, returnUrl));
     if (isTimeout(r)) throw new KycError('partner_unavailable');
     const after = await this.commit(userId, 'kyc.esign-start', (w) => {
@@ -963,8 +1104,10 @@ export class KycService {
     const rec = await this.read(userId);
     if (!rec) return statusView(null);
     if (TERMINAL.has(rec.status)) {
-      // A staff Approve may still wait for e-sign or the KRA upload (retried here).
-      return statusView(verifiedFollowUp(rec) !== null ? await this.advance(userId) : rec);
+      // A staff Approve may still wait for e-sign or the KRA upload (retried here); a verified case
+      // still links uploads that arrived before it was decided (F1).
+      const more = verifiedFollowUp(rec) !== null || (rec.status === 'verified' && !!rec.pendingUploads?.length);
+      return statusView(more ? await this.advance(userId) : rec);
     }
     if (this.autoRetryDue(rec)) await this.autoRetry(userId);
     if (rec.pendingUploads?.length) await this.linkPendingUploads(userId);

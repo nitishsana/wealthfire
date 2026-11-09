@@ -6,6 +6,8 @@
 // DynamoDB layout:
 //   kyc_cases pk userId   case items (KycCaseRecord, have `status` so they appear in GSI byStatus)
 //                         `pan#<panHash>` items: { ownerId } — one PAN per account (no `status`)
+//                         `arch#<userId>#<iso>` items: archived cases; `arch#<userId>`: { archivedAts }
+//                         index of them (no `status`)
 //                         `idem#<hash>` items: idempotency records (src/kyc/repo.ts; no `status`)
 //   audit     pk userId, sk ts (ISO time + '#' + nonce or event id)
 //
@@ -40,6 +42,12 @@ export type CaseEvidence = Omit<DecideInput, 'current' | 'currentReason'> & {
 /** One `kyc_cases` item: the shared KycCase fields plus what the KYC routes need. */
 export interface KycCaseRecord extends KycCase {
   createdAt: string;
+  /**
+   * S#11: id of this case (set by POST /kyc/start). Consent rows given while the case is live carry
+   * it, and a consent row bound to another case never counts for this one. Absent on cases created
+   * before wave 4b.
+   */
+  caseId?: string;
   /** Encryptor output of the normalised PAN (context {purpose:'pan', userId}) */
   panEnc: string;
   /** hmacLookup(mac, 'pan', PAN) */
@@ -50,6 +58,8 @@ export interface KycCaseRecord extends KycCase {
   unclear?: CheckName[];
   /** epoch ms of the last automatic partner retry by GET /kyc/status (R3: at most one per 10 min) */
   autoRetryAt?: number;
+  /** F9: automatic retries by GET /kyc/status on one India day (at most MAX_AUTO_RETRIES_PER_DAY) */
+  autoRetries?: { day: string; count: number };
   /** S11: uploads signed by /kyc/documents and not yet linked (newest last) */
   pendingUploads?: { uploadId: string; signedAt: number }[];
   /** S11: the upload linked per document kind (tagged state=linked); a newer upload replaces it */
@@ -98,7 +108,13 @@ export interface AuditRow {
   after: CaseSnapshot | null;
   /** staff reason (reject) or note (approve) */
   note?: string;
+  /**
+   * @deprecated S#14: never write a raw IP (kept only so older rows still type-check); write
+   * `ipHash` = hmacLookup(mac, 'ip', ip) instead.
+   */
   ip?: string;
+  /** S#14: hmacLookup(mac, 'ip', ip) of the caller's IP (never the raw IP) */
+  ipHash?: string;
   /** webhook rows */
   eventId?: string;
   outcome?: WebhookOutcome;
@@ -163,6 +179,12 @@ export interface CaseStore {
   archive(userId: string, expectedVersion: number, archivedAt: string, audit: AuditRow): Promise<boolean>;
   /** Deletes the case item (DELETE /kyc/data on a case the retention rule does not keep), audited. */
   remove(userId: string, expectedVersion: number, audit: AuditRow): Promise<boolean>;
+  /**
+   * S#5/F4: deletes every archived case of this user (`arch#<userId>#*`, found through the
+   * `arch#<userId>` index item that archive() maintains) and the index item. Returns how many
+   * archived cases were deleted.
+   */
+  removeArchived(userId: string): Promise<number>;
 }
 
 export interface AuditStore {
@@ -184,6 +206,12 @@ export const ARCHIVE_PREFIX = 'arch#';
 export const isCaseKey = (userId: string): boolean =>
   !userId.startsWith(PAN_PREFIX) && !userId.startsWith(IDEM_PREFIX) && !userId.startsWith(ARCHIVE_PREFIX);
 export const archiveKey = (userId: string, archivedAt: string): string => `${ARCHIVE_PREFIX}${userId}#${archivedAt}`;
+/**
+ * Index item listing a user's archives (`archivedAts`, a string set), so DELETE /kyc/data can find
+ * them without a table scan (the table's partition key is userId only). No `status`: stays out of
+ * the byStatus GSI; starts with `arch#`, so it is never read as a case.
+ */
+export const archiveIndexKey = (userId: string): string => `${ARCHIVE_PREFIX}${userId}`;
 
 /** What an archived (stopped) case keeps: the outcome, masks and refs, never the encrypted PAN or typed details. */
 export type ArchivedCase = Omit<KycCaseRecord, 'panEnc' | 'evidence' | 'pendingUploads'>;

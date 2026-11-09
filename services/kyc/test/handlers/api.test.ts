@@ -1,6 +1,10 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2 } from 'aws-lambda';
 import { describe, expect, it } from 'vitest';
-import { APP_RETURN_SCHEME, createHandler, createPartner, returnUrlPrefixes, toHttpRequest, toResult } from '../../src/handlers/api';
+import {
+  APP_RETURN_SCHEME, createDocsS3Client, createHandler, createPartner, returnUrlPrefixes, toHttpRequest, toResult,
+} from '../../src/handlers/api';
+import { S3UploadSigner } from '../../src/kyc/uploads';
+import { S3DownloadSigner } from '../../src/review/s3';
 import { FakePartner } from '../../src/partner/fake';
 import { createRouter, matchRoute, MAX_BODY_BYTES, serializeCookie, type HttpResponse } from '../../src/router';
 import { MemoryLogger } from '../../src/kyc/log';
@@ -214,5 +218,41 @@ describe('Lambda adapter (handlers/api.ts)', () => {
     for (const bad of ['https://nitishsana.github.io', 'http://evil.example/', 'javascript:', 'ftp://x/']) {
       expect(() => returnUrlPrefixes({ RETURN_URL_PREFIXES: bad }), bad).toThrow(/RETURN_URL_PREFIXES/);
     }
+  });
+});
+
+describe('S#1: docs-bucket S3 client (createDocsS3Client)', () => {
+  // dummy credentials: presigning is local, no AWS call is made
+  const client = () => createDocsS3Client({
+    region: 'ap-south-1', credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'dummy-secret' },
+  });
+  // request checksums (x-amz-checksum-<algo>, x-amz-sdk-checksum-algorithm). `x-amz-checksum-mode`
+  // on a GET only asks S3 to return its stored checksum and is harmless.
+  const checksumParams = (u: URL) =>
+    [...u.searchParams.keys()].filter((k) => /^x-amz-(sdk-)?checksum/i.test(k) && k.toLowerCase() !== 'x-amz-checksum-mode');
+
+  it('computes request checksums only when an operation requires them', async () => {
+    expect(await client().config.requestChecksumCalculation()).toBe('WHEN_REQUIRED');
+  });
+
+  it('a REAL presigned upload PUT carries no x-amz-checksum-* / x-amz-sdk-checksum-algorithm', async () => {
+    const signed = await new S3UploadSigner(client(), 'docs-bucket').signPut({
+      key: 'kyc/user-1/pan-00000000-0000-4000-8000-000000000000.pdf', contentType: 'application/pdf', contentLength: 1234, expiresInSec: 300,
+    });
+    const u = new URL(signed.url);
+    expect(checksumParams(u)).toEqual([]);
+    expect(u.searchParams.get('X-Amz-SignedHeaders')).toContain('content-type');
+    expect(Object.keys(signed.headers).some((h) => /checksum/i.test(h))).toBe(false);
+  });
+
+  it('a REAL presigned review GET carries no checksum params', async () => {
+    const u = new URL(await new S3DownloadSigner(client(), 'docs-bucket').sign('kyc/user-1/selfie-1.jpg', 300));
+    expect(checksumParams(u)).toEqual([]);
+    expect(u.searchParams.get('X-Amz-Expires')).toBe('300');
+  });
+
+  it('caller config cannot switch checksums back on', async () => {
+    const c = createDocsS3Client({ region: 'ap-south-1', requestChecksumCalculation: 'WHEN_SUPPORTED' });
+    expect(await c.config.requestChecksumCalculation()).toBe('WHEN_REQUIRED');
   });
 });

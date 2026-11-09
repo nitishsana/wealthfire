@@ -11,7 +11,7 @@ const web = { 'X-WF-Client': 'web', Origin: ORIGIN };
 
 function env() {
   const s = setup();
-  return { ...s, deps: { otp: s.otp, tokens: s.tokens, clock: s.clock, allowedOrigins: [ORIGIN] } };
+  return { ...s, deps: { otp: s.otp, tokens: s.tokens, clock: s.clock, appOrigins: [ORIGIN] } };
 }
 
 async function signIn(e: ReturnType<typeof env>, headers: Record<string, string> = {}) {

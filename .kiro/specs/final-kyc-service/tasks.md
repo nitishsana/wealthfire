@@ -41,3 +41,17 @@ Everything in waves 1–4 builds and tests **without** AWS, the partner or the A
 - [ ] 18. Write `FintechPrimitivesPartner` (or the chosen partner) against the sandbox docs; sandbox test of every path.
 - [ ] 19. Deploy the `dev` stack to Nitish's AWS account (after OK); point the local preview at it; run the test cases.
 - [ ] 20. Push, PR, CI, full-flow bug check, merge (after OK). `prod` deploy is a separate, later decision.
+- [ ] 21. Before prod (from wave 4 reviews):
+  - Dedicated app domain (S5): set `-c appOrigin=` so the shared `nitishsana.github.io` origin is no longer trusted for the cookie, CORS and return URLs. No prod without it.
+  - Custom API / console domains with certificates (S13 context values).
+  - SNS SMS monthly spend limit set in the account (see services/kyc/infra/DEPLOY.md).
+  - GuardDuty on in ap-south-1.
+  - Retention period for KYC records set by the compliance adviser (`DOC_RETENTION_DAYS`).
+  - Compliance adviser rewrites the consent tick texts (`CONSENT_TEXT` in packages/core).
+  - First dev deploy: confirm the Cognito authorizer accepts `Authorization: Bearer <idToken>` from the review console.
+  - Turn off the default execute-api URL once the apps use the custom API domain.
+  - KRA upload status re-check on `GET /kyc/status` with the real partner (late `kra.upload` webhooks are refused on ref mismatch).
+
+## Later
+
+- [ ] 22. R8: rejected cases are final for now. Later: let a user appeal or restart a staff-rejected case.

@@ -2,7 +2,9 @@
 // when a KYC case exists. Each opens a confirm step first (title, one-line effect, Cancel + a red
 // confirm button). Same texts and order as packages/mobile-ui/src/server.tsx KycDataControls.
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
-import { hasKycCase, isServerError, KYC_TEXT, type KycStatusView, type ServerKycClient } from '@wealthfire/core';
+import {
+  hasKycCase, isServerError, KYC_TEXT, kycWithdrawBody, kycWithdrawDone, needsSignIn, type KycStatusView, type ServerKycClient,
+} from '@wealthfire/core';
 
 type Ask = 'withdraw' | 'delete' | null;
 const FAILED = 'Something went wrong. Try again.';
@@ -38,16 +40,19 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
   async function confirm() {
     const what = ask;
     if (!what || busy) return;
+    const before = view;
     setBusy(true); setError('');
     try {
       if (what === 'withdraw') await client.withdrawConsent();
       else await client.deleteKycData();
-      setDone(what === 'withdraw' ? KYC_TEXT.withdrawDone : KYC_TEXT.deleteDone);
+      // F3: a verified case keeps its KYC, so no 'stopped' line after a withdraw
+      setDone(what === 'withdraw' ? kycWithdrawDone(before) : KYC_TEXT.deleteDone);
       lastAsk.current = null;
       setAsk(null);
       await load();
     } catch (e) {
-      setError(isServerError(e) ? e.message : FAILED);
+      // F12 (same as phones): an ended session says so; other errors show their fixed text
+      setError(needsSignIn(e) ? KYC_TEXT.signInAgain : isServerError(e) ? e.message : FAILED);
     } finally {
       setBusy(false);
     }
@@ -56,7 +61,7 @@ export function KycDataControls({ client }: { client: ServerKycClient }) {
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) setAsk(null); };
   const withdrawn = view?.reason === 'consent-withdrawn';
   const title = ask === 'withdraw' ? KYC_TEXT.withdrawTitle : KYC_TEXT.deleteTitle;
-  const body = ask === 'withdraw' ? KYC_TEXT.withdrawBody : KYC_TEXT.deleteBody;
+  const body = ask === 'withdraw' ? kycWithdrawBody(view) : KYC_TEXT.deleteBody;
 
   return (
     <section data-feature="kyc-data-controls" className="card kyc-data" aria-labelledby={`${id}-h`}>

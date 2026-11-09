@@ -14,14 +14,27 @@ export const USER = 'user-1';
 /** Stored partner refs of the default case, and the ref `event()` adds per event kind. */
 export const REFS = { kra: 'kra_1', aadhaar: 'aad_1', esign: 'es_1' } as const;
 export const UPLOAD_REF = 'up_1';
+/**
+ * S#10: refs a partner may put on PAN / face results. The API never stores these (it gets PAN and
+ * face synchronously), so by default such events are refused; `withResultRefs` stores them to
+ * exercise the "a stored ref matches" path.
+ */
+export const RESULT_REFS = { pan: 'pan_1', face: 'face_1' } as const;
 
-/** The ref a real partner sends for this event (none for PAN / face results). */
+/** The ref a partner sends for this event. */
 export function refFor(type: string, data: Record<string, unknown>): string | undefined {
   if (type === 'esign.completed') return REFS.esign;
   if (type === 'kra.upload') return UPLOAD_REF;
   if (data.check === 'kra') return REFS.kra;
   if (data.check === 'aadhaar') return REFS.aadhaar;
+  if (data.check === 'pan') return RESULT_REFS.pan;
+  if (data.check === 'face') return RESULT_REFS.face;
   return undefined;
+}
+
+/** A case that (unlike production today) stored PAN / face refs, so their webhook results apply. */
+export function withResultRefs(over: Partial<KycCase> = {}): KycCase {
+  return baseCase({ ...over, partnerRefs: { ...REFS, ...RESULT_REFS, ...(over.partnerRefs ?? {}) } as KycCase['partnerRefs'] });
 }
 
 export function baseCase(over: Partial<KycCase> = {}): KycCase {

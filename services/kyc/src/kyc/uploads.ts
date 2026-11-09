@@ -5,9 +5,11 @@
 // object is retagged `state=linked` once a case references it. The bucket lifecycle deletes
 // `pending` objects after 1 day, so unreferenced uploads never sit for the retention period.
 // S14: the first bytes of an upload are checked against its declared type before it is used.
+// S#1: the tag stays a signed header (not hoisted into the query) and the URL has no checksum params.
+// S#9: the PUT is conditional (`If-None-Match: *`): it cannot overwrite an existing object.
 import {
   DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, PutObjectTaggingCommand,
-  type S3Client,
+  S3Client, type S3ClientConfig,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -34,8 +36,15 @@ export interface UploadSigner {
   readStart(key: string, n: number): Promise<Uint8Array | null>;
   /** Sets the object's `state` tag. */
   setState(key: string, state: UploadState): Promise<void>;
-  /** Deletes every object under `prefix`; returns how many were deleted. */
-  deletePrefix(prefix: string): Promise<number>;
+  /** Deletes every object under `prefix` except the keys in `keep`; returns how many were deleted. */
+  deletePrefix(prefix: string, keep?: ReadonlySet<string>): Promise<number>;
+}
+
+/** The headers the client must send with a signed PUT (all of them are signed). */
+export function signedPutHeaders(i: Pick<SignPutInput, 'contentType' | 'contentLength'>): Record<string, string> {
+  return {
+    'content-type': i.contentType, 'content-length': String(i.contentLength), 'x-amz-tagging': PENDING_TAGGING, 'if-none-match': '*',
+  };
 }
 
 export type SniffedType = 'image/jpeg' | 'image/png' | 'application/pdf';
@@ -69,21 +78,53 @@ export async function checkUploadContent(uploads: UploadSigner, key: string): Pr
   return want !== null && sniffType(head) === want ? 'ok' : 'mismatch';
 }
 
+/**
+ * S#1: an S3 client fit for presigned uploads. `requestChecksumCalculation: 'WHEN_REQUIRED'` stops
+ * the SDK adding `x-amz-checksum-crc32` (of an EMPTY body) and `x-amz-sdk-checksum-algorithm` to
+ * the presigned URL, which S3 would check against the real upload and refuse.
+ */
+export function createUploadS3Client(config: S3ClientConfig = {}): S3Client {
+  return new S3Client({ ...config, requestChecksumCalculation: 'WHEN_REQUIRED' });
+}
+
+/** Headers every signed upload PUT carries; all signed (S11 tag, S#9 no overwrite). */
+export const SIGNED_PUT_HEADERS = ['content-type', 'content-length', 'x-amz-tagging', 'if-none-match'] as const;
+
 export class S3UploadSigner implements UploadSigner {
+  private presigner?: Promise<S3Client>;
+
   constructor(private readonly s3: S3Client, private readonly bucket: string) {}
+
+  /**
+   * S#1: the client used for presigning. The given client when it already uses
+   * requestChecksumCalculation 'WHEN_REQUIRED'; otherwise a copy with that setting (same region and
+   * credentials), so a shared default client can never put checksum parameters into an upload URL.
+   */
+  private presignClient(): Promise<S3Client> {
+    this.presigner ??= (async () => {
+      const mode = await this.s3.config.requestChecksumCalculation?.();
+      if (mode === 'WHEN_REQUIRED') return this.s3;
+      return createUploadS3Client({ region: this.s3.config.region, credentials: this.s3.config.credentials });
+    })();
+    return this.presigner;
+  }
 
   async signPut(i: SignPutInput): Promise<{ url: string; headers: Record<string, string> }> {
     const url = await getSignedUrl(
-      this.s3,
+      await this.presignClient(),
       new PutObjectCommand({
         Bucket: this.bucket, Key: i.key, ContentType: i.contentType, ContentLength: i.contentLength, Tagging: PENDING_TAGGING,
+        // S#9: a conditional write, so the URL cannot overwrite the object after it was checked/linked
+        IfNoneMatch: '*',
       }),
-      { expiresIn: i.expiresInSec, signableHeaders: new Set(['content-type', 'content-length', 'x-amz-tagging']) },
+      {
+        expiresIn: i.expiresInSec,
+        signableHeaders: new Set(SIGNED_PUT_HEADERS),
+        // S#1: keep the tag a SIGNED HEADER (the presigner would move x-amz-* into the query)
+        unhoistableHeaders: new Set(['x-amz-tagging']),
+      },
     );
-    return {
-      url,
-      headers: { 'content-type': i.contentType, 'content-length': String(i.contentLength), 'x-amz-tagging': PENDING_TAGGING },
-    };
+    return { url, headers: signedPutHeaders(i) };
   }
 
   async exists(key: string): Promise<boolean> {
@@ -113,12 +154,13 @@ export class S3UploadSigner implements UploadSigner {
     }));
   }
 
-  async deletePrefix(prefix: string): Promise<number> {
+  async deletePrefix(prefix: string, keep?: ReadonlySet<string>): Promise<number> {
     let deleted = 0;
     let token: string | undefined;
     do {
       const page = await this.s3.send(new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: token }));
-      const keys = (page.Contents ?? []).map((o) => o.Key).filter((k): k is string => typeof k === 'string' && k.startsWith(prefix));
+      const keys = (page.Contents ?? []).map((o) => o.Key)
+        .filter((k): k is string => typeof k === 'string' && k.startsWith(prefix) && !keep?.has(k));
       if (keys.length > 0) {
         const out = await this.s3.send(new DeleteObjectsCommand({
           Bucket: this.bucket, Delete: { Objects: keys.map((Key) => ({ Key })), Quiet: true },
@@ -150,10 +192,7 @@ export class FakeUploadSigner implements UploadSigner {
 
   async signPut(i: SignPutInput): Promise<{ url: string; headers: Record<string, string> }> {
     this.signed.push({ ...i });
-    return {
-      url: `https://uploads.invalid/${i.key}?expires=${i.expiresInSec}`,
-      headers: { 'content-type': i.contentType, 'content-length': String(i.contentLength), 'x-amz-tagging': PENDING_TAGGING },
-    };
+    return { url: `https://uploads.invalid/${i.key}?expires=${i.expiresInSec}`, headers: signedPutHeaders(i) };
   }
 
   async exists(key: string): Promise<boolean> {
@@ -169,10 +208,10 @@ export class FakeUploadSigner implements UploadSigner {
     if (this.uploaded.has(key)) this.states.set(key, state);
   }
 
-  async deletePrefix(prefix: string): Promise<number> {
+  async deletePrefix(prefix: string, keep?: ReadonlySet<string>): Promise<number> {
     let n = 0;
     for (const k of [...this.uploaded.keys()]) {
-      if (k.startsWith(prefix)) {
+      if (k.startsWith(prefix) && !keep?.has(k)) {
         this.uploaded.delete(k);
         this.states.delete(k);
         n++;

@@ -13,9 +13,16 @@ import {
   hasKycCase,
   isConsentRequired,
   kycDocsNeeded,
+  kycFinalLabel,
+  kycFinalReason,
   kycReasonText,
+  kycRejectedDocs,
+  kycUploadAgainText,
+  kycWithdrawBody,
+  kycWithdrawDone,
   needsSignIn,
   serverEligibleToInvest,
+  showDemoReviewer,
   toKycStatusView,
   type DocKind,
   type KycStatusView,
@@ -261,12 +268,26 @@ describe('R1 all three documents', () => {
 });
 
 describe('withdraw consent and delete data', () => {
-  it('withdrawConsent posts /kyc/consent/withdraw for every purpose; 404 counts as withdrawn', async () => {
-    const f = fakeFetch({ 'POST /kyc/consent/withdraw': [ok, { status: 404, body: { error: 'not_found' } }, ok] });
+  it('withdrawConsent posts /kyc/consent/withdraw for every purpose', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent/withdraw': [ok] });
     const c = client(f);
     await c.withdrawConsent();
     expect(f.bodies('/kyc/consent/withdraw')).toEqual(CONSENT_PURPOSES.map((purpose) => ({ purpose })));
     expect(f.calls.every((x) => x.init.headers.authorization === 'Bearer A1')).toBe(true);
+  });
+
+  it('F11: errors after the first success are skipped and the rest are still sent', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent/withdraw': [ok, { status: 503, body: { error: 'internal' } }, { status: 404, body: { error: 'not_found' } }, ok] });
+    const c = client(f);
+    await c.giveConsent('digilocker').catch(() => undefined);
+    await expect(c.withdrawConsent()).resolves.toBeUndefined();
+    expect(f.bodies('/kyc/consent/withdraw')).toHaveLength(CONSENT_PURPOSES.length);
+  });
+
+  it('F11: a 404 on the first purpose is an error (no special 404 branch)', async () => {
+    const f = fakeFetch({ 'POST /kyc/consent/withdraw': [{ status: 404, body: { error: 'not_found' } }] });
+    await expect(client(f).withdrawConsent()).rejects.toMatchObject({ status: 404, code: 'not_found' });
+    expect(f.calls).toHaveLength(1);
   });
 
   it('withdrawConsent forgets recorded consents, so the next step records again', async () => {
@@ -323,6 +344,102 @@ describe('withdraw consent and delete data', () => {
 
   it('feature id is registered', () => {
     expect(FEATURES.some((x) => x.id === 'kyc-data-controls')).toBe(true);
+  });
+});
+
+describe('wave 4b', () => {
+  const sv = (over: Partial<KycStatusView> & Pick<KycStatusView, 'status'>): KycStatusView => ({ reason: null, next: { type: 'wait' }, ...over });
+
+  it('F5: upload_rejected and under_age have their own fixed texts', () => {
+    expect(new ServerError(400, 'upload_rejected').message).toBe('This file doesn\'t look like a photo or PDF. Upload it again.');
+    expect(new ServerError(400, 'under_age').message).toBe('You must be 18 or older to invest.');
+  });
+
+  it('F5: rejectedDocuments is parsed (known kinds only; empty list dropped)', () => {
+    expect(toKycStatusView({ status: 'under-review', next: 'wait', rejectedDocuments: ['pan', 'x'] }).rejectedDocuments).toEqual(['pan']);
+    expect(toKycStatusView({ status: 'under-review', next: 'wait', rejectedDocuments: [] }).rejectedDocuments).toBeUndefined();
+    expect(toKycStatusView({ status: 'under-review', next: 'wait' }).rejectedDocuments).toBeUndefined();
+  });
+
+  it('F5: a refused kind is needed again and named in the upload-again line', () => {
+    const v = sv({ status: 'under-review', reason: 'hand-check', documents: ['selfie', 'aadhaar'], rejectedDocuments: ['pan'] });
+    expect(kycDocsNeeded(v)).toEqual(['pan']);
+    expect(kycRejectedDocs(v)).toEqual(['pan']);
+    expect(kycUploadAgainText(['pan'])).toBe('Upload your PAN card again. It doesn\'t look like a photo or PDF.');
+    expect(kycUploadAgainText(['selfie', 'aadhaar', 'pan'])).toBe('Upload your selfie, Aadhaar card and PAN card again. They don\'t look like a photo or PDF.');
+    expect(kycUploadAgainText([])).toBe('');
+    // sent again in this session: no longer asked
+    expect(kycDocsNeeded(v, new Set<DocKind>(['pan']))).toEqual([]);
+    expect(kycRejectedDocs(v, new Set<DocKind>(['pan']))).toEqual([]);
+    // the selfie step asks the refused card too
+    expect(kycDocsNeeded(sv({ status: 'pre-verified', next: { type: 'documents' }, documents: ['aadhaar', 'pan'], rejectedDocuments: ['aadhaar'] }))).toEqual(['selfie', 'aadhaar']);
+    expect(kycRejectedDocs(sv({ status: 'verified', rejectedDocuments: ['pan'] }))).toEqual([]);
+  });
+
+  it('F5: a status read reporting a refused kind takes it out of "sent"', async () => {
+    const uploads = { status: 200, body: { uploads: [{ kind: 'pan', uploadId: 'pan-1.png', url: 'https://s3.test/p', headers: {} }] } };
+    const f = fakeFetch({
+      'POST /kyc/documents': [uploads],
+      'GET /kyc/status': [{ status: 200, body: view({ status: 'under-review', reason: 'hand-check', next: 'wait', documents: [], rejectedDocuments: ['pan'] }) }],
+    });
+    const c = client(f);
+    await c.uploadDocuments([{ kind: 'pan', contentType: 'image/png', size: 5 }], async () => true);
+    expect(c.sentDocuments().has('pan')).toBe(true);
+    const v = await c.getStatus();
+    expect(c.sentDocuments().has('pan')).toBe(false);
+    expect(kycDocsNeeded(v, c.sentDocuments())).toEqual(['selfie', 'aadhaar', 'pan']);
+  });
+
+  it('F5: a refused selfie (upload_rejected) is no longer counted as sent', async () => {
+    const uploads = { status: 200, body: { uploads: [{ kind: 'selfie', uploadId: 'selfie-1.jpg', url: 'https://s3.test/s', headers: {} }] } };
+    const f = fakeFetch({ 'POST /kyc/documents': [uploads], 'POST /kyc/consent': [ok], 'POST /kyc/selfie': [{ status: 400, body: { error: 'upload_rejected' } }] });
+    const c = client(f);
+    await c.uploadDocuments([{ kind: 'selfie', contentType: 'image/jpeg', size: 5 }], async () => true);
+    const e = await c.submitSelfie('selfie-1.jpg').catch((x) => x);
+    expect(e).toMatchObject({ code: 'upload_rejected', message: 'This file doesn\'t look like a photo or PDF. Upload it again.' });
+    expect(c.sentDocuments().has('selfie')).toBe(false);
+  });
+
+  it('F7: approved with e-sign open shows "Approved – e-sign to finish", no reason; otherwise the status label', () => {
+    const waiting = toKycStatusView({ status: 'verified', reason: 'staff-approved', next: 'esign', eligibleToInvest: false });
+    expect(kycFinalLabel(waiting)).toBe('Approved \u2013 e-sign to finish');
+    expect(kycFinalReason(waiting)).toBeUndefined();
+    const done = toKycStatusView({ status: 'verified', reason: 'staff-approved', next: 'none', eligibleToInvest: true });
+    expect(kycFinalLabel(done)).toBe('Verified');
+    expect(kycFinalReason(done)).toBe('Approved by our team.');
+    // eligibleToInvest not sent: no claim the e-sign is still open
+    expect(kycFinalLabel(toKycStatusView({ status: 'verified', next: 'esign' }))).toBe('Verified');
+    expect(kycFinalLabel(toKycStatusView({ status: 'under-review', next: 'wait' }))).toBe('Under review');
+    expect(kycFinalReason(null)).toBeUndefined();
+  });
+
+  it('F8: the Demo reviewer never shows with a KYC server', () => {
+    const kyc = { status: 'pre-verified' } as Parameters<typeof showDemoReviewer>[0]['kyc'];
+    expect(showDemoReviewer({ dev: true, demoReader: true, serverConfigured: false, kyc })).toBe(true);
+    expect(showDemoReviewer({ dev: true, demoReader: true, serverConfigured: true, kyc })).toBe(false);
+    expect(showDemoReviewer({ dev: false, demoReader: true, serverConfigured: false, kyc })).toBe(false);
+    expect(showDemoReviewer({ dev: true, demoReader: false, serverConfigured: false, kyc })).toBe(false);
+    expect(showDemoReviewer({ dev: true, demoReader: true, serverConfigured: false, kyc: { ...kyc, status: 'verified' } })).toBe(false);
+  });
+
+  it('F10: an under-review partner timeout asks no documents (retry instead)', () => {
+    const v = toKycStatusView({ status: 'under-review', reason: 'partner-timeout', next: 'wait' });
+    expect(v.next.type).toBe('retry');
+    expect(kycDocsNeeded(v)).toEqual([]);
+    expect(kycDocsNeeded(toKycStatusView({ status: 'under-review', reason: 'hand-check', next: 'wait' }))).toEqual(['selfie', 'aadhaar', 'pan']);
+  });
+
+  it('F3: a verified case gets its own withdraw text and no stopped line; others keep the original', () => {
+    const verified = sv({ status: 'verified', next: { type: 'none' } });
+    expect(`${KYC_TEXT.withdrawTitle} ${kycWithdrawBody(verified)}`).toBe('Withdraw consent? Your KYC stays complete. We won\'t run new checks that need this consent.');
+    expect(kycWithdrawDone(verified)).toBe('We recorded your withdrawal.');
+    // approved, e-sign still open: still a verified case
+    expect(kycWithdrawBody(sv({ status: 'verified', next: { type: 'esign' }, eligibleToInvest: false }))).toBe(KYC_TEXT.withdrawBodyVerified);
+    for (const status of ['pre-verified', 'under-review'] as const) {
+      expect(kycWithdrawBody(sv({ status }))).toBe(KYC_TEXT.withdrawBody);
+      expect(kycWithdrawDone(sv({ status }))).toBe(KYC_TEXT.withdrawDone);
+    }
+    expect(kycWithdrawBody(null)).toBe(KYC_TEXT.withdrawBody);
   });
 });
 

@@ -65,7 +65,22 @@ export const WAVE4_ENV = {
   fieldKeyId: 'FIELD_KEY_ID',
   /** dev only: public base URL of the API stage, for the dev partner pages */
   apiBaseUrl: 'API_BASE_URL',
+  /**
+   * Wave 4b (S8): the app origins only (no review console), for the cookie-mode Origin check.
+   * G-AUTH adds the same name to src/lib/env.ts.
+   */
+  appOrigins: 'APP_ORIGINS',
 } as const;
+/** `-c synthOnly=true` lets synth run without budgetEmail (S12); deploy.ts refuses it. */
+export const SYNTH_ONLY_CONTEXT = 'synthOnly';
+/** costs table TTL attribute (epoch seconds): the `sign#<day>` counter rows carry it (S14). */
+export const COSTS_TTL_ATTRIBUTE = 'expiresAt';
+/** S13: the only services through which the roles may use DataKey (it encrypts their tables, docs and secrets). */
+export const DATA_KEY_VIA_SERVICES = ['dynamodb', 's3', 'secretsmanager'].map((s) => `${s}.ap-south-1.amazonaws.com`);
+/** OTP failure metric written by the api Lambda as EMF (mirrors src/lib/metrics.ts). */
+export const OTP_FAILURE_METRIC = { namespace: 'Wealthfire/Kyc', metricName: 'OtpFailures', dimension: 'Reason' } as const;
+/** Lockout alarm: this many `lockout-started` events in an hour alarm (context lockoutAlarmCount). */
+export const LOCKOUT_ALARM_DEFAULT = 5;
 /** Allowed values of the `purpose` encryption context on the field key. */
 export const FIELD_KEY_PURPOSES = ['pan', 'contact'] as const;
 /** Headers the browser may send to the API (S7). */
@@ -306,7 +321,8 @@ export class KycStack extends Stack {
     // Design key "userId#ts": partition userId, sort ts (ISO time) so a user's trail is one query.
     const audit = table('AuditTable', 'audit', 'userId', 'ts');
     // Design key "yyyy-mm#checkId": partition month (yyyy-mm), sort checkId.
-    const costs = table('CostsTable', 'costs', 'month', 'checkId');
+    // S14: TTL so the `sign#<day>` counters expire; cost rows never set expiresAt and stay.
+    const costs = table('CostsTable', 'costs', 'month', 'checkId', COSTS_TTL_ATTRIBUTE);
     // Seen partner webhook event ids (replay / duplicate guard); items expire via TTL after a day.
     const webhookEvents = table('WebhookEventsTable', 'webhook_events', 'eventId', undefined, 'expiresAt');
     // S2: consent records. Partition userId, sort `sk` = `<purpose>#<ts>` (a user's consents are one query).
@@ -408,7 +424,8 @@ export class KycStack extends Stack {
           allowedOrigins,
           allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET],
           // x-amz-tagging: the presigned PUT carries the state=pending tag (S11).
-          allowedHeaders: ['content-type', 'content-length', 'x-amz-tagging'],
+          // if-none-match: the presigned PUT refuses to overwrite an object (S#9).
+          allowedHeaders: ['content-type', 'content-length', 'x-amz-tagging', 'if-none-match'],
           maxAge: 300,
         },
         {
@@ -494,6 +511,8 @@ export class KycStack extends Stack {
     const env: Record<string, string> = {
       [ENV.stage]: stage,
       [ENV.allowedOrigins]: apiOrigins.join(','),
+      // S8: cookie-mode Origin check uses the app origins only (never the console).
+      [WAVE4_ENV.appOrigins]: allowedOrigins.join(','),
       [ENV.returnUrlPrefixes]: (isProd ? PROD_RETURN_URL_PREFIXES : DEV_RETURN_URL_PREFIXES).join(','),
       [TABLE_ENV.users]: users.tableName,
       [TABLE_ENV.sessions]: sessions.tableName,
@@ -568,6 +587,14 @@ export class KycStack extends Stack {
     ];
     const tableArns = (ts: dynamodb.Table[]) => ts.flatMap((t) => [t.tableArn, `${t.tableArn}/index/*`]);
     const dataKeyUse = ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey', 'kms:DescribeKey'];
+    // S13: DataKey only through DynamoDB / S3 / Secrets Manager in ap-south-1, never a direct KMS call.
+    const dataKeyStatement = () =>
+      new iam.PolicyStatement({
+        sid: 'DataKey',
+        actions: dataKeyUse,
+        resources: [dataKey.keyArn],
+        conditions: { StringEquals: { 'kms:ViaService': DATA_KEY_VIA_SERVICES } },
+      });
     // S10: the audit trail is append-only for both roles (TransactWriteItems Puts are PutItem in IAM).
     const auditAppendOnly = (fn: lambda.Function) => {
       fn.addToRolePolicy(
@@ -587,11 +614,23 @@ export class KycStack extends Stack {
       new iam.PolicyStatement({
         sid: 'TablesReadWrite',
         actions: tableRw,
-        resources: tableArns([users, sessions, otp, kycCases, costs, consents]),
+        resources: tableArns([users, sessions, otp, kycCases, costs]),
       }),
     );
     auditAppendOnly(apiFn);
-    apiFn.addToRolePolicy(new iam.PolicyStatement({ sid: 'DataKey', actions: dataKeyUse, resources: [dataKey.keyArn] }));
+    // S6: consent records are proof and kept after DELETE /kyc/data: append + read only, like audit.
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({ sid: 'ConsentsAppend', actions: ['dynamodb:PutItem', 'dynamodb:Query'], resources: tableArns([consents]) }),
+    );
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ConsentsNoChange',
+        effect: iam.Effect.DENY,
+        actions: ['dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem'],
+        resources: tableArns([consents]),
+      }),
+    );
+    apiFn.addToRolePolicy(dataKeyStatement());
 
     // S9: separate field key for PAN / contact envelopes. Only the api role may use it (named in the
     // key policy; IAM in the account cannot grant use), only with encryption context purpose=pan|contact.
@@ -715,13 +754,7 @@ export class KycStack extends Stack {
       new iam.PolicyStatement({ sid: 'TablesReadWrite', actions: tableRw, resources: tableArns([kycCases, webhookEvents]) }),
     );
     auditAppendOnly(webhookFn);
-    webhookFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        sid: 'DataKey',
-        actions: ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey', 'kms:DescribeKey'],
-        resources: [dataKey.keyArn],
-      }),
-    );
+    webhookFn.addToRolePolicy(dataKeyStatement());
     webhookFn.addToRolePolicy(
       new iam.PolicyStatement({
         sid: 'WebhookSecretRead',
@@ -870,13 +903,18 @@ export class KycStack extends Stack {
 
     // ---------- Monthly budget alarm (R7) ----------
     const budgetAmount = numberContext(this, 'budgetAmount', 10);
-    // S18: budgetEmail is required to deploy (infra/deploy.ts refuses without it); synth only warns.
+    // S18/S12: budgetEmail is required, so a direct `cdk deploy` cannot skip it either. Only
+    // `-c synthOnly=true` (npm run synth, tests) synthesizes without one, with a warning.
     const budgetEmail = stringContext(this, 'budgetEmail', EMAIL);
     const subscribers = budgetEmail ? [{ subscriptionType: 'EMAIL', address: budgetEmail }] : [];
     if (!budgetEmail) {
+      const synthOnly: unknown = this.node.tryGetContext(SYNTH_ONLY_CONTEXT);
+      if (synthOnly !== true && synthOnly !== 'true') {
+        throw new Error(`Context "budgetEmail" is required (or pass -c ${SYNTH_ONLY_CONTEXT}=true to synth without it)`);
+      }
       Annotations.of(this).addWarningV2(
         'wealthfire:budgetEmail',
-        'No budgetEmail context set: budget and cost alarms have no email. Deploy refuses without -c budgetEmail=<address>.',
+        'No budgetEmail context set (synthOnly): budget and alarms have no email. Deploy refuses without -c budgetEmail=<address>.',
       );
     }
 
@@ -905,6 +943,26 @@ export class KycStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     smsSpend.addAlarmAction(new cwActions.SnsAction(costTopic));
+
+    // S7: OTP lockouts started (api Lambda EMF, Reason=lockout-started). Many in an hour means someone
+    // is locking users out on purpose. Emails the same address as the cost alarms.
+    const lockoutCount = numberContext(this, 'lockoutAlarmCount', LOCKOUT_ALARM_DEFAULT);
+    const lockouts = new cloudwatch.Alarm(this, 'OtpLockoutAlarm', {
+      alarmName: `${prefix}-otp-lockouts`,
+      alarmDescription: `${lockoutCount} or more OTP lockouts started within an hour`,
+      metric: new cloudwatch.Metric({
+        namespace: OTP_FAILURE_METRIC.namespace,
+        metricName: OTP_FAILURE_METRIC.metricName,
+        dimensionsMap: { [OTP_FAILURE_METRIC.dimension]: 'lockout-started' },
+        statistic: 'Sum',
+        period: Duration.hours(1),
+      }),
+      threshold: lockoutCount,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    lockouts.addAlarmAction(new cwActions.SnsAction(costTopic));
     new budgets.CfnBudget(this, 'MonthlyBudget', {
       budget: {
         budgetName: `${prefix}-monthly`,

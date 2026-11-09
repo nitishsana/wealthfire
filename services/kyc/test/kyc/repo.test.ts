@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DynamoConsentRepo, DynamoCostRepo, DynamoIdempotencyRepo, IDEMPOTENCY_TTL_SEC, kycTablesFromEnv, memoryKycRepos, type KycCaseRecord,
+  consentSk, counterExpiresAt, DynamoConsentRepo, DynamoCostRepo, DynamoIdempotencyRepo, IDEMPOTENCY_TTL_SEC, kycTablesFromEnv,
+  memoryKycRepos, parseConsentSk, type KycCaseRecord,
 } from '../../src/kyc/repo';
 import { DynamoCaseStore } from '../../src/store/dynamo';
 
@@ -187,12 +188,21 @@ describe('DynamoDB KYC repos', () => {
     const r = new DynamoCostRepo(doc, 'costs');
     expect(await r.reserve('u1', '2026-11-06', 5)).toBe(true);
     expect(doc.sent[0]!.input).toMatchObject({
-      Key: { month: 'cap#2026-11-06', checkId: 'u1' }, UpdateExpression: 'ADD #n :one', ExpressionAttributeValues: { ':max': 5 },
+      Key: { month: 'cap#2026-11-06', checkId: 'u1' }, ExpressionAttributeValues: { ':max': 5 },
     });
     expect(await r.reserveSignings('u1', '2026-11-06', 3, 9)).toBe(true);
-    expect(doc.sent[1]!.input).toMatchObject({
-      Key: { month: 'sign#2026-11-06', checkId: 'u1' }, UpdateExpression: 'ADD #n :n', ExpressionAttributeValues: { ':n': 3, ':room': 6 },
+    // S#14: both counters carry the table TTL attribute expiresAt: start of the IST day + 2 days
+    const exp = Date.parse('2026-11-06T00:00:00.000+05:30') / 1000 + 2 * 86_400;
+    expect(doc.sent[0]!.input).toMatchObject({
+      UpdateExpression: 'ADD #n :one SET #e = if_not_exists(#e, :exp)', ExpressionAttributeNames: { '#e': 'expiresAt' },
+      ExpressionAttributeValues: { ':exp': exp },
     });
+    expect(doc.sent[1]!.input).toMatchObject({
+      Key: { month: 'sign#2026-11-06', checkId: 'u1' }, UpdateExpression: 'ADD #n :n SET #e = if_not_exists(#e, :exp)',
+      ExpressionAttributeNames: { '#n': 'count', '#e': 'expiresAt' }, ExpressionAttributeValues: { ':n': 3, ':room': 6, ':exp': exp },
+    });
+    expect(counterExpiresAt('2026-11-06')).toBe(exp);
+    expect(() => counterExpiresAt('nope')).toThrow();
     expect(await r.reserveSignings('u1', '2026-11-06', 10, 9)).toBe(false);
     doc.fail = true;
     expect(await r.reserve('u1', '2026-11-06', 5)).toBe(false);
@@ -214,5 +224,69 @@ describe('DynamoDB KYC repos', () => {
     });
     doc.items = [];
     expect(await r.latest('u1', 'pan-check')).toBeNull();
+  });
+});
+
+describe('wave 4b store changes', () => {
+  it('S#11: consent sort key is <purpose>#<iso>#<6-digit seq>; parse reads it back; an older nonce key is seq -1', () => {
+    expect(consentSk('esign', '2026-11-09T00:00:00.000Z', 7)).toBe('esign#2026-11-09T00:00:00.000Z#000007');
+    expect(parseConsentSk('esign#2026-11-09T00:00:00.000Z#000007')).toEqual({ at: '2026-11-09T00:00:00.000Z', seq: 7 });
+    expect(parseConsentSk('esign#2026-11-09T00:00:00.000Z#3f2a-uuid')).toEqual({ at: '2026-11-09T00:00:00.000Z', seq: -1 });
+    // lexical order of the key = time, then seq
+    const keys = [consentSk('esign', 'T1', 10), consentSk('esign', 'T1', 2), consentSk('esign', 'T0', 99)];
+    expect([...keys].sort()).toEqual([consentSk('esign', 'T0', 99), consentSk('esign', 'T1', 2), consentSk('esign', 'T1', 10)]);
+  });
+
+  it('S#11: a consent row with a taken sort key is refused (memory and DynamoDB)', async () => {
+    const r = memoryKycRepos();
+    const row = { userId: 'u', sk: 'esign#T#000000', purpose: 'esign' as const, action: 'given' as const, at: 'T' };
+    expect(await r.consents.record(row)).toBe(true);
+    expect(await r.consents.record(row)).toBe(false);
+    expect(await r.consents.record({ ...row, userId: 'v' })).toBe(true);
+    const doc = new FakeDoc();
+    const d = new DynamoConsentRepo(doc, 'consents');
+    expect(await d.record(row)).toBe(true);
+    doc.fail = true;
+    expect(await d.record(row)).toBe(false);
+    // append-only: only PutItem and Query reach the consents table
+    expect(new Set(doc.sent.map((s) => s.name))).toEqual(new Set(['PutCommand']));
+  });
+
+  it('S#5/F4: memory removeArchived deletes only this user\u2019s arch# items', async () => {
+    const r = memoryKycRepos();
+    const row = { userId: 'u1', ts: 't#1', actor: 'system' as const, action: 'kyc.case-archived' as const, before: null, after: null };
+    await r.cases.save(rec(), 0);
+    await r.cases.archive('u1', 1, 'A1', row);
+    await r.cases.save(rec(), 0);
+    await r.cases.archive('u1', 1, 'A2', { ...row, ts: 't#2' });
+    await r.cases.save(rec({ userId: 'u10' }), 0);
+    await r.cases.archive('u10', 1, 'A3', { ...row, userId: 'u10', ts: 't#3' });
+    expect(await r.cases.removeArchived('u1')).toBe(2);
+    expect([...r.cases.archived.keys()]).toEqual(['arch#u10#A3']);
+    expect(await r.cases.removeArchived('u1')).toBe(0);
+  });
+
+  it('S#5/F4: DynamoDB archive keeps an arch#<userId> index; removeArchived deletes each archive and the index', async () => {
+    const doc = new FakeDoc();
+    const r = new DynamoCaseStore(doc, 'cases', 'audit');
+    doc.item = rec({ version: 1 }) as unknown as Record<string, unknown>;
+    const row = { userId: 'u1', ts: 't', actor: 'system' as const, action: 'kyc.case-archived' as const, before: null, after: null };
+    expect(await r.archive('u1', 1, 'A1', row)).toBe(true);
+    const tx = doc.sent.at(-1)!.input.TransactItems;
+    expect(tx[3].Update).toMatchObject({
+      TableName: 'cases', Key: { userId: 'arch#u1' }, UpdateExpression: 'ADD #a :a', ExpressionAttributeNames: { '#a': 'archivedAts' },
+    });
+    expect([...tx[3].Update.ExpressionAttributeValues[':a']]).toEqual(['A1']);
+    doc.sent = [];
+    doc.item = { userId: 'arch#u1', archivedAts: new Set(['A1', 'A2']) };
+    expect(await r.removeArchived('u1')).toBe(2);
+    expect(doc.sent.map((s) => [s.name, s.input.Key.userId])).toEqual([
+      ['GetCommand', 'arch#u1'], ['DeleteCommand', 'arch#u1#A1'], ['DeleteCommand', 'arch#u1#A2'], ['DeleteCommand', 'arch#u1'],
+    ]);
+    doc.sent = [];
+    doc.item = undefined;
+    expect(await r.removeArchived('u1')).toBe(0);
+    expect(doc.sent.map((s) => s.name)).toEqual(['GetCommand']);
+    expect(await r.removeArchived('arch#u1')).toBe(0); // never a non-case key
   });
 });
