@@ -112,7 +112,8 @@ export interface Snapshot {
 
 export type OnboardingStep = 'signin' | 'otp' | 'identity' | 'aadhaar-otp' | 'documents' | 'check' | 'done';
 export type ContactKind = 'email' | 'mobile';
-export type OtpProviderId = 'demo' | 'digilocker' | 'digio';
+/** 'http' = contact OTP through the Wealthfire KYC server (HttpOtpProvider). */
+export type OtpProviderId = 'demo' | 'digilocker' | 'digio' | 'http';
 
 export type KycField = 'pan' | 'aadhaar';
 export type KycMatch = 'matched' | 'review';
@@ -161,7 +162,8 @@ export interface OnboardingState {
   step: OnboardingStep;
   /** value: lower-cased email or 10 digits */
   contact: { kind: ContactKind; value: string; verifiedAt: string | null } | null;
-  identity: { firstName: string; lastName: string; pan: string } | null;
+  /** dob: ISO yyyy-mm-dd, 18+. Missing for users who onboarded before DOB was asked (see needsDob). */
+  identity: { firstName: string; lastName: string; pan: string; dob?: string } | null;
   /** Only the last 4 digits are ever stored. */
   aadhaar: { last4: string; verifiedAt: string; provider: OtpProviderId } | null;
   completedAt: string | null;

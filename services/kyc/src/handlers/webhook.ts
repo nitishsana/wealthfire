@@ -1,8 +1,9 @@
-// Lambda entry for POST /webhooks/partner (API Gateway HTTP API, payload v2). Wiring only: the
-// logic lives in src/webhook/handler.ts. Env: TABLE_KYC_CASES, TABLE_AUDIT, WEBHOOK_EVENTS_TABLE,
+// Lambda entry for POST /webhooks/partner (API Gateway REST proxy v1 as deployed by infra/stack.ts,
+// or HTTP API v2: the fields used here have the same names). Wiring only: the logic lives in
+// src/webhook/handler.ts. Env (src/lib/env.ts): TABLE_KYC_CASES, TABLE_AUDIT, TABLE_WEBHOOK_EVENTS,
 // WEBHOOK_SECRET_ARN, optional KYC_* thresholds (src/config.ts).
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
+import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { loadConfig } from '../config';
 import { systemClock } from '../lib/clock';
 import { createDocClient } from '../lib/repo';
@@ -46,7 +47,7 @@ async function buildDeps(): Promise<WebhookDeps> {
   };
 }
 
-export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
+export async function handler(event: APIGatewayProxyEvent | APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
   let deps: WebhookDeps;
   try {
     depsPromise ??= buildDeps();

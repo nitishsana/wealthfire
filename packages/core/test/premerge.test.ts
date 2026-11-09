@@ -12,7 +12,7 @@ const file = (kind: DocFile['kind']): DocFile => ({ kind, name: `${kind}.jpg`, m
 function toDocuments(): OnboardingState {
   let s = onboardingReducer(emptyOnboarding(), { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } });
   s = onboardingReducer(s, { type: 'contact-verified', at: iso(T0) });
-  s = onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
+  s = onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' });
   return onboardingReducer(s, { type: 'aadhaar-verified', last4: '2346', at: iso(T0 + 5_000), provider: 'demo' });
 }
 const toCheck = () => onboardingReducer(toDocuments(), { type: 'documents-ready', at: iso(T0 + 6_000), reader: 'ondevice' });

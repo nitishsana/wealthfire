@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { secretFrom } from '../../src/handlers/webhook';
-import { DynamoSeenEventStore, DynamoWebhookAuditLog, DynamoWebhookCaseStore, webhookTablesFromEnv } from '../../src/webhook/dynamo';
+import { DynamoAuditStore, DynamoCaseStore } from '../../src/store/dynamo';
+import { webhookCaseStore } from '../../src/store/views';
+import { DynamoSeenEventStore, webhookTablesFromEnv } from '../../src/webhook/dynamo';
 import { HmacWebhookVerifier, signBody } from '../../src/webhook/hmac';
 import { MemorySeenEventStore } from '../../src/webhook/memory';
 import type { DocClient } from '../../src/lib/repo';
@@ -91,21 +93,27 @@ describe('DynamoSeenEventStore', () => {
   });
 });
 
-describe('DynamoWebhookCaseStore', () => {
-  it('get splits the item into case and evidence (null when missing)', async () => {
+describe('shared DynamoCaseStore via webhookCaseStore', () => {
+  const store = (doc: DocClient) => webhookCaseStore(new DynamoCaseStore(doc, 'cases', 'audit'));
+
+  it('get splits the item into case and evidence (null when missing); PAN fields stay out', async () => {
     const ev = baseEvidence();
-    const f = fakeDoc(() => ({ Item: { ...baseCase(), evidence: ev, otherAttr: 'x' } }));
-    const got = await new DynamoWebhookCaseStore(f.doc, 'cases', 'audit').get('user-1');
+    const f = fakeDoc(() => ({ Item: { ...baseCase(), evidence: ev, panEnc: 'l1.x', panHash: 'h', next: 'aadhaar' } }));
+    const got = await store(f.doc).get('user-1');
     expect(got!.kycCase).toEqual(baseCase());
     expect(got!.evidence).toEqual(ev);
     expect(f.calls[0]!.input).toMatchObject({ TableName: 'cases', Key: { userId: 'user-1' }, ConsistentRead: true });
     const noEv = fakeDoc(() => ({ Item: { ...baseCase() } }));
-    expect((await new DynamoWebhookCaseStore(noEv.doc, 'cases', 'audit').get('user-1'))!.evidence).toBeNull();
+    expect((await store(noEv.doc).get('user-1'))!.evidence).toBeNull();
     const none = fakeDoc(() => ({}));
-    expect(await new DynamoWebhookCaseStore(none.doc, 'cases', 'audit').get('user-1')).toBeNull();
+    expect(await store(none.doc).get('user-1')).toBeNull();
+    // pointer / idempotency keys are never read as cases
+    const ptr = fakeDoc(() => ({ Item: { userId: 'pan#x', ownerId: 'u' } }));
+    expect(await store(ptr.doc).get('pan#x')).toBeNull();
+    expect(ptr.calls).toHaveLength(0);
   });
 
-  it('save is one transaction: version-checked update + audit put; conflict on condition failure', async () => {
+  it('save is one transaction: version-checked update (incl. next) + audit put; conflict on condition failure', async () => {
     const before = baseCase();
     const after = { ...before, status: 'verified' as const, version: 2 };
     const audit = {
@@ -113,31 +121,38 @@ describe('DynamoWebhookCaseStore', () => {
       eventId: 'e1', outcome: 'applied' as const, before: null, after: null,
     };
     const f = fakeDoc();
-    const store = new DynamoWebhookCaseStore(f.doc, 'cases', 'audit');
-    expect(await store.save({ before, after, evidence: baseEvidence(), audit })).toBe('ok');
+    expect(await store(f.doc).save({ before, after, evidence: baseEvidence(), next: 'kra-upload', unclear: [], audit })).toBe('ok');
     const tx = f.calls[0]!;
     expect(tx.constructor.name).toBe('TransactWriteCommand');
     const [upd, put] = tx.input.TransactItems;
-    expect(upd.Update.ConditionExpression).toBe('#version = :expected');
-    expect(upd.Update.ExpressionAttributeValues).toMatchObject({ ':expected': 1, ':next': 2, ':status': 'verified' });
-    expect(upd.Update.UpdateExpression).not.toContain('masks');
-    expect(put.Put).toMatchObject({ TableName: 'audit', Item: audit });
+    expect(upd.Update.ConditionExpression).toBe('attribute_exists(userId) AND #version = :expected');
+    expect(upd.Update.ExpressionAttributeValues).toMatchObject({ ':expected': 1, ':next': 2 });
+    const names = Object.values(upd.Update.ExpressionAttributeNames);
+    expect(names).toEqual(expect.arrayContaining(['status', 'evidence', 'partnerRefs', 'next', 'version']));
+    expect(names).not.toContain('masks');
+    expect(names).not.toContain('panEnc');
+    expect(upd.Update.UpdateExpression).toMatch(/ REMOVE #r0$/); // unclear dropped
+    expect(Object.values(upd.Update.ExpressionAttributeValues)).toContain('verified');
+    expect(put.Put).toMatchObject({ TableName: 'audit', Item: audit, ConditionExpression: 'attribute_not_exists(ts)' });
     const tc = fakeDoc(() => Object.assign(new Error('tx'), { name: 'TransactionCanceledException' }));
-    expect(await new DynamoWebhookCaseStore(tc.doc, 'cases', 'audit').save({ before, after, evidence: baseEvidence(), audit })).toBe('conflict');
+    expect(await store(tc.doc).save({ before, after, evidence: baseEvidence(), audit })).toBe('conflict');
   });
 
-  it('audit log puts the row', async () => {
+  it('audit log puts the row conditionally; a repeat of the same row is a no-op', async () => {
     const f = fakeDoc();
     const row = { userId: 'u', ts: 't', actor: 'system' as const, action: 'webhook.esign' as const, eventId: 'e', outcome: 'ignored-terminal' as const, before: null, after: null };
-    await new DynamoWebhookAuditLog(f.doc, 'audit').write(row);
-    expect(f.calls[0]!.input).toEqual({ TableName: 'audit', Item: row });
+    await new DynamoAuditStore(f.doc, 'audit').write(row);
+    expect(f.calls[0]!.input).toEqual({ TableName: 'audit', Item: row, ConditionExpression: 'attribute_not_exists(ts)' });
+    await expect(new DynamoAuditStore(fakeDoc(condFail).doc, 'audit').write(row)).resolves.toBeUndefined();
+    await expect(new DynamoAuditStore(fakeDoc(() => new Error('throttled')).doc, 'audit').write(row)).rejects.toThrow('throttled');
   });
 });
 
 describe('env and secret', () => {
-  it('reads table names from env and fails on a missing one', () => {
-    expect(webhookTablesFromEnv({ TABLE_KYC_CASES: 'c', TABLE_AUDIT: 'a', WEBHOOK_EVENTS_TABLE: 'e' })).toEqual({ cases: 'c', audit: 'a', events: 'e' });
-    expect(() => webhookTablesFromEnv({ TABLE_KYC_CASES: 'c', TABLE_AUDIT: 'a' })).toThrow('WEBHOOK_EVENTS_TABLE');
+  it('reads table names from env (shared TABLE_* scheme) and fails on a missing one', () => {
+    expect(webhookTablesFromEnv({ TABLE_KYC_CASES: 'c', TABLE_AUDIT: 'a', TABLE_WEBHOOK_EVENTS: 'e' })).toEqual({ cases: 'c', audit: 'a', events: 'e' });
+    expect(() => webhookTablesFromEnv({ TABLE_KYC_CASES: 'c', TABLE_AUDIT: 'a' })).toThrow('TABLE_WEBHOOK_EVENTS');
+    expect(() => webhookTablesFromEnv({ TABLE_KYC_CASES: 'c', TABLE_AUDIT: 'a', WEBHOOK_EVENTS_TABLE: 'e' })).toThrow('TABLE_WEBHOOK_EVENTS');
   });
   it('secretFrom accepts a plain string or {"secret"}', () => {
     expect(secretFrom('  abc  ')).toBe('abc');

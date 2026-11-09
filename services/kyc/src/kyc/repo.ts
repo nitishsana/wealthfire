@@ -1,93 +1,36 @@
-// Storage for KYC cases, idempotency records, audit rows and paid-check costs. In-memory
-// implementations for tests, DynamoDB for Lambda.
+// Storage the KYC routes use. Cases and audit rows live in the ONE shared store (src/store, also
+// used by the webhook and the review routes); this file adds idempotency records and paid-check
+// costs. In-memory implementations for tests, DynamoDB for Lambda.
 //
-// DynamoDB layout (tables from the CDK stack):
-//   kyc_cases pk userId        case items (KycCaseRecord); `idem#<hash>` items hold idempotency
-//                               records (no `status` attribute, so they stay out of the byStatus GSI)
-//   audit     pk userId, sk ts  one row per system decision (ts = ISO time + '#' + nonce)
+// DynamoDB layout (tables from the CDK stack; case / audit layout in src/store/types.ts):
+//   kyc_cases pk userId        `idem#<hash>` items hold idempotency records (no `status`
+//                               attribute, so they stay out of the byStatus GSI)
 //   costs     pk month, sk checkId
 //                               one row per paid check (month = yyyy-mm); `cap#<yyyy-mm-dd>` /
 //                               `<userId>` rows hold the per-user daily paid-check counter
-//
-// A case item never holds a full Aadhaar number, and the PAN only as Encryptor output (`panEnc`)
-// plus an HMAC lookup key (`panHash`).
-import { DeleteCommand, GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { requireEnv, TABLE_ENV, type Env } from '../lib/env';
 import type { DocClient } from '../lib/repo';
 import type { PaidCheck } from '../partner/types';
-import type { CheckName, KycCase, KycPath, KycStatus, NextStep, ReasonCode } from '../types';
+import { DynamoAuditStore, DynamoCaseStore, isConditionFailure } from '../store/dynamo';
+import { MemoryAuditStore, MemoryCaseStore } from '../store/memory';
+import { IDEM_PREFIX, type AuditRow, type AuditStore, type CaseEvidence, type CaseStore } from '../store/types';
 
-export type Timeout = 'timeout';
+export type { CaseSnapshot, KycCaseRecord, Timeout } from '../store/types';
 
-/**
- * Everything decide() needs except the current status/reason (the `evidence` attribute; same
- * shape as the webhook's CaseEvidence, which may add its own bookkeeping fields). Masks only.
- */
-export interface KycEvidence {
-  /** device onboarding ended in a hand check */
-  deviceHandCheck: boolean;
-  /** typed at onboarding (names and DOB, used for the KRA name/DOB match) */
-  typed: { firstName: string; lastName: string; dob: string };
-  panIndividual: boolean;
-  /** last 4 of the Aadhaar verified by the device Aadhaar OTP */
-  otpAadhaarLast4: string;
-  kra?: { status: 'validated' | 'registered' | 'on-hold' | 'not-found'; name?: string; dob?: string } | Timeout;
-  aadhaar?: { verified: true; last4: string } | Timeout;
-  pan?: { valid: boolean; nameMatch: boolean; aadhaarLinked: boolean } | Timeout;
-  face?: ({ match: number; live: boolean } | Timeout)[];
-  esign?: 'done' | 'pending' | Timeout;
-}
-
-/** One `kyc_cases` item: the shared KycCase fields plus what the KYC routes need. */
-export interface KycCaseRecord extends KycCase {
-  createdAt: string;
-  /** Encryptor output of the normalised PAN (context {purpose:'pan', userId}) */
-  panEnc: string;
-  /** hmacLookup(mac, 'pan', PAN) */
-  panHash: string;
-  evidence: KycEvidence;
-  /** last decided next step (re-derived from evidence on read, since webhooks may not update it) */
-  next: NextStep;
-  unclear?: CheckName[];
-}
-
-export interface KycCaseRepo {
-  get(userId: string): Promise<KycCaseRecord | null>;
-  /**
-   * Writes `rec` (version must be expectedVersion + 1; expectedVersion 0 = must not exist) and,
-   * in the same transaction, the audit row if given. False on a concurrent change.
-   */
-  save(rec: KycCaseRecord, expectedVersion: number, audit?: KycAuditRow): Promise<boolean>;
-}
-
-export interface CaseSnapshot {
-  status: KycStatus;
-  path: KycPath | null;
-  reason: ReasonCode | null;
-  version: number;
-}
-
-/** One `audit` item. Never holds PAN, Aadhaar, tokens or document data. */
-export interface KycAuditRow {
-  userId: string;
-  /** ISO time + '#' + nonce */
-  ts: string;
-  actor: 'system' | `staff:${string}`;
-  action: string;
-  before: CaseSnapshot | null;
-  after: CaseSnapshot | null;
-  ip?: string;
-}
-
-export interface KycAuditRepo {
-  write(row: KycAuditRow): Promise<void>;
-  listForUser(userId: string): Promise<KycAuditRow[]>;
-}
+/** The case evidence (one shape for the KYC routes and the webhook). */
+export type KycEvidence = CaseEvidence;
+/** One audit row (shared shape). */
+export type KycAuditRow = AuditRow;
+/** The part of the shared case store the KYC routes use. */
+export type KycCaseRepo = Pick<CaseStore, 'get' | 'save' | 'claimPan'>;
+export type KycAuditRepo = AuditStore;
 
 /** Stored result of a request made with an Idempotency-Key. */
 export interface IdempotencyRecord {
   /** sha256 of userId + route + key */
   id: string;
-  /** sha256 of the request body, so a reused key with a different body is refused */
+  /** keyed hash of the request body, so a reused key with a different body is refused */
   requestHash: string;
   state: 'pending' | 'done';
   response?: { status: number; body: Record<string, unknown> };
@@ -116,7 +59,7 @@ export interface CostRow {
 export interface CostRepo {
   /** Atomically counts one paid check for user on day (yyyy-mm-dd) while below max. False when the cap is reached. */
   reserve(userId: string, day: string, max: number): Promise<boolean>;
-  /** User-triggered paid checks counted today. */
+  /** Paid checks counted today. */
   used(userId: string, day: string): Promise<number>;
   record(row: CostRow): Promise<void>;
 }
@@ -124,45 +67,6 @@ export interface CostRepo {
 const clone = <T>(v: T): T => structuredClone(v);
 
 // ---------- In-memory ----------
-
-export class MemoryKycCaseRepo implements KycCaseRepo {
-  private readonly items = new Map<string, KycCaseRecord>();
-  constructor(private readonly audit?: MemoryKycAuditRepo) {}
-
-  async get(userId: string): Promise<KycCaseRecord | null> {
-    const c = this.items.get(userId);
-    return c ? clone(c) : null;
-  }
-
-  async save(rec: KycCaseRecord, expectedVersion: number, audit?: KycAuditRow): Promise<boolean> {
-    const cur = this.items.get(rec.userId)?.version ?? 0;
-    if (cur !== expectedVersion || rec.version !== expectedVersion + 1) return false;
-    this.items.set(rec.userId, clone(rec));
-    if (audit) await this.audit?.write(audit);
-    return true;
-  }
-
-  /** @internal test hook: raw stored items */
-  all(): KycCaseRecord[] {
-    return [...this.items.values()].map(clone);
-  }
-
-  /** @internal test hook: simulate another writer (e.g. staff) changing the case */
-  async put(rec: KycCaseRecord): Promise<void> {
-    this.items.set(rec.userId, clone(rec));
-  }
-}
-
-export class MemoryKycAuditRepo implements KycAuditRepo {
-  readonly rows: KycAuditRow[] = [];
-  async write(row: KycAuditRow): Promise<void> {
-    if (this.rows.some((r) => r.userId === row.userId && r.ts === row.ts)) throw new Error('duplicate audit row');
-    this.rows.push(clone(row));
-  }
-  async listForUser(userId: string): Promise<KycAuditRow[]> {
-    return this.rows.filter((r) => r.userId === userId).map(clone);
-  }
-}
 
 export class MemoryIdempotencyRepo implements IdempotencyRepo {
   readonly items = new Map<string, IdempotencyRecord>();
@@ -213,10 +117,10 @@ export interface KycRepos {
 }
 
 export function memoryKycRepos(): {
-  cases: MemoryKycCaseRepo; audit: MemoryKycAuditRepo; idempotency: MemoryIdempotencyRepo; costs: MemoryCostRepo;
+  cases: MemoryCaseStore; audit: MemoryAuditStore; idempotency: MemoryIdempotencyRepo; costs: MemoryCostRepo;
 } {
-  const audit = new MemoryKycAuditRepo();
-  return { cases: new MemoryKycCaseRepo(audit), audit, idempotency: new MemoryIdempotencyRepo(), costs: new MemoryCostRepo() };
+  const audit = new MemoryAuditStore();
+  return { cases: new MemoryCaseStore(audit), audit, idempotency: new MemoryIdempotencyRepo(), costs: new MemoryCostRepo() };
 }
 
 // ---------- DynamoDB ----------
@@ -227,78 +131,16 @@ export interface KycTableNames {
   costs: string;
 }
 
-/** Table names from env. Accepts the CDK stack's TABLE_* names and the KYC_CASES_TABLE style. */
-export function kycTablesFromEnv(env: Record<string, string | undefined> = process.env): KycTableNames {
-  const get = (...keys: string[]): string => {
-    for (const k of keys) {
-      const v = env[k];
-      if (v) return v;
-    }
-    throw new Error(`Missing env ${keys.join(' / ')}`);
-  };
+/** Table names from env (TABLE_KYC_CASES / TABLE_AUDIT / TABLE_COSTS, set by the CDK stack). */
+export function kycTablesFromEnv(env: Env = process.env): KycTableNames {
   return {
-    cases: get('KYC_CASES_TABLE', 'TABLE_KYC_CASES'),
-    audit: get('AUDIT_TABLE', 'TABLE_AUDIT'),
-    costs: get('COSTS_TABLE', 'TABLE_COSTS'),
+    cases: requireEnv(env, TABLE_ENV.kycCases),
+    audit: requireEnv(env, TABLE_ENV.audit),
+    costs: requireEnv(env, TABLE_ENV.costs),
   };
 }
 
-function isConditionFailure(e: unknown): boolean {
-  const name = (e as { name?: string } | null)?.name;
-  return name === 'ConditionalCheckFailedException' || name === 'TransactionCanceledException';
-}
-
-const IDEM_PREFIX = 'idem#';
 const CAP_PREFIX = 'cap#';
-
-export class DynamoKycCaseRepo implements KycCaseRepo {
-  constructor(private readonly doc: DocClient, private readonly table: string, private readonly auditTable: string) {}
-
-  async get(userId: string): Promise<KycCaseRecord | null> {
-    if (userId.startsWith(IDEM_PREFIX)) return null;
-    const out = await this.doc.send(new GetCommand({ TableName: this.table, Key: { userId }, ConsistentRead: true }));
-    return (out.Item as KycCaseRecord | undefined) ?? null;
-  }
-
-  async save(rec: KycCaseRecord, expectedVersion: number, audit?: KycAuditRow): Promise<boolean> {
-    if (rec.version !== expectedVersion + 1) return false;
-    const put = {
-      TableName: this.table,
-      Item: { ...rec },
-      ...(expectedVersion === 0
-        ? { ConditionExpression: 'attribute_not_exists(userId)' }
-        : { ConditionExpression: 'version = :v', ExpressionAttributeValues: { ':v': expectedVersion } }),
-    };
-    try {
-      if (audit) {
-        await this.doc.send(new TransactWriteCommand({
-          TransactItems: [
-            { Put: put },
-            { Put: { TableName: this.auditTable, Item: { ...audit }, ConditionExpression: 'attribute_not_exists(ts)' } },
-          ],
-        }));
-      } else {
-        await this.doc.send(new PutCommand(put));
-      }
-      return true;
-    } catch (e) {
-      if (isConditionFailure(e)) return false;
-      throw e;
-    }
-  }
-}
-
-export class DynamoKycAuditRepo implements KycAuditRepo {
-  constructor(private readonly doc: DocClient, private readonly table: string) {}
-
-  async write(row: KycAuditRow): Promise<void> {
-    await this.doc.send(new PutCommand({ TableName: this.table, Item: { ...row }, ConditionExpression: 'attribute_not_exists(ts)' }));
-  }
-
-  async listForUser(_userId: string): Promise<KycAuditRow[]> {
-    throw new Error('not used by the KYC routes; the review console reads the audit trail');
-  }
-}
 
 export class DynamoIdempotencyRepo implements IdempotencyRepo {
   constructor(private readonly doc: DocClient, private readonly table: string) {}
@@ -382,10 +224,13 @@ export class DynamoCostRepo implements CostRepo {
   }
 }
 
-export function dynamoKycRepos(tables: KycTableNames, doc: DocClient): KycRepos {
+/** KYC repos over DynamoDB; `cases` / `audit` are the shared store. */
+export function dynamoKycRepos(tables: KycTableNames, doc: DocClient): {
+  cases: DynamoCaseStore; audit: DynamoAuditStore; idempotency: DynamoIdempotencyRepo; costs: DynamoCostRepo;
+} {
   return {
-    cases: new DynamoKycCaseRepo(doc, tables.cases, tables.audit),
-    audit: new DynamoKycAuditRepo(doc, tables.audit),
+    cases: new DynamoCaseStore(doc, tables.cases, tables.audit),
+    audit: new DynamoAuditStore(doc, tables.audit),
     idempotency: new DynamoIdempotencyRepo(doc, tables.cases),
     costs: new DynamoCostRepo(doc, tables.costs),
   };

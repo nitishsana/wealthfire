@@ -142,7 +142,7 @@ describe('OTP rules', () => {
 function toAadhaarOtp(): OnboardingState {
   let s = onboardingReducer(emptyOnboarding(), { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '9876543210' } });
   s = onboardingReducer(s, { type: 'contact-verified', at: iso(T0) });
-  return onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
+  return onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' });
 }
 
 /** Aadhaar OTP passed: state is on 'documents'. */
@@ -154,7 +154,7 @@ function runHappyPath(): OnboardingState {
   const events: OnboardingEvent[] = [
     { type: 'otp-sent', channel: 'contact', at: iso(T0), contact: { kind: 'mobile', value: '+91 98765 43210' } },
     { type: 'contact-verified', at: iso(T0 + 10_000) },
-    { type: 'identity-saved', firstName: ' Nitish ', lastName: 'Sana', pan: 'abcps1234f' },
+    { type: 'identity-saved', firstName: ' Nitish ', lastName: 'Sana', pan: 'abcps1234f', dob: '1990-01-15' },
     { type: 'otp-sent', channel: 'aadhaar', at: iso(T0 + 20_000) },
     { type: 'aadhaar-verified', last4: '2346', at: iso(T0 + 30_000), provider: 'demo' },
     { type: 'documents-ready', at: iso(T0 + 35_000), reader: 'ondevice' },
@@ -187,7 +187,7 @@ describe('reducer', () => {
 
     const done = runHappyPath();
     expect(done.step).toBe('done');
-    expect(done.identity).toEqual({ firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
+    expect(done.identity).toEqual({ firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' });
     expect(done.contact?.value).toBe('9876543210');
     expect(done.aadhaar).toEqual({ last4: '2346', verifiedAt: iso(T0 + 30_000), provider: 'demo' });
     expect(done.completedAt).toBe(iso(T0 + 40_000));
@@ -202,7 +202,7 @@ describe('reducer', () => {
     expect(s.contact).toBeNull();
     s = onboardingReducer(s, { type: 'otp-sent', channel: 'contact', at: iso(T0 + 60_000), contact: { kind: 'mobile', value: '9876543210' } });
     s = onboardingReducer(s, { type: 'contact-verified', at: iso(T0 + 70_000) });
-    s = onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
+    s = onboardingReducer(s, { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' });
     expect(s.step).toBe('aadhaar-otp');
     s = onboardingReducer(s, { type: 'back-to-identity' });
     expect(s.step).toBe('identity');
@@ -214,7 +214,7 @@ describe('reducer', () => {
     const ignored: OnboardingEvent[] = [
       { type: 'contact-verified', at: iso(T0) },
       { type: 'change-contact' },
-      { type: 'identity-saved', firstName: 'A', lastName: 'B', pan: 'ABCPB1234F' },
+      { type: 'identity-saved', firstName: 'A', lastName: 'B', pan: 'ABCPB1234F', dob: '1990-01-15' },
       { type: 'back-to-identity' },
       { type: 'aadhaar-verified', last4: '2346', at: iso(T0), provider: 'demo' },
       { type: 'aadhaar-locked', until: iso(T0) },
@@ -228,8 +228,8 @@ describe('reducer', () => {
     s = onboardingReducer(s, { type: 'contact-verified', at: iso(T0) });
     // invalid identity is ignored
     for (const e of [
-      { type: 'identity-saved', firstName: '', lastName: 'Sana', pan: 'ABCPS1234F' },
-      { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCCS1234F' },
+      { type: 'identity-saved', firstName: '', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' },
+      { type: 'identity-saved', firstName: 'Nitish', lastName: 'Sana', pan: 'ABCCS1234F', dob: '1990-01-15' },
     ] as OnboardingEvent[]) expect(onboardingReducer(s, e)).toBe(s);
   });
 
@@ -316,8 +316,8 @@ describe('store', () => {
       expect(s.step).toBe('signin');
     }
     expect(load({ contact: { kind: 'email', value: ' A@B.com', verifiedAt: iso(T0) } }).contact?.value).toBe('a@b.com');
-    expect(load({ identity: { firstName: ' Nitish', lastName: 'Sana', pan: 'abcps1234f' } }).identity)
-      .toEqual({ firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F' });
+    expect(load({ identity: { firstName: ' Nitish', lastName: 'Sana', pan: 'abcps1234f', dob: '15/01/1990' } }).identity)
+      .toEqual({ firstName: 'Nitish', lastName: 'Sana', pan: 'ABCPS1234F', dob: '1990-01-15' });
   });
 
   it('drops unknown keys and steps with missing data', () => {

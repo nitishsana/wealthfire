@@ -19,3 +19,4 @@ export * from './otp';
 export * from './docreader';
 export * from './cardtext';
 export * from './kyc';
+export * from './server';

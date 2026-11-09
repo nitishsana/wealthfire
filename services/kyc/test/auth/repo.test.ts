@@ -73,7 +73,9 @@ describe('MemoryOtpRepo', () => {
 
 describe('tableNamesFromEnv', () => {
   it('reads names and fails on missing', () => {
-    expect(tableNamesFromEnv({ USERS_TABLE: 'u', SESSIONS_TABLE: 's', OTP_TABLE: 'o' })).toEqual({ users: 'u', sessions: 's', otp: 'o' });
-    expect(() => tableNamesFromEnv({ USERS_TABLE: 'u' })).toThrow(/SESSIONS_TABLE/);
+    expect(tableNamesFromEnv({ TABLE_USERS: 'u', TABLE_SESSIONS: 's', TABLE_OTP: 'o' })).toEqual({ users: 'u', sessions: 's', otp: 'o' });
+    expect(() => tableNamesFromEnv({ TABLE_USERS: 'u' })).toThrow(/TABLE_SESSIONS/);
+    // the old *_TABLE names are gone (one naming scheme, matching infra/stack.ts)
+    expect(() => tableNamesFromEnv({ USERS_TABLE: 'u', SESSIONS_TABLE: 's', OTP_TABLE: 'o' })).toThrow(/TABLE_USERS/);
   });
 });

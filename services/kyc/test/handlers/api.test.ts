@@ -199,8 +199,14 @@ describe('Lambda adapter (handlers/api.ts)', () => {
     expect(() => createPartner({})).toThrow();
   });
 
-  it('return URL prefixes come from ALLOWED_ORIGINS plus the app scheme', () => {
-    expect(returnUrlPrefixes({ ALLOWED_ORIGINS: 'https://nitishsana.github.io, http://127.0.0.1:5180/' }))
-      .toEqual(['https://nitishsana.github.io/', 'http://127.0.0.1:5180/', APP_RETURN_SCHEME]);
+  it('return URL prefixes come from RETURN_URL_PREFIXES (never from the CORS origins), else the default', () => {
+    expect(returnUrlPrefixes({ ALLOWED_ORIGINS: 'https://nitishsana.github.io' }))
+      .toEqual(['https://nitishsana.github.io/wealthfire/', 'http://127.0.0.1:5180/', APP_RETURN_SCHEME]);
+    expect(returnUrlPrefixes({ RETURN_URL_PREFIXES: 'https://nitishsana.github.io/wealthfire/, wealthfire://' }))
+      .toEqual(['https://nitishsana.github.io/wealthfire/', APP_RETURN_SCHEME]);
+    // a bare origin (no trailing slash) or a non-https entry would open too much
+    for (const bad of ['https://nitishsana.github.io', 'http://evil.example/', 'javascript:', 'ftp://x/']) {
+      expect(() => returnUrlPrefixes({ RETURN_URL_PREFIXES: bad }), bad).toThrow(/RETURN_URL_PREFIXES/);
+    }
   });
 });

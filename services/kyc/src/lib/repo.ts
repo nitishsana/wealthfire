@@ -10,6 +10,9 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, TransactWriteCommand, UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { requireEnv, TABLE_ENV } from './env';
+
+export { TABLE_ENV };
 
 export type ContactKind = 'email' | 'mobile';
 
@@ -470,16 +473,13 @@ export class DynamoOtpRepo implements OtpRepo {
   }
 }
 
-/** Env var names holding the table names (set by the CDK stack). */
-export const TABLE_ENV = { users: 'USERS_TABLE', sessions: 'SESSIONS_TABLE', otp: 'OTP_TABLE' } as const;
-
+/** Auth table names from env (TABLE_USERS / TABLE_SESSIONS / TABLE_OTP, set by the CDK stack). */
 export function tableNamesFromEnv(env: Record<string, string | undefined> = process.env): DynamoTableNames {
-  const get = (k: string): string => {
-    const v = env[k];
-    if (!v) throw new Error(`Missing env ${k}`);
-    return v;
+  return {
+    users: requireEnv(env, TABLE_ENV.users),
+    sessions: requireEnv(env, TABLE_ENV.sessions),
+    otp: requireEnv(env, TABLE_ENV.otp),
   };
-  return { users: get(TABLE_ENV.users), sessions: get(TABLE_ENV.sessions), otp: get(TABLE_ENV.otp) };
 }
 
 export function createDocClient(client: DynamoDBClient = new DynamoDBClient({})): DynamoDBDocumentClient {

@@ -67,7 +67,8 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
     expect(rec!.partnerRefs.kraUpload).toMatch(/^kraup-/);
     expect(e.repos.costs.rows.map((r) => r.check)).toEqual(['kra-lookup', 'aadhaar', 'pan-verify', 'face-match', 'esign', 'kra-upload']);
     // every write bumped the version and wrote a system audit row
-    const audit = await e.repos.audit.listForUser(userId);
+    // write order (rows in the same millisecond have no defined ts order)
+    const audit = e.repos.audit.all().filter((r) => r.userId === userId);
     expect(audit.map((r) => r.action)).toEqual([
       'kyc.start', 'kyc.aadhaar-start', 'kyc.aadhaar-result', 'kyc.pan-check', 'kyc.selfie', 'kyc.esign-start', 'kyc.esign-result', 'kyc.kra-upload',
     ]);
@@ -99,9 +100,44 @@ describe('KYC end to end (sign in → start → scenario → status)', () => {
     expect(list.json.items.map((c: { id: string }) => c.id)).toEqual([userId]);
     const ok = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve', note: 'name ok' } });
     expect(ok.statusCode).toBe(200);
+    // the approval triggered the KRA upload right away (system action, audited)
+    expect(e.partner.calls.uploadToKra).toBe(1);
+    expect(ok.json.case).toMatchObject({ status: 'verified', reason: 'staff-approved' });
     const st = await e.call('GET', '/kyc/status', { token });
-    expect(st.json).toMatchObject({ status: 'verified', reason: 'staff-approved', eligibleToInvest: true });
-    expect(e.reviewAudit.map((a) => a.action)).toEqual(['review.approve']);
+    expect(st.json).toMatchObject({ status: 'verified', reason: 'staff-approved', next: 'none', eligibleToInvest: true });
+    expect(e.reviewAudit().map((a) => a.action)).toEqual(['review.approve']);
+    const trail = e.repos.audit.all().filter((r) => r.userId === userId);
+    expect(trail.slice(-2).map((a) => [a.actor, a.action])).toEqual([['staff:staff-1', 'review.approve'], ['system', 'kyc.kra-upload']]);
+    expect((await e.repos.cases.get(userId))!.partnerRefs.kraUpload).toMatch(/^kraup-/);
+    // retry-safe: later status reads do not upload again
+    await e.call('GET', '/kyc/status', { token });
+    expect(e.partner.calls.uploadToKra).toBe(1);
+  });
+
+  it('staff approve: a KRA upload that times out stays pending and is retried by GET /kyc/status', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token, PANS.unclear);
+    e.partner.failNext('uploadToKra', 2);
+    const ok = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'approve' } });
+    expect(ok.statusCode).toBe(200); // the approval stands
+    expect(e.partner.calls.uploadToKra).toBe(2);
+    expect((await e.repos.cases.get(userId))!).toMatchObject({ status: 'verified', next: 'kra-upload' });
+    expect((await e.repos.cases.get(userId))!.partnerRefs.kraUpload).toBeUndefined();
+    const st = await e.call('GET', '/kyc/status', { token });
+    expect(st.json).toMatchObject({ status: 'verified', next: 'none' });
+    expect(e.partner.calls.uploadToKra).toBe(3);
+    expect((await e.repos.cases.get(userId))!.partnerRefs.kraUpload).toMatch(/^kraup-/);
+  });
+
+  it('staff reject: no KRA upload, next none', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token, PANS.unclear);
+    const r = await e.call('POST', `/review/cases/${userId}`, { headers: REVIEWER, body: { action: 'reject', reason: 'Name does not match' } });
+    expect(r.statusCode).toBe(200);
+    expect(e.partner.calls.uploadToKra).toBe(0);
+    expect((await e.call('GET', '/kyc/status', { token })).json).toMatchObject({ status: 'rejected', reason: 'staff-rejected', next: 'none' });
   });
 
   it('unclear (low face score) → under-review check-unclear', async () => {
@@ -385,7 +421,11 @@ describe('return URLs', () => {
     const e = env();
     const token = await e.signIn();
     await e.call('POST', '/kyc/start', { token, body: startBody(PANS.fullPass) });
-    for (const returnUrl of ['https://evil.example/x', 'https://nitishsana.github.io.evil.example/', 'javascript:alert(1)', '', 5]) {
+    for (const returnUrl of [
+      'https://evil.example/x', 'https://nitishsana.github.io.evil.example/', 'javascript:alert(1)', '', 5,
+      // same host, outside the app: the allow-list is the app path, not the whole github.io host
+      'https://nitishsana.github.io/other-app/', 'https://nitishsana.github.io/wealthfire-evil/', 'http://127.0.0.1:5181/',
+    ]) {
       const r = await e.call('POST', '/kyc/aadhaar', { token, body: { mode: 'digilocker', returnUrl } });
       expect(r.statusCode).toBe(400);
     }

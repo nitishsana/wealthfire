@@ -1,10 +1,6 @@
-// In-memory webhook stores for tests and local runs.
-import type { KycCase } from '../types';
-import type {
-  CaseEvidence, SeenEventStore, StoredCase, WebhookAuditEntry, WebhookAuditLog, WebhookCaseStore,
-} from './ports';
-
-const clone = <T>(v: T): T => structuredClone(v);
+// In-memory seen-event store for tests and local runs. Cases and audit rows use the shared
+// in-memory store (src/store/memory.ts) through webhookCaseStore() (src/store/views.ts).
+import type { SeenEventStore } from './ports';
 
 interface SeenItem {
   state: 'processing' | 'done';
@@ -35,45 +31,5 @@ export class MemorySeenEventStore implements SeenEventStore {
   /** @internal test hook */
   state(eventId: string): SeenItem['state'] | undefined {
     return this.items.get(eventId)?.state;
-  }
-}
-
-export class MemoryWebhookCaseStore implements WebhookCaseStore {
-  private readonly cases = new Map<string, StoredCase>();
-  /** audit rows written together with a case change */
-  readonly audit: WebhookAuditEntry[] = [];
-  /** @internal test hook: called before each save's version check (simulate a concurrent writer) */
-  beforeSave?: () => void;
-
-  put(kycCase: KycCase, evidence: CaseEvidence | null): void {
-    this.cases.set(kycCase.userId, { kycCase: clone(kycCase), evidence: clone(evidence) });
-  }
-
-  async get(userId: string): Promise<StoredCase | null> {
-    const c = this.cases.get(userId);
-    return c ? clone(c) : null;
-  }
-
-  async save(w: { before: KycCase; after: KycCase; evidence: CaseEvidence; audit: WebhookAuditEntry }): Promise<'ok' | 'conflict'> {
-    this.beforeSave?.();
-    const cur = this.cases.get(w.before.userId);
-    if (!cur || cur.kycCase.version !== w.before.version) return 'conflict';
-    this.cases.set(w.before.userId, { kycCase: clone(w.after), evidence: clone(w.evidence) });
-    this.audit.push(clone(w.audit));
-    return 'ok';
-  }
-
-  /** @internal test hook: bump the stored version as another writer would */
-  touch(userId: string): void {
-    const c = this.cases.get(userId);
-    if (c) c.kycCase.version += 1;
-  }
-}
-
-export class MemoryWebhookAuditLog implements WebhookAuditLog {
-  readonly entries: WebhookAuditEntry[] = [];
-
-  async write(entry: WebhookAuditEntry): Promise<void> {
-    this.entries.push(clone(entry));
   }
 }

@@ -39,6 +39,8 @@ export type ReasonCode =
   /** under review only because a partner call still timed out after its retries; a later system retry may verify */
   | 'partner-timeout'
   | 'device-hand-check'
+  /** the PAN already belongs to another account's case; a person checks it (the other account is never named) */
+  | 'pan-in-use'
   | 'pan-invalid'
   | 'pan-not-individual'
   | 'aadhaar-mismatch'

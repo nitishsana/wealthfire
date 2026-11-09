@@ -58,6 +58,12 @@ export interface ReviewDeps {
   clock: Clock;
   /** audit ts nonce; injectable for tests */
   nonce?: () => string;
+  /**
+   * System follow-up after a saved Approve (the KRA upload, KycService.uploadToKra). Runs after the
+   * decision is stored; a failure does not undo the approval: the step stays pending ('kra-upload')
+   * and is retried by the next GET /kyc/status, so it is retry-safe.
+   */
+  onApproved?: (userId: string) => Promise<void>;
 }
 
 type ErrorCode = 'bad_request' | 'forbidden' | 'not_found' | 'conflict' | 'illegal_transition' | 'internal';
@@ -160,7 +166,7 @@ function auditTs(deps: ReviewDeps): string {
   return `${new Date(deps.clock.now()).toISOString()}#${(deps.nonce ?? randomUUID)()}`;
 }
 
-function staffActor(req: ReviewRequest): string {
+function staffActor(req: ReviewRequest): `staff:${string}` {
   return `staff:${req.staff.id}`;
 }
 
@@ -285,9 +291,19 @@ function decideCase(deps: ReviewDeps): Handler {
       after: snapshot(after),
       ...(d.note ? { note: d.note } : {}),
     };
-    const r = await deps.cases.saveDecision({ before, after, audit });
+    const r = await deps.cases.saveDecision({ before, after, next: d.next, audit });
     if (r === 'conflict') throw new ReviewError('conflict');
-    return { status: 200, body: { case: caseView(after) } };
+    let view = caseView(after);
+    if (action.kind === 'approve' && deps.onApproved) {
+      try {
+        await deps.onApproved(id);
+        const fresh = await deps.cases.get(id);
+        if (fresh) view = caseView(fresh);
+      } catch {
+        // retried by GET /kyc/status; the approval itself is stored and audited
+      }
+    }
+    return { status: 200, body: { case: view } };
   });
 }
 

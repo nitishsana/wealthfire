@@ -3,14 +3,16 @@
 //
 // Ordering: each check keeps the partner event time (`occurredAt`) of the result it holds; an
 // older result arriving later is ignored. Face attempts are kept in event-time order.
-import { canSystemTransition, decide, type DecideInput } from '../decide';
+import { canSystemTransition } from '../decide';
 import type { KycConfig } from '../config';
-import type { KycCase } from '../types';
+import { decideFromEvidence } from '../store/evidence';
+import { snapshotOf } from '../store/types';
+import type { CheckName, KycCase, NextStep } from '../types';
 import type { PartnerEvent } from './events';
 import type { CaseEvidence, CaseSnapshot, EvidenceKey, FaceAttempt, WebhookAction, WebhookOutcome } from './ports';
 
 export type ApplyResult =
-  | { kind: 'applied'; after: KycCase; evidence: CaseEvidence; check?: string }
+  | { kind: 'applied'; after: KycCase; evidence: CaseEvidence; next?: NextStep; unclear?: CheckName[]; check?: string }
   | { kind: 'ignored'; outcome: Exclude<WebhookOutcome, 'applied' | 'ignored-unknown-case'>; check?: string };
 
 const TERMINAL = new Set(['verified', 'rejected']);
@@ -20,7 +22,7 @@ export function actionFor(e: PartnerEvent): WebhookAction {
 }
 
 export function snapshot(c: KycCase): CaseSnapshot {
-  return { status: c.status, path: c.path, reason: c.reason, version: c.version };
+  return snapshotOf(c);
 }
 
 type RefKey = keyof KycCase['partnerRefs'];
@@ -126,17 +128,8 @@ export function applyEvent(
     mergeKycResult(evidence, e);
   }
 
-  const { faceTs: _f, kraUpload: _k, eventTs: _e, aadhaarFailed, ...rest } = evidence;
-  const input: DecideInput = { ...rest, current: before.status, currentReason: before.reason };
-  let d = decide(input, config);
-  // decide() has no "eKYC failed" input: a failed Aadhaar eKYC is a real doubt (not a timeout), so
-  // unless a clear fail already rejects, a person must look at it.
-  if (aadhaarFailed && d.status !== 'rejected') {
-    d = {
-      ...d, status: 'under-review', path: d.path ?? 'full-kyc', reason: 'check-unclear', next: 'wait',
-      checks: { ...d.checks, aadhaar: 'unclear' },
-    };
-  }
+  // Same decision the KYC routes make (incl. the "Aadhaar eKYC failed" → person rule).
+  const d = decideFromEvidence(evidence, before.status, before.reason, config);
   const status = canSystemTransition(before.status, d.status, before.reason) ? d.status : before.status;
   const after: KycCase = {
     ...base,
@@ -145,5 +138,11 @@ export function applyEvent(
     reason: status === d.status ? d.reason : before.reason,
     checks: d.checks,
   };
-  return { kind: 'applied', after, evidence, ...withCheck };
+  // `next` is stored so a case verified here still gets its KRA upload ('kra-upload').
+  const decided = status === d.status;
+  return {
+    kind: 'applied', after, evidence,
+    ...(decided ? { next: d.next, unclear: d.unclear ?? [] } : {}),
+    ...withCheck,
+  };
 }

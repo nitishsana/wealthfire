@@ -26,6 +26,7 @@ export const FEATURES = [
   { id: 'onboard-documents', name: 'Onboarding: upload selfie, Aadhaar card and PAN card' },
   { id: 'onboard-check', name: 'Onboarding: check typed numbers against the documents' },
   { id: 'onboard-review', name: 'Onboarding: account status and manual review (approve / reject, redo documents)' },
+  { id: 'kyc-final-status', name: 'Final KYC: server status in Settings' },
 ] as const;
 
 export type FeatureId = (typeof FEATURES)[number]['id'];

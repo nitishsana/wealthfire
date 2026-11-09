@@ -1,9 +1,12 @@
 import { DEFAULT_CONFIG } from '../../src/config';
 import { FakeClock } from '../../src/lib/clock';
+import { memoryStore } from '../../src/store/memory';
+import type { KycCaseRecord } from '../../src/store/types';
+import { webhookCaseStore } from '../../src/store/views';
 import type { KycCase } from '../../src/types';
 import { handleWebhook, type WebhookDeps, type WebhookResponse } from '../../src/webhook/handler';
 import { HmacWebhookVerifier, SIGNATURE_HEADER, signBody } from '../../src/webhook/hmac';
-import { MemorySeenEventStore, MemoryWebhookAuditLog, MemoryWebhookCaseStore } from '../../src/webhook/memory';
+import { MemorySeenEventStore } from '../../src/webhook/memory';
 import type { CaseEvidence, WebhookLogFields } from '../../src/webhook/ports';
 
 export const SECRET = 'test-webhook-secret-0123456789';
@@ -34,17 +37,32 @@ export function baseEvidence(over: Partial<CaseEvidence> = {}): CaseEvidence {
   };
 }
 
+/** A full kyc_cases item as /kyc/start writes it (the webhook must keep the extra fields). */
+export function baseRecord(kycCase: KycCase, evidence: CaseEvidence | null): KycCaseRecord {
+  return {
+    createdAt: '2026-11-06T10:00:00.000Z',
+    panEnc: 'l1.enc',
+    panHash: 'pan-hash',
+    next: 'kra-lookup',
+    ...kycCase,
+    ...(evidence !== null ? { evidence } : {}),
+  } as KycCaseRecord;
+}
+
 export function setup(opts: { kycCase?: KycCase | null; evidence?: CaseEvidence | null } = {}) {
   const clock = new FakeClock();
-  const cases = new MemoryWebhookCaseStore();
-  const audit = new MemoryWebhookAuditLog();
+  // the shared store: the webhook reads/writes it through its thin view
+  const store = memoryStore();
+  const cases = webhookCaseStore(store.cases);
   const seen = new MemorySeenEventStore();
   const logs: WebhookLogFields[] = [];
-  if (opts.kycCase !== null) cases.put(opts.kycCase ?? baseCase(), opts.evidence === undefined ? baseEvidence() : opts.evidence);
+  if (opts.kycCase !== null) {
+    void store.cases.put(baseRecord(opts.kycCase ?? baseCase(), opts.evidence === undefined ? baseEvidence() : opts.evidence));
+  }
   const deps: WebhookDeps = {
     verifier: new HmacWebhookVerifier(SECRET),
     cases,
-    audit,
+    audit: store.audit,
     seen,
     config: { ...DEFAULT_CONFIG },
     clock,
@@ -66,7 +84,11 @@ export function setup(opts: { kycCase?: KycCase | null; evidence?: CaseEvidence 
     return handleWebhook({ body, headers }, deps);
   };
   const stored = async () => (await cases.get(USER))!;
-  return { clock, cases, audit, seen, logs, deps, event, send, stored };
+  /** audit rows written together with a case change (outcome applied), oldest first */
+  const applied = () => store.audit.all().filter((r) => r.outcome === 'applied');
+  /** audit rows for signed events that changed nothing, oldest first */
+  const ignored = () => store.audit.all().filter((r) => r.outcome !== undefined && r.outcome !== 'applied');
+  return { clock, store, cases, seen, logs, deps, event, send, stored, applied, ignored };
 }
 
 export { SIGNATURE_HEADER, signBody };

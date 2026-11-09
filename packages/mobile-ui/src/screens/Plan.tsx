@@ -12,6 +12,7 @@ import {
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { useDocReader } from '../reader';
+import { ServerKycPanel, startDetails, useKycServer } from '../server';
 import { clearPickerCache } from '../cacheCleanup';
 import { useSignInNotice } from '../shell';
 import { Missing } from './Core';
@@ -300,6 +301,7 @@ const FIELDS: { key: keyof Assumptions; label: string }[] = [
 /** Settings → Account (Req 5.6): masked contact, PAN and Aadhaar, and Sign out (keeps financial data). */
 function AccountCard() {
   const { data, update } = useStore();
+  const server = useKycServer();
   const ob = data.onboarding;
   const contact = ob.contact ? (ob.contact.kind === 'email' ? maskEmail(ob.contact.value) : maskMobile(ob.contact.value)) : '—';
   return (
@@ -311,15 +313,21 @@ function AccountCard() {
         {/* Account status (Req 9.5, 9.6) */}
         <View testID="feature-onboard-review">
           <Text style={[s.text, { marginTop: 10 }]} accessibilityLiveRegion="polite">
-            Account status: <Text style={{ fontWeight: '800' }}>{kycStatusLabel(ob.kyc.status)}</Text>
+            {/* With a server its status decides (below); the device value is then only the device check, same as web. */}
+            {server ? 'Device check: ' : 'Account status: '}<Text style={{ fontWeight: '800' }}>{kycStatusLabel(ob.kyc.status)}</Text>
             {ob.kyc.status === 'rejected' && ob.kyc.review?.decision?.reason ? ` (${ob.kyc.review.decision.reason})` : ''}
           </Text>
           {ob.kyc.status === 'rejected' ? (
             <Btn primary title="Redo documents" onPress={() => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'redo-documents' }) }))} />
           ) : null}
         </View>
+        {/* Final KYC status from the server (design §6). Empty without app.json extra.apiUrl, so the card stays as before. */}
+        <View testID="feature-kyc-final-status">
+          {server ? <ServerKycPanel details={startDetails(ob)} /> : null}
+        </View>
         <Text style={[s.small, { marginTop: 8 }]}>Signing out keeps your financial data on this phone.</Text>
         <Btn title="Sign out" onPress={() => {
+          void server?.signOut(); // revokes the server session and clears the stored tokens
           update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, { type: 'sign-out' }) }));
           void clearPickerCache(); // Bug 2: no picked documents left behind after sign-out.
         }} />
@@ -402,6 +410,7 @@ const DATA_DELETED = 'All data deleted.';
 export function SettingsScreen() {
   const { data, update, replace } = useStore();
   const signInNotice = useSignInNotice();
+  const server = useKycServer();
   const [msg, setMsg] = useState('');
   return (
     <Screen feature="demo" title="Settings" intro="Assumptions, demo data and your data.">
@@ -424,6 +433,7 @@ export function SettingsScreen() {
           { text: 'Delete', style: 'destructive', onPress: () => {
             // Minor issue 3: the gate switches to Sign in at once, so Sign in shows the message (once).
             signInNotice.set(DATA_DELETED);
+            void server?.signOut(); // also ends the server session and clears the stored tokens
             replace(emptyData());
             void clearPickerCache(); // Bug 6: same as Sign out, no picked documents left behind.
             setMsg(DATA_DELETED);

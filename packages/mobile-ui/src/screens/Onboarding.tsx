@@ -6,12 +6,13 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   canSend, checkOutcome, DOC_MESSAGES, MAX_REREADS, resendIn, groupAadhaar, maskAadhaar, maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan,
-  onboardingReducer, OTP_RULES, panSurnameWarning, pruneSends, reviewFields, validateAadhaar, validateEmail, validateMobile, validateName,
+  normalizeDob, onboardingReducer, OTP_RULES, DOB_HINT, DOB_LABEL, validateDob, panSurnameWarning, pruneSends, reviewFields, validateAadhaar, validateEmail, validateMobile, validateName,
   validatePan, type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OtpChannel, type OtpProvider, type OtpVerifyResult,
 } from '@wealthfire/core';
 import { useStore } from '../store';
 import { useOtpProvider } from '../otp';
 import { useDocReader } from '../reader';
+import { formatDobInput, isoToDmy, ServerKycPanel, startDetails, useKycServer } from '../server';
 import { OnboardingBusyCtx, useBlockBackWhile, useOnboardingBackRef, useSignInNotice } from '../shell';
 import { theme } from '../theme';
 import { Btn, Chips, s, Screen } from '../ui';
@@ -70,7 +71,8 @@ interface OtpStepProps {
 
 /** Same contract as apps/web/src/components/OtpStep.tsx. */
 function OtpStep({ channel, target, sends, lockedUntil, initial, initialError, verifyLabel, demoText, onSent, onVerified, onLocked }: OtpStepProps) {
-  const provider = useOtpProvider();
+  // Contact codes go through the KYC server when one is set; the Aadhaar OTP stays on the device provider.
+  const provider = useOtpProvider(channel === 'aadhaar' ? 'aadhaar' : 'contact');
   const [req, setReq] = useState<PendingCode | null>(initial ?? null);
   const [code, setCode] = useState('');
   const [error, setError] = useState(initialError ?? '');
@@ -152,7 +154,7 @@ function OtpStep({ channel, target, sends, lockedUntil, initial, initialError, v
 }
 
 function SignInStep({ onSent }: { onSent: (kind: ContactKind, value: string, at: string, code: PendingCode) => void }) {
-  const provider = useOtpProvider();
+  const provider = useOtpProvider('contact');
   const { data } = useStore();
   const [kind, setKind] = useState<ContactKind>('mobile');
   const [value, setValue] = useState('');
@@ -217,12 +219,13 @@ function SignInStep({ onSent }: { onSent: (kind: ContactKind, value: string, at:
   );
 }
 
-function IdentityStep({ onContinue }: { onContinue: (firstName: string, lastName: string, pan: string, aadhaar: string) => Promise<void> }) {
+function IdentityStep({ onContinue }: { onContinue: (firstName: string, lastName: string, pan: string, dob: string, aadhaar: string) => Promise<void> }) {
   const { data } = useStore();
   const saved = data.onboarding.identity;
   const [first, setFirst] = useState(saved?.firstName ?? '');
   const [last, setLast] = useState(saved?.lastName ?? '');
   const [pan, setPan] = useState(saved?.pan ?? '');
+  const [dob, setDob] = useState(isoToDmy(saved?.dob ?? ''));
   const [aadhaar, setAadhaarDigits] = useState(''); // full number: this screen's memory only
   const [hidden, setHidden] = useState(true);
   const [consent, setConsent] = useState(false);
@@ -234,9 +237,9 @@ function IdentityStep({ onContinue }: { onContinue: (firstName: string, lastName
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   const panN = normalizePan(pan);
-  const errs = { first: validateName(first), last: validateName(last), pan: validatePan(panN), aadhaar: validateAadhaar(aadhaar) };
+  const errs = { first: validateName(first), last: validateName(last), pan: validatePan(panN), dob: validateDob(dob), aadhaar: validateAadhaar(aadhaar) };
   const warn = touched.pan && !errs.pan && !errs.last ? panSurnameWarning(panN, last.trim()) : null;
-  const valid = !errs.first && !errs.last && !errs.pan && !errs.aadhaar && consent;
+  const valid = !errs.first && !errs.last && !errs.pan && !errs.dob && !errs.aadhaar && consent;
 
   return (
     <Screen feature="onboard-identity" title="Your details" intro="We need these to tie your account to you.">
@@ -246,6 +249,10 @@ function IdentityStep({ onContinue }: { onContinue: (firstName: string, lastName
         textContentType="familyName" maxLength={50} error={touched.last ? errs.last : null} />
       <Input label="PAN" value={pan} onChangeText={(t) => setPan(t.toUpperCase())} onBlur={() => touch('pan')} autoCapitalize="characters"
         autoCorrect={false} maxLength={10} placeholder="ABCPE1234F" error={touched.pan ? errs.pan : null} warn={warn} />
+      {/* Date of birth (same label, hint and rules as web); checked with the KYC records (KRA name / DOB match). */}
+      <Input label={DOB_LABEL} value={dob} onChangeText={(t) => setDob(formatDobInput(t))} onBlur={() => touch('dob')}
+        keyboardType="number-pad" autoComplete="birthdate-full" textContentType="birthdate" maxLength={10} placeholder={DOB_HINT}
+        error={touched.dob ? errs.dob : null} />
       <Input label="Aadhaar number" value={groupAadhaar(aadhaar)} onChangeText={(t) => setAadhaarDigits(normalizeAadhaar(t).slice(0, 12))}
         onBlur={() => touch('aadhaar')} keyboardType="number-pad" secureTextEntry={hidden} textContentType="none" autoComplete="off" importantForAutofill="no"
         autoCorrect={false} maxLength={14} placeholder="XXXX XXXX XXXX" error={touched.aadhaar ? errs.aadhaar : null} />
@@ -259,7 +266,7 @@ function IdentityStep({ onContinue }: { onContinue: (firstName: string, lastName
       </Pressable>
       <Btn primary title="Continue" disabled={!valid || busy} onPress={async () => {
         setBusy(true);
-        await onContinue(first.trim(), last.trim(), panN, aadhaar);
+        await onContinue(first.trim(), last.trim(), panN, normalizeDob(dob), aadhaar);
         if (alive.current) { setBusy(false); setAadhaarDigits(''); }
       }} />
     </Screen>
@@ -285,6 +292,8 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   const [pending, setPending] = useState<PendingCode | null>(null); // code sent just before the OTP screen opened
   const [pendingError, setPendingError] = useState('');
   const [confirmError, setConfirmError] = useState('');
+  // With a KYC server (app.json extra.apiUrl): /kyc/start right after onboarding completes (Confirm or hand check).
+  const server = useKycServer();
   const dispatch = useCallback((e: OnboardingEvent) => update((d) => ({ ...d, onboarding: onboardingReducer(d.onboarding, e) })), [update]);
 
   // Picked files sit in the app cache: delete them when this screen goes away (design B6).
@@ -305,13 +314,21 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
   // Bug 2: every failed read is counted; after enough of them (or with the reader unavailable) a hand check is offered.
   const onReadFailed = (field: KycField, unavailable: boolean) =>
     dispatch(unavailable ? { type: 'read-failed', field, unavailable: true } : { type: 'read-failed', field });
+  // With a server: POST /kyc/start as soon as onboarding completes (names, PAN, date of birth, Aadhaar last 4 and the
+  // device result; never the full Aadhaar). The Done screen then follows `next`; if the start fails it offers Start final KYC.
+  const startOnServer = (after: typeof ob) => {
+    const d = server ? startDetails(after) : null;
+    if (server && d?.dob) void server.start({ ...d, dob: d.dob });
+  };
   // Sends all three documents for a hand check: Under review, then the done screen (same as web).
   const onHandCheck = (): boolean => {
     if (!docs.selfie || !docs.aadhaar || !docs.pan) return false;
     // Both cards go to the review: the failed one as unreadable, the other with its last successful read (masked by core).
     const ev: OnboardingEvent = { type: 'send-for-hand-check', at: new Date().toISOString(), reads };
-    if (onboardingReducer(ob, ev).step !== 'done') return false;
+    const after = onboardingReducer(ob, ev);
+    if (after.step !== 'done') return false;
     dispatch(ev);
+    startOnServer(after);
     clearKyc(); // documents, checks and the full Aadhaar are dropped when onboarding completes
     return true;
   };
@@ -377,14 +394,14 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
 
   if (ob.step === 'identity' || lostMemory) {
     return (
-      <IdentityStep onContinue={async (firstName, lastName, pan, digits) => {
+      <IdentityStep onContinue={async (firstName, lastName, pan, dob, digits) => {
         clearKyc();
         // The one Aadhaar OTP goes to the number typed here, then the Aadhaar OTP screen opens (design C1).
         const r = await sendOtp(provider, 'aadhaar', digits, ob.sends.aadhaar, ob.aadhaarLockedUntil);
         setAadhaar(digits);
         setPending(r.ok ? r.code : null);
         setPendingError(r.ok || r.cooldown ? '' : r.message); // cooldown: OtpStep's button shows the countdown
-        dispatch({ type: 'identity-saved', firstName, lastName, pan });
+        dispatch({ type: 'identity-saved', firstName, lastName, pan, dob, at: new Date().toISOString() });
         if (r.ok) dispatch({ type: 'otp-sent', channel: 'aadhaar', at: r.at });
         else if (r.lockUntil) dispatch({ type: 'aadhaar-locked', until: r.lockUntil });
       }} />
@@ -419,10 +436,12 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
           const pan = checks.find((c) => c.field === 'pan')?.final ?? ob.identity?.pan ?? '';
           const ev: OnboardingEvent = { type: 'check-confirmed', match: outcome.match, pan, fields: reviewFields(checks), at: new Date().toISOString() };
           // The reducer refuses a confirm it cannot accept; keep this screen and its data instead of dropping them.
-          if (onboardingReducer(ob, ev).step !== 'done') { setConfirmError(CONFIRM_FAILED); return; }
+          const after = onboardingReducer(ob, ev);
+          if (after.step !== 'done') { setConfirmError(CONFIRM_FAILED); return; }
           setConfirmError('');
           dispatch(ev);
           clearKyc(); // documents, checks and the full Aadhaar are dropped when onboarding completes
+          startOnServer(after);
         }} />
     );
   }
@@ -458,6 +477,8 @@ export function OnboardingScreen({ onFinish }: { onFinish: () => void }) {
     return (
       <Screen feature="onboard-aadhaar-otp" title={first ? `You're all set, ${first}.` : "You're all set."}
         intro={ob.kyc.status === 'verified' ? DOC_MESSAGES.doneVerified : ob.kyc.status === 'pre-verified' ? DOC_MESSAGES.donePreVerified : DONE_REVIEW}>
+        {/* With a server: final KYC status and its next step (DigiLocker, selfie, e-sign or the wait text + Refresh). */}
+        {server ? <ServerKycPanel details={startDetails(ob)} /> : null}
         <Btn primary title="Go to Home" onPress={onFinish} />
       </Screen>
     );

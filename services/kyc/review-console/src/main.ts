@@ -24,6 +24,7 @@ const REASON_LABELS: Record<string, string> = {
   'check-unclear': 'A check was unclear',
   'device-hand-check': 'Device sent for hand check',
   'partner-timeout': 'Partner check timed out',
+  'pan-in-use': 'PAN already used by another account',
 };
 const DOC_LABELS: Record<string, string> = { selfie: 'Selfie', aadhaar: 'Aadhaar document', pan: 'PAN card', other: 'Other document' };
 

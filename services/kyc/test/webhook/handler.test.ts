@@ -10,7 +10,7 @@ describe('webhook: signature and envelope', () => {
     const res = await t.send(t.event('kyc.result', kraOk), 'wrong-secret-wrong-secret');
     expect(res).toEqual({ status: 401, body: { error: 'bad_signature' } });
     expect((await t.stored()).kycCase.version).toBe(1);
-    expect(t.audit.entries).toHaveLength(0);
+    expect(t.ignored()).toHaveLength(0);
   });
 
   it('401 with no signature header', async () => {
@@ -80,7 +80,7 @@ describe('webhook: replay and duplicates', () => {
     expect((await t.send(e)).body).toEqual({ ok: true, outcome: 'applied' });
     expect(await t.send(e)).toEqual({ status: 200, body: { ok: true, outcome: 'duplicate' } });
     expect((await t.stored()).kycCase.version).toBe(2);
-    expect(t.cases.audit).toHaveLength(1);
+    expect(t.applied()).toHaveLength(1);
   });
 
   it('a duplicate face event does not count twice towards the liveness reject', async () => {
@@ -97,7 +97,7 @@ describe('webhook: replay and duplicates', () => {
     const t = setup();
     const realGet = t.cases.get.bind(t.cases);
     let fail = true;
-    t.cases.get = async (id) => {
+    t.cases.get = async (id: string) => {
       if (fail) throw new Error('dynamo down');
       return realGet(id);
     };
@@ -127,7 +127,7 @@ describe('webhook: event types', () => {
     const s = await t.stored();
     expect(s.kycCase).toMatchObject({ status: 'verified', path: 'kra-validated', reason: 'kra-validated', version: 2 });
     expect(s.kycCase.partnerRefs.kra).toBe('kra_1');
-    expect(t.cases.audit[0]).toMatchObject({
+    expect(t.applied()[0]).toMatchObject({
       userId: USER, actor: 'system', action: 'webhook.kyc-result', outcome: 'applied', check: 'kra',
       before: { status: 'pre-verified', version: 1 }, after: { status: 'verified', version: 2 },
     });
@@ -166,7 +166,7 @@ describe('webhook: event types', () => {
     expect(s.kycCase).toMatchObject({ status: 'verified', path: 'full-kyc', reason: 'full-kyc-passed', version: 6 });
     expect(s.kycCase.checks).toMatchObject({ aadhaar: 'pass', pan: 'pass', 'face-match': 'pass', liveness: 'pass', esign: 'pass' });
     expect(s.kycCase.partnerRefs.esign).toBe('es_1');
-    expect(t.cases.audit.map((a) => a.action)).toEqual([
+    expect(t.applied().map((a: { action: string }) => a.action)).toEqual([
       'webhook.kyc-result', 'webhook.kyc-result', 'webhook.kyc-result', 'webhook.kyc-result', 'webhook.esign',
     ]);
   });
@@ -228,14 +228,14 @@ describe('webhook: event types', () => {
     expect(s.kycCase).toMatchObject({ status: 'verified', reason: 'full-kyc-passed', checks: { esign: 'pass' }, version: 2 });
     expect(s.kycCase.partnerRefs.kraUpload).toBe('up_1');
     expect(s.evidence!.kraUpload).toEqual({ status: 'uploaded' });
-    expect(t.cases.audit[0]!.action).toBe('webhook.kra-upload');
+    expect(t.applied()[0]!.action).toBe('webhook.kra-upload');
   });
 
   it('kra.upload on a case that is not verified is ignored (200, audited)', async () => {
     const t = setup();
     expect((await t.send(t.event('kra.upload', { status: 'uploaded' }))).body.outcome).toBe('ignored-not-verified');
     expect((await t.stored()).kycCase.version).toBe(1);
-    expect(t.audit.entries[0]).toMatchObject({ outcome: 'ignored-not-verified', action: 'webhook.kra-upload' });
+    expect(t.ignored()[0]).toMatchObject({ outcome: 'ignored-not-verified', action: 'webhook.kra-upload' });
   });
 });
 
@@ -251,7 +251,7 @@ describe('webhook: out-of-order and ignored events', () => {
     const s = await t.stored();
     expect(s.kycCase.status).toBe('pre-verified');
     expect(s.evidence!.pan).toEqual({ valid: true, nameMatch: true, aadhaarLinked: true });
-    expect(t.audit.entries[0]).toMatchObject({ outcome: 'ignored-stale', check: 'pan' });
+    expect(t.ignored()[0]).toMatchObject({ outcome: 'ignored-stale', check: 'pan' });
   });
 
   it('a late e-sign "failed" does not undo an earlier "done"', async () => {
@@ -294,7 +294,7 @@ describe('webhook: out-of-order and ignored events', () => {
     const res = await t.send(t.event('kyc.result', kraOk));
     expect(res).toEqual({ status: 200, body: { ok: true, outcome: 'ignored-terminal' } });
     expect((await t.stored()).kycCase.status).toBe('rejected');
-    expect(t.audit.entries[0]).toMatchObject({ outcome: 'ignored-terminal', before: { status: 'rejected' } });
+    expect(t.ignored()[0]).toMatchObject({ outcome: 'ignored-terminal', before: { status: 'rejected' } });
   });
 
   it('a result for another partner session (ref mismatch) is ignored', async () => {
@@ -306,7 +306,7 @@ describe('webhook: out-of-order and ignored events', () => {
   it('an unknown user is ignored (200, audited)', async () => {
     const t = setup({ kycCase: null });
     expect((await t.send(t.event('kyc.result', kraOk))).body.outcome).toBe('ignored-unknown-case');
-    expect(t.audit.entries[0]).toMatchObject({ outcome: 'ignored-unknown-case', before: null });
+    expect(t.ignored()[0]).toMatchObject({ outcome: 'ignored-unknown-case', before: null });
   });
 
   it('a case without evidence answers 500 so the partner retries', async () => {
@@ -327,26 +327,26 @@ describe('webhook: version conflicts', () => {
   it('retries once after a concurrent write and applies on the fresh case', async () => {
     const t = setup();
     let first = true;
-    t.cases.beforeSave = () => {
+    t.store.cases.beforeWrite = () => {
       if (first) {
         first = false;
-        t.cases.touch(USER); // another writer bumped the version
+        t.store.cases.touch(USER); // another writer bumped the version
       }
     };
     expect((await t.send(t.event('kyc.result', kraOk))).body.outcome).toBe('applied');
     const s = await t.stored();
     expect(s.kycCase).toMatchObject({ status: 'verified', version: 3 });
-    expect(t.cases.audit).toHaveLength(1);
-    expect(t.cases.audit[0]!.before!.version).toBe(2);
+    expect(t.applied()).toHaveLength(1);
+    expect(t.applied()[0]!.before!.version).toBe(2);
   });
 
   it('two conflicts in a row → 500, claim released, partner retry succeeds', async () => {
     const t = setup();
-    t.cases.beforeSave = () => t.cases.touch(USER);
+    t.store.cases.beforeWrite = () => t.store.cases.touch(USER);
     const e = t.event('kyc.result', kraOk);
     expect((await t.send(e)).status).toBe(500);
-    expect(t.cases.audit).toHaveLength(0);
-    t.cases.beforeSave = undefined;
+    expect(t.applied()).toHaveLength(0);
+    t.store.cases.beforeWrite = undefined;
     expect((await t.send(e)).body.outcome).toBe('applied');
   });
 });
@@ -369,7 +369,7 @@ describe('webhook: logging', () => {
   it('audit rows hold no partner values', async () => {
     const t = setup();
     await t.send(t.event('kyc.result', kraOk));
-    const text = JSON.stringify(t.cases.audit);
+    const text = JSON.stringify(t.applied());
     for (const s of ['NITISH', '1990']) expect(text).not.toContain(s);
   });
 });

@@ -94,7 +94,12 @@ async function applyClaimed(e: PartnerEvent, deps: WebhookDeps, now: number): Pr
       return r.outcome;
     }
     const audit = auditRow(e, 'applied', now, { before: snapshot(before), after: snapshot(r.after) });
-    if ((await deps.cases.save({ before, after: r.after, evidence: r.evidence, audit })) === 'ok') return 'applied';
+    const saved = await deps.cases.save({
+      before, after: r.after, evidence: r.evidence, audit,
+      ...(r.next !== undefined ? { next: r.next } : {}),
+      ...(r.unclear !== undefined ? { unclear: r.unclear } : {}),
+    });
+    if (saved === 'ok') return 'applied';
   }
   throw new CaseConflictError();
 }

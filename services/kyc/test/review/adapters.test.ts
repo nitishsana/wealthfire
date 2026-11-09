@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { DocClient } from '../../src/lib/repo';
-import { DynamoAuditLog, DynamoReviewCaseStore } from '../../src/review/dynamo';
 import { looksLikeIdNumber, maskAadhaar, maskPan } from '../../src/review/mask';
 import { BadCursorError } from '../../src/review/ports';
 import { kindOf } from '../../src/review/s3';
+import { DynamoAuditStore, DynamoCaseStore } from '../../src/store/dynamo';
+import { reviewCaseStore } from '../../src/store/views';
 import { makeCase } from './fakes';
+
+/** The review routes' store is the shared Dynamo case store seen through reviewCaseStore(). */
+const reviewStore = (doc: DocClient, cases: string, audit: string) => reviewCaseStore(new DynamoCaseStore(doc, cases, audit));
 
 type Sent = { name: string; input: Record<string, unknown> };
 
@@ -46,11 +50,11 @@ describe('s3 kindOf', () => {
   });
 });
 
-describe('DynamoReviewCaseStore', () => {
+describe('shared DynamoCaseStore via reviewCaseStore', () => {
   it('queries byStatus newest first and round-trips the cursor', async () => {
     const lek = { status: 'under-review', updatedAt: '2026-11-01T00:00:00.000Z', userId: 'u1' };
     const doc = fakeDoc(() => ({ Items: [makeCase()], LastEvaluatedKey: lek }));
-    const store = new DynamoReviewCaseStore(doc, 'cases', 'audit');
+    const store = reviewStore(doc, 'cases', 'audit');
     const page = await store.listUnderReview({ limit: 10 });
     expect(doc.sent[0]?.input).toMatchObject({ IndexName: 'byStatus', ScanIndexForward: false, Limit: 10 });
     expect(page.nextCursor).toBeTypeOf('string');
@@ -59,31 +63,42 @@ describe('DynamoReviewCaseStore', () => {
   });
 
   it('rejects forged cursors', async () => {
-    const store = new DynamoReviewCaseStore(fakeDoc(() => ({})), 'cases', 'audit');
+    const store = reviewStore(fakeDoc(() => ({})), 'cases', 'audit');
     const forged = Buffer.from(JSON.stringify({ status: 'verified', updatedAt: 'x', userId: 'u' })).toString('base64url');
     await expect(store.listUnderReview({ limit: 1, cursor: forged })).rejects.toBeInstanceOf(BadCursorError);
     await expect(store.listUnderReview({ limit: 1, cursor: '%%%' })).rejects.toBeInstanceOf(BadCursorError);
   });
 
-  it('writes case + audit in one conditional transaction; maps condition failure to conflict', async () => {
+  it('writes only the decision fields + audit in one conditional transaction; maps condition failure to conflict', async () => {
     const before = makeCase();
-    const after = { ...before, status: 'verified' as const, version: 4 };
-    const audit = { userId: before.userId, ts: 't#1', actor: 'staff:s', action: 'review.approve' as const, before: null, after: null };
+    const after = { ...before, status: 'verified' as const, reason: 'staff-approved' as const, version: 4, note: 'ok' };
+    const audit = { userId: before.userId, ts: 't#1', actor: 'staff:s' as const, action: 'review.approve' as const, before: null, after: null };
     const ok = fakeDoc(() => ({}));
-    expect(await new DynamoReviewCaseStore(ok, 'cases', 'audit').saveDecision({ before, after, audit })).toBe('ok');
-    const items = ok.sent[0]?.input.TransactItems as { Put: { TableName: string; ExpressionAttributeValues?: unknown } }[];
-    expect(items.map((i) => i.Put.TableName)).toEqual(['cases', 'audit']);
-    expect(items[0]?.Put.ExpressionAttributeValues).toEqual({ ':v': 3, ':s': 'under-review' });
+    expect(await reviewStore(ok, 'cases', 'audit').saveDecision({ before, after, next: 'kra-upload', audit })).toBe('ok');
+    const items = ok.sent[0]?.input.TransactItems as {
+      Update?: { TableName: string; UpdateExpression: string; ConditionExpression: string; ExpressionAttributeValues: Record<string, unknown>; ExpressionAttributeNames: Record<string, string> };
+      Put?: { TableName: string };
+    }[];
+    expect(items[0]?.Update?.TableName).toBe('cases');
+    expect(items[1]?.Put?.TableName).toBe('audit');
+    const upd = items[0]!.Update!;
+    expect(upd.ConditionExpression).toBe('attribute_exists(userId) AND #version = :expected AND #status = :requireStatus');
+    expect(upd.ExpressionAttributeValues).toMatchObject({ ':expected': 3, ':next': 4, ':requireStatus': 'under-review' });
+    const setFields = Object.values(upd.ExpressionAttributeNames);
+    expect(setFields).toEqual(expect.arrayContaining(['status', 'reason', 'next', 'note', 'updatedAt', 'version']));
+    // PAN / evidence / partner refs are never rewritten by a staff decision
+    for (const f of ['masks', 'panEnc', 'panHash', 'evidence', 'partnerRefs']) expect(setFields).not.toContain(f);
+    expect(Object.values(upd.ExpressionAttributeValues)).toContain('kra-upload');
 
     const failing = fakeDoc(() => {
       throw Object.assign(new Error('x'), { name: 'TransactionCanceledException' });
     });
-    expect(await new DynamoReviewCaseStore(failing, 'cases', 'audit').saveDecision({ before, after, audit })).toBe('conflict');
+    expect(await reviewStore(failing, 'cases', 'audit').saveDecision({ before, after, next: 'kra-upload', audit })).toBe('conflict');
   });
 
   it('audit log queries newest first', async () => {
     const doc = fakeDoc(() => ({ Items: [] }));
-    await new DynamoAuditLog(doc, 'audit').listForUser('u1', 5);
+    await new DynamoAuditStore(doc, 'audit').listForUser('u1', 5);
     expect(doc.sent[0]?.input).toMatchObject({ TableName: 'audit', ScanIndexForward: false, Limit: 5 });
   });
 });

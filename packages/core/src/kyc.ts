@@ -5,6 +5,7 @@ import type { AppData, KycField, KycMatch, KycState, KycStatus, ReviewRecord } f
 import { maskAadhaar, maskPan, normalizeAadhaar, normalizePan } from './onboarding';
 // Circular import (store) is safe: only used inside functions.
 import { NOT_READ_MASK } from './store';
+import { serverEligibleToInvest, type KycStatusView } from './server';
 
 export const MAX_REREADS = 2;
 
@@ -176,10 +177,14 @@ export function reviewRowReasonText(field: ReviewRecord['fields'][number], field
 /**
  * Investing is allowed only after onboarding is done and KYC is verified (a final KYC confirmation;
  * 'pre-verified' from the device checks is not enough).
- * Client-side only: the future investment journey must re-check this on a server.
+ * With a server view (GET /kyc/status), the server status decides and the device value is only a
+ * cache; without one (not fetched, offline, demo) the device value is used.
+ * The investment journey must still re-check this on the server.
  */
-export function isEligibleToInvest(data: AppData): boolean {
-  return data.onboarding?.step === 'done' && data.onboarding.kyc?.status === 'verified';
+export function isEligibleToInvest(data: AppData, server?: KycStatusView | null): boolean {
+  if (data.onboarding?.step !== 'done') return false;
+  if (server) return serverEligibleToInvest(server);
+  return data.onboarding.kyc?.status === 'verified';
 }
 
 /** A final KYC approval (review-decided 'approved') can be given: status under review or pre-verified. */

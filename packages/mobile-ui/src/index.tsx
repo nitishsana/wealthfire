@@ -10,12 +10,15 @@ import { GoogleCtx, type GoogleConfig } from './screens/Gmail';
 import { OnboardingScreen } from './screens/Onboarding';
 import { OtpProviderScope, type OtpConfig } from './otp';
 import { DocReaderScope, type DocReaderConfig } from './reader';
+import { KycServerScope, type KycServerConfig } from './server';
 import { OnboardingBackCtx, SignInNoticeCtx, type OnboardingBackRef, type SignInNotice } from './shell';
 
 export type { GoogleConfig } from './screens/Gmail';
 export type { OnboardingBackRef } from './shell';
 export type { OtpConfig } from './otp';
 export type { DocReaderConfig } from './reader';
+export type { KycServerConfig } from './server';
+export { KYC_RETURN_URL } from './server';
 
 export { TABS, type TabKey } from './nav';
 export { clearPickerCache } from './cacheCleanup';
@@ -40,6 +43,8 @@ export interface WealthfireAppProps {
   otp?: OtpConfig;
   /** Document reader for onboarding KYC (from app.json extra.docReader / docReaderUrl). Empty → on-device reader (ML Kit); 'demo' only in dev builds. */
   docReader?: DocReaderConfig;
+  /** Final KYC server (from app.json extra.apiUrl / kycRedirectOrigins). Empty → no server: device-only flow as before. */
+  kycServer?: KycServerConfig;
   /**
    * Android: set while onboarding is shown to a handler that steps back one onboarding step (true) or lets
    * Android close the app (false). null outside onboarding, so the shell's tab history applies.
@@ -99,7 +104,7 @@ function Body({ platform, tab, setTab }: { platform: 'android' | 'ios'; tab: Tab
 }
 
 /** The full Wealthfire app. apps/android and apps/ios each render this with their platform. */
-export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {}, otp = {}, docReader = {}, onboardingBack }: WealthfireAppProps) {
+export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab: ctlTab, setTab: ctlSetTab, google = {}, otp = {}, docReader = {}, kycServer = {}, onboardingBack }: WealthfireAppProps) {
   const [ownTab, setOwnTab] = useState<TabKey>(initialTab);
   const tab = ctlTab ?? ownTab;
   const setTab = (t: TabKey) => { (ctlSetTab ?? setOwnTab)(t); onTabChange?.(t); };
@@ -112,6 +117,7 @@ export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab:
   return (
     <SafeAreaProvider>
       <GoogleCtx.Provider value={google}>
+        <KycServerScope config={kycServer}>
         <OtpProviderScope config={otp}>
           <DocReaderScope config={docReader}>
             <DataProvider>
@@ -123,6 +129,7 @@ export function WealthfireApp({ platform, onTabChange, initialTab = 'home', tab:
             </DataProvider>
           </DocReaderScope>
         </OtpProviderScope>
+        </KycServerScope>
       </GoogleCtx.Provider>
     </SafeAreaProvider>
   );

@@ -31,8 +31,9 @@ describe('loadConfig', () => {
 
 describe('paidChecksLeft', () => {
   it('counts down and never goes negative', () => {
-    expect(paidChecksLeft(0, DEFAULT_CONFIG)).toBe(5);
-    expect(paidChecksLeft(4, DEFAULT_CONFIG)).toBe(1);
-    expect(paidChecksLeft(9, DEFAULT_CONFIG)).toBe(0);
+    expect(DEFAULT_CONFIG.maxPaidChecksPerDay).toBe(10);
+    expect(paidChecksLeft(0, DEFAULT_CONFIG)).toBe(10);
+    expect(paidChecksLeft(9, DEFAULT_CONFIG)).toBe(1);
+    expect(paidChecksLeft(14, DEFAULT_CONFIG)).toBe(0);
   });
 });

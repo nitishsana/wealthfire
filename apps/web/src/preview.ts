@@ -20,7 +20,7 @@ export function previewData(): AppData | null {
     ...d.onboarding,
     step: 'done',
     contact: { kind: 'mobile', value: '9876543210', verifiedAt: now },
-    identity: { firstName: 'Demo', lastName: 'User', pan: 'ABCPU1234F' },
+    identity: { firstName: 'Demo', lastName: 'User', pan: 'ABCPU1234F', dob: '1990-01-15' },
     aadhaar: { last4: '2346', verifiedAt: now, provider: 'demo' },
     completedAt: now,
     // 'verified' needs an approved review decision (final KYC), or sanitize lowers it to 'pre-verified'.

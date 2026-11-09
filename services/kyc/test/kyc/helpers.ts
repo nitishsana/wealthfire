@@ -1,15 +1,15 @@
 import { expect } from 'vitest';
 import { DEFAULT_CONFIG, type KycConfig } from '../../src/config';
 import { MemoryLogger } from '../../src/kyc/log';
-import { memoryKycRepos, type KycCaseRecord, type MemoryKycCaseRepo } from '../../src/kyc/repo';
+import { memoryKycRepos } from '../../src/kyc/repo';
 import { kycRoutes } from '../../src/kyc/routes';
 import { KycService } from '../../src/kyc/service';
 import { FakeStaffVerifier } from '../../src/kyc/staff';
 import { FakeUploadSigner } from '../../src/kyc/uploads';
 import { FakePartner } from '../../src/partner/fake';
-import type { AuditEntry, AuditLog, CasePage, ReviewCaseStore } from '../../src/review/ports';
 import { reviewRoutes } from '../../src/review/routes';
 import { createRouter, type HttpRequest, type HttpResponse } from '../../src/router';
+import { reviewCaseStore, webhookCaseStore } from '../../src/store/views';
 import { MOBILE, setup as authSetup } from '../auth/helpers';
 
 export const RETURN_URL = 'https://nitishsana.github.io/wealthfire/kyc/return';
@@ -33,23 +33,6 @@ export const startBody = (pan: string, over: Record<string, unknown> = {}) => ({
   firstName: 'Asha', lastName: 'Rao', dob: '15/08/1990', pan, aadhaarLast4: AADHAAR_LAST4, deviceResult: 'pre-verified', ...over,
 });
 
-/** ReviewCaseStore over the KYC case repo, so staff decisions hit the same records. */
-class ReviewOverKyc implements ReviewCaseStore {
-  constructor(private readonly cases: MemoryKycCaseRepo, private readonly audit: AuditLog) {}
-  async listUnderReview(q: { limit: number }): Promise<CasePage> {
-    return { items: this.cases.all().filter((c) => c.status === 'under-review').slice(0, q.limit) };
-  }
-  async get(id: string) {
-    return this.cases.get(id);
-  }
-  async saveDecision(w: { before: KycCaseRecord; after: KycCaseRecord; audit: AuditEntry }) {
-    const ok = await this.cases.save(w.after as KycCaseRecord, w.before.version);
-    if (!ok) return 'conflict' as const;
-    await this.audit.write(w.audit);
-    return 'ok' as const;
-  }
-}
-
 export function env(cfg: Partial<KycConfig> = {}) {
   const a = authSetup();
   const repos = memoryKycRepos();
@@ -60,18 +43,20 @@ export function env(cfg: Partial<KycConfig> = {}) {
   staff.add('staff-token-reviewer-0001', { id: 'staff-1', groups: ['reviewer'] });
   staff.add('staff-token-viewer-00001', { id: 'staff-2', groups: ['viewer'] });
   const config: KycConfig = { ...DEFAULT_CONFIG, ...cfg };
-  const svc = new KycService({
-    repos, partner, uploads, encryptor: a.encryptor, mac: a.mac, clock: a.clock, config,
-    returnUrlPrefixes: [`${ORIGIN}/`, 'wealthfire://'],
-  });
-  const reviewAudit: AuditEntry[] = [];
+  // the production default allow-list (https://nitishsana.github.io/wealthfire/, 127.0.0.1:5180, wealthfire://)
+  const svc = new KycService({ repos, partner, uploads, encryptor: a.encryptor, mac: a.mac, clock: a.clock, config });
+  // the review routes and the webhook view use the SAME store and audit log as the KYC routes
   const review = reviewRoutes({
-    cases: new ReviewOverKyc(repos.cases, { write: async (e) => void reviewAudit.push(e), listForUser: async () => [] }),
-    audit: { write: async (e) => void reviewAudit.push(e), listForUser: async () => [] },
+    cases: reviewCaseStore(repos.cases),
+    audit: repos.audit,
     documents: { list: async () => [] },
     signer: { sign: async () => 'https://signed.invalid/x' },
     clock: a.clock,
+    onApproved: async (userId) => void (await svc.uploadToKra(userId)),
   });
+  const webhookCases = webhookCaseStore(repos.cases);
+  /** staff (review.*) audit rows, oldest first */
+  const reviewAudit = () => repos.audit.all().filter((r) => r.action.startsWith('review.'));
   const router = createRouter({
     auth: { otp: a.otp, tokens: a.tokens, clock: a.clock },
     tokens: a.tokens,
@@ -121,7 +106,10 @@ export function env(cfg: Partial<KycConfig> = {}) {
     uploads.markUploaded(uploads.signed[uploads.signed.length - 1]!.key);
     return up.uploadId as string;
   }
-  return { ...a, repos, partner, uploads, logger, staff, svc, router, call, signIn, userIdOf, uploadSelfie, seen, config, reviewAudit };
+  return {
+    ...a, repos, partner, uploads, logger, staff, svc, router, call, signIn, userIdOf, uploadSelfie, seen, config, reviewAudit,
+    webhookCases,
+  };
 }
 
 export type Env = ReturnType<typeof env>;

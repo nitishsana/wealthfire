@@ -10,8 +10,8 @@
 import { randomUUID } from 'node:crypto';
 import { normalizePan } from '@wealthfire/core';
 import type { KycConfig } from '../config';
-import { decide } from '../decide';
 import type { Clock } from '../lib/clock';
+import { decideFromEvidence } from '../store/evidence';
 import { hmacLookup, sha256, type Encryptor, type MacSigner } from '../lib/crypto';
 import { isIndividualPan, parseDob } from '../match';
 import { isPartnerTimeout, type KycPartner, type PaidCheck } from '../partner/types';
@@ -29,6 +29,16 @@ export const DEFAULT_CHECK_COSTS: Readonly<Record<PaidCheck, number>> = Object.f
   esign: 10,
   'kra-upload': 5,
 });
+
+/** Tries per partner call before it counts as a timeout (placeholder: the first call + one retry). */
+export const DEFAULT_PARTNER_ATTEMPTS = 2;
+
+/** Return-URL allow-list for DigiLocker / e-sign (placeholder until the app URLs are final). */
+export const DEFAULT_RETURN_URL_PREFIXES: readonly string[] = Object.freeze([
+  'https://nitishsana.github.io/wealthfire/',
+  'http://127.0.0.1:5180/',
+  'wealthfire://',
+]);
 
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 export const UPLOAD_URL_TTL_SEC = 300;
@@ -52,10 +62,10 @@ export interface KycServiceDeps {
   mac: MacSigner;
   clock: Clock;
   config: KycConfig;
-  /** allowed prefixes for DigiLocker / e-sign return URLs (app origins and the app scheme) */
-  returnUrlPrefixes: readonly string[];
+  /** allowed prefixes for DigiLocker / e-sign return URLs (default DEFAULT_RETURN_URL_PREFIXES) */
+  returnUrlPrefixes?: readonly string[];
   costs?: Partial<Record<PaidCheck, number>>;
-  /** tries per partner call before it counts as a timeout (default 2) */
+  /** tries per partner call before it counts as a timeout (default DEFAULT_PARTNER_ATTEMPTS) */
   partnerAttempts?: number;
   /** S3 key prefix (default 'kyc/', the prefix the api Lambda may write) */
   docsPrefix?: string;
@@ -144,6 +154,9 @@ function snapshot(c: KycCaseRecord | null): CaseSnapshot | null {
 
 const isTimeout = (v: unknown): v is 'timeout' => v === 'timeout';
 
+/** Audit action of a KYC-route system write. */
+type KycAction = `kyc.${string}`;
+
 // ---------- service ----------
 
 export class KycService {
@@ -152,7 +165,7 @@ export class KycService {
   private readonly newId: () => string;
 
   constructor(private readonly deps: KycServiceDeps) {
-    this.attempts = Math.max(1, deps.partnerAttempts ?? 2);
+    this.attempts = Math.max(1, deps.partnerAttempts ?? DEFAULT_PARTNER_ATTEMPTS);
     this.prefix = deps.docsPrefix ?? DEFAULT_DOCS_PREFIX;
     this.newId = deps.newId ?? randomUUID;
   }
@@ -206,18 +219,20 @@ export class KycService {
   }
 
   /**
-   * User-triggered calls count against the user's daily cap (R7); system follow-ups (PAN check,
-   * KRA upload) happen at most once per step and are not capped. Then calls the partner with
-   * retries; every attempt is logged in `costs`. Returns 'timeout' when all attempts timed out.
+   * Calls the partner with retries. EVERY paid partner call counts against the user's daily cap
+   * (R7): user steps, system follow-ups (PAN check, KRA upload) and each retry. No call is made
+   * past the cap: before the first try that is `limit_reached`; before a retry the call ends as
+   * 'timeout' (a later retry continues it). Every attempt is logged in `costs`.
    */
-  private async paid<T>(userId: string, check: PaidCheck, capped: boolean, fn: () => Promise<T>): Promise<T | 'timeout'> {
+  private async paid<T>(userId: string, check: PaidCheck, fn: () => Promise<T>): Promise<T | 'timeout'> {
     const { costs } = this.deps.repos;
     const { day, month, at } = this.day();
-    if (capped && !(await costs.reserve(userId, day, this.deps.config.maxPaidChecksPerDay))) {
-      throw new KycError('limit_reached');
-    }
     const costInr = this.deps.costs?.[check] ?? DEFAULT_CHECK_COSTS[check];
     for (let i = 0; i < this.attempts; i++) {
+      if (!(await costs.reserve(userId, day, this.deps.config.maxPaidChecksPerDay))) {
+        if (i === 0) throw new KycError('limit_reached');
+        return 'timeout';
+      }
       await costs.record({ month, checkId: this.newId(), check, costInr, userId, at });
       try {
         return await fn();
@@ -251,23 +266,8 @@ export class KycService {
 
   /** Re-decides `rec` (status, path, reason, next, checks) from its evidence. */
   private decided(before: KycCaseRecord | null, rec: KycCaseRecord): KycCaseRecord {
-    const e = rec.evidence;
-    const d = decide(
-      {
-        current: rec.status,
-        currentReason: before ? before.reason : null,
-        deviceHandCheck: e.deviceHandCheck,
-        typed: e.typed,
-        panIndividual: e.panIndividual,
-        otpAadhaarLast4: e.otpAadhaarLast4,
-        ...(e.kra !== undefined ? { kra: e.kra } : {}),
-        ...(e.aadhaar !== undefined ? { aadhaar: e.aadhaar } : {}),
-        ...(e.pan !== undefined ? { pan: e.pan } : {}),
-        ...(e.face !== undefined ? { face: e.face } : {}),
-        ...(e.esign !== undefined ? { esign: e.esign } : {}),
-      },
-      this.deps.config,
-    );
+    // Same evidence reading as the webhook (src/store/evidence.ts).
+    const d = decideFromEvidence(rec.evidence, rec.status, before ? before.reason : null, this.deps.config);
     const out: KycCaseRecord = {
       ...rec,
       status: d.status,
@@ -281,7 +281,7 @@ export class KycService {
     return out;
   }
 
-  private audit(before: KycCaseRecord | null, after: KycCaseRecord, action: string, ip?: string): KycAuditRow {
+  private audit(before: KycCaseRecord | null, after: KycCaseRecord, action: KycAction, ip?: string): KycAuditRow {
     const ts = `${new Date(this.deps.clock.now()).toISOString()}#${this.newId()}`;
     return { userId: after.userId, ts, actor: 'system', action, before: snapshot(before), after: snapshot(after), ...(ip ? { ip } : {}) };
   }
@@ -292,7 +292,7 @@ export class KycService {
    * concurrent change.
    */
   private async commit(
-    userId: string, action: string, mutate: (rec: KycCaseRecord) => void, opts: { ip?: string; redecide?: boolean } = {},
+    userId: string, action: KycAction, mutate: (rec: KycCaseRecord) => void, opts: { ip?: string; redecide?: boolean } = {},
   ): Promise<KycCaseRecord> {
     for (let i = 0; i < SAVE_RETRIES; i++) {
       const before = await this.load(userId);
@@ -320,7 +320,7 @@ export class KycService {
     } catch {
       throw new KycError('bad_request');
     }
-    if (!this.deps.returnUrlPrefixes.some((p) => url.startsWith(p))) throw new KycError('bad_request');
+    if (!(this.deps.returnUrlPrefixes ?? DEFAULT_RETURN_URL_PREFIXES).some((p) => url.startsWith(p))) throw new KycError('bad_request');
     return url;
   }
 
@@ -328,28 +328,63 @@ export class KycService {
     return this.deps.encryptor.decrypt(rec.panEnc, { purpose: 'pan', userId: rec.userId });
   }
 
+  /**
+   * A system follow-up's paid call. Past the daily cap it is deferred (null): the step stays as
+   * `next` and GET /kyc/status runs it on a later day, so the user's own step still succeeds.
+   */
+  private async systemPaid<T>(userId: string, check: PaidCheck, fn: () => Promise<T>): Promise<T | 'timeout' | null> {
+    try {
+      return await this.paid(userId, check, fn);
+    } catch (e) {
+      if (e instanceof KycError && e.code === 'limit_reached') return null;
+      throw e;
+    }
+  }
+
+  /** True when the case waits for its KRA upload (full-KYC verified or staff-approved). */
+  private kraUploadDue(rec: KycCaseRecord): boolean {
+    return rec.status === 'verified' && rec.next === 'kra-upload' && !rec.partnerRefs.kraUpload;
+  }
+
   /** System follow-ups after a change: PAN check when it is next; KRA upload once verified. */
   private async advance(userId: string): Promise<KycCaseRecord> {
     let rec = await this.load(userId);
     if (rec.next === 'pan-check' && !TERMINAL.has(rec.status)) {
       const pan = await this.pan(rec);
-      const r = await this.paid(userId, 'pan-verify', false, () =>
+      const r = await this.systemPaid(userId, 'pan-verify', () =>
         this.deps.partner.verifyPan(pan, `${rec.evidence.typed.firstName} ${rec.evidence.typed.lastName}`));
+      if (r === null) return rec;
       rec = await this.commit(userId, 'kyc.pan-check', (w) => {
         if (w.next !== 'pan-check') throw new KycError('conflict');
         w.evidence.pan = r;
       });
     }
-    if (rec.status === 'verified' && rec.next === 'kra-upload' && !rec.partnerRefs.kraUpload) {
-      const r = await this.paid(userId, 'kra-upload', false, () => this.deps.partner.uploadToKra(userId));
-      if (!isTimeout(r)) {
-        rec = await this.commit(userId, 'kyc.kra-upload', (w) => {
-          w.partnerRefs.kraUpload = r.ref;
-          w.next = 'none';
-        }, { redecide: false });
+    if (this.kraUploadDue(rec)) {
+      const r = await this.systemPaid(userId, 'kra-upload', () => this.deps.partner.uploadToKra(userId));
+      if (r !== null && !isTimeout(r)) {
+        try {
+          rec = await this.commit(userId, 'kyc.kra-upload', (w) => {
+            // another run stored its upload first: keep that one
+            if (!this.kraUploadDue(w)) throw new KycError('conflict');
+            w.partnerRefs.kraUpload = r.ref;
+            w.next = 'none';
+          }, { redecide: false });
+        } catch (e) {
+          if (!(e instanceof KycError && e.code === 'conflict')) throw e;
+          rec = await this.load(userId);
+        }
       }
     }
     return rec;
+  }
+
+  /**
+   * System action after a staff Approve (or any verified case still waiting for it): uploads the
+   * KYC to the KRA, audited as 'kyc.kra-upload'. Retry-safe: a no-op once the upload ref is stored;
+   * a timeout or the daily cap leaves the step pending for GET /kyc/status to retry.
+   */
+  async uploadToKra(userId: string): Promise<StatusView> {
+    return statusView(await this.advance(userId));
   }
 
   // ----- routes -----
@@ -385,8 +420,17 @@ export class KycService {
     };
     // A hand check or a non-individual PAN is decided without paying for a lookup.
     let rec = this.decided(null, draft);
+    // One PAN, one account: a PAN another account already holds goes to a person, with no paid
+    // call. The response never says which account holds it.
+    if (rec.status !== 'rejected' && !(await this.deps.repos.cases.claimPan(draft.panHash, userId))) {
+      rec = { ...draft, status: 'under-review', path: null, reason: 'pan-in-use', next: 'wait', checks: {} };
+      if (!(await this.deps.repos.cases.save(rec, 0, this.audit(null, rec, 'kyc.start', ip)))) {
+        throw new KycError('already_started');
+      }
+      return statusView(rec);
+    }
     if (rec.next === 'kra-lookup') {
-      const r = await this.paid(userId, 'kra-lookup', true, () => this.deps.partner.lookupKyc(input.pan));
+      const r = await this.paid(userId, 'kra-lookup', () => this.deps.partner.lookupKyc(input.pan));
       if (!isTimeout(r)) draft.partnerRefs.kra = r.ref;
       draft.evidence.kra = isTimeout(r) ? r : { status: r.status, ...(r.name ? { name: r.name } : {}), ...(r.dob ? { dob: r.dob } : {}) };
       rec = this.decided(null, draft);
@@ -403,7 +447,7 @@ export class KycService {
     const userId = rec.userId;
     if (isTimeout(rec.evidence.kra)) {
       const pan = await this.pan(rec);
-      const r = await this.paid(userId, 'kra-lookup', true, () => this.deps.partner.lookupKyc(pan));
+      const r = await this.paid(userId, 'kra-lookup', () => this.deps.partner.lookupKyc(pan));
       await this.commit(userId, 'kyc.kra-retry', (w) => {
         if (!isTimeout(w.evidence.kra)) throw new KycError('conflict');
         if (!isTimeout(r)) w.partnerRefs.kra = r.ref;
@@ -411,7 +455,7 @@ export class KycService {
       }, { ip });
     } else if (isTimeout(rec.evidence.pan)) {
       const pan = await this.pan(rec);
-      const r = await this.paid(userId, 'pan-verify', true, () =>
+      const r = await this.paid(userId, 'pan-verify', () =>
         this.deps.partner.verifyPan(pan, `${rec.evidence.typed.firstName} ${rec.evidence.typed.lastName}`));
       await this.commit(userId, 'kyc.pan-retry', (w) => {
         if (!isTimeout(w.evidence.pan)) throw new KycError('conflict');
@@ -430,7 +474,7 @@ export class KycService {
     const returnUrl = this.assertReturnUrl(b.returnUrl);
     const rec = await this.load(userId);
     if (!this.stepOpen(rec, 'aadhaar', isTimeout(rec.evidence.aadhaar))) throw new KycError('wrong_step');
-    const r = await this.paid(userId, 'aadhaar', true, () => this.deps.partner.startAadhaar(userId, mode, returnUrl));
+    const r = await this.paid(userId, 'aadhaar', () => this.deps.partner.startAadhaar(userId, mode, returnUrl));
     if (isTimeout(r)) throw new KycError('partner_unavailable');
     const after = await this.commit(userId, 'kyc.aadhaar-start', (w) => {
       if (!this.stepOpen(w, 'aadhaar', isTimeout(w.evidence.aadhaar))) throw new KycError('wrong_step');
@@ -488,7 +532,7 @@ export class KycService {
     if (!aadhaarRef) throw new KycError('wrong_step');
     const key = this.docKey(userId, uploadId);
     if (!(await this.deps.uploads.exists(key))) throw new KycError('upload_missing');
-    const r = await this.paid(userId, 'face-match', true, () => this.deps.partner.faceMatch(key, aadhaarRef));
+    const r = await this.paid(userId, 'face-match', () => this.deps.partner.faceMatch(key, aadhaarRef));
     await this.commit(userId, 'kyc.selfie', (w) => {
       if (!open(w)) throw new KycError('wrong_step');
       w.evidence.face = [...(w.evidence.face ?? []), r];
@@ -502,7 +546,7 @@ export class KycService {
     const rec = await this.load(userId);
     const open = (r: KycCaseRecord) => this.stepOpen(r, 'esign', isTimeout(r.evidence.esign));
     if (!open(rec)) throw new KycError('wrong_step');
-    const r = await this.paid(userId, 'esign', true, () => this.deps.partner.startEsign(userId, returnUrl));
+    const r = await this.paid(userId, 'esign', () => this.deps.partner.startEsign(userId, returnUrl));
     if (isTimeout(r)) throw new KycError('partner_unavailable');
     const after = await this.commit(userId, 'kyc.esign-start', (w) => {
       if (!open(w)) throw new KycError('wrong_step');

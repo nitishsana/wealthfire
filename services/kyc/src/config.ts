@@ -8,7 +8,7 @@ export interface KycConfig {
   livenessRequired: boolean;
   /** failed liveness attempts that reject the case (design §5: "failed twice") */
   livenessFailsToReject: number;
-  /** paid partner checks one user may trigger per day (R7) */
+  /** paid partner calls per user per day, every call counted (R7) */
   maxPaidChecksPerDay: number;
 }
 
@@ -16,7 +16,9 @@ export const DEFAULT_CONFIG: Readonly<KycConfig> = Object.freeze({
   faceMatchMin: 0.8,
   livenessRequired: true,
   livenessFailsToReject: 2,
-  maxPaidChecksPerDay: 5,
+  // every paid partner call counts (user steps, system follow-ups and retries); a clean full KYC
+  // is 6 calls, so 10 leaves room for one retake and a couple of retries
+  maxPaidChecksPerDay: 10,
 });
 
 type Env = Record<string, string | undefined>;

@@ -6,54 +6,57 @@ import type {
 } from 'aws-lambda';
 import { KMSClient } from '@aws-sdk/client-kms';
 import { S3Client } from '@aws-sdk/client-s3';
+import { SESv2Client } from '@aws-sdk/client-sesv2';
+import { SNSClient } from '@aws-sdk/client-sns';
 import { loadConfig } from '../config';
-import { OtpService, type Sender } from '../auth/otp';
+import { OtpService } from '../auth/otp';
+import { senderFromEnv } from '../auth/senders';
 import { systemClock } from '../lib/clock';
 import { Argon2Hasher, KmsEnvelopeEncryptor, KmsMacSigner } from '../lib/crypto';
+import { ENV, listEnv, requireEnv, type Env } from '../lib/env';
 import { createDocClient, dynamoRepos, tableNamesFromEnv } from '../lib/repo';
 import { KmsTokenSigner, TokenService } from '../lib/tokens';
 import { ConsoleLogger } from '../kyc/log';
 import { dynamoKycRepos, kycTablesFromEnv } from '../kyc/repo';
 import { kycRoutes } from '../kyc/routes';
-import { DEFAULT_DOCS_PREFIX, KycService } from '../kyc/service';
+import { DEFAULT_DOCS_PREFIX, DEFAULT_RETURN_URL_PREFIXES, KycService } from '../kyc/service';
 import { CognitoStaffVerifier } from '../kyc/staff';
 import { S3UploadSigner } from '../kyc/uploads';
 import { FakePartner } from '../partner/fake';
 import type { KycPartner } from '../partner/types';
-import { DynamoAuditLog, DynamoReviewCaseStore } from '../review/dynamo';
 import { reviewRoutes } from '../review/routes';
 import { S3DocumentStore, S3DownloadSigner } from '../review/s3';
+import { reviewCaseStore } from '../store/views';
 import { createRouter, type HttpRequest, type HttpResponse } from '../router';
 
-type Env = Record<string, string | undefined>;
 type Event = APIGatewayProxyEvent | APIGatewayProxyEventV2;
 type Result = APIGatewayProxyResult | APIGatewayProxyStructuredResultV2;
 
 /** App deep-link scheme used by the phone apps for DigiLocker / e-sign returns. */
 export const APP_RETURN_SCHEME = 'wealthfire://';
 
-function need(env: Env, ...keys: string[]): string {
-  for (const k of keys) if (env[k]) return env[k] as string;
-  throw new Error(`Missing env ${keys.join(' / ')}`);
-}
-
-/** No SMS / email sender is wired yet (auth wave): OTP sends answer 503 until one is. */
-class UnconfiguredSender implements Sender {
-  async send(): Promise<void> {
-    throw new Error('OTP sender not configured');
-  }
-}
-
 /** FakePartner on dev until sandbox access; prod refuses to start without a real adapter. */
 export function createPartner(env: Env): KycPartner {
-  const choice = env.KYC_PARTNER ?? (env.STAGE === 'dev' ? 'fake' : undefined);
-  if (choice === 'fake' && env.STAGE !== 'prod') return new FakePartner();
+  const stage = env[ENV.stage];
+  const choice = env[ENV.partner] ?? (stage === 'dev' ? 'fake' : undefined);
+  if (choice === 'fake' && stage !== 'prod') return new FakePartner();
   throw new Error('No KYC partner adapter configured for this stage');
 }
 
+/**
+ * DigiLocker / e-sign return-URL allow-list: RETURN_URL_PREFIXES (comma-separated, set by the CDK
+ * stack), else the built-in default. Each entry must be an https / local-http prefix ending in '/'
+ * or the app scheme, so a bare origin can never open the whole host.
+ */
 export function returnUrlPrefixes(env: Env): string[] {
-  const origins = (env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  return [...origins.map((o) => `${o.replace(/\/+$/, '')}/`), APP_RETURN_SCHEME];
+  const list = listEnv(env, ENV.returnUrlPrefixes);
+  if (list.length === 0) return [...DEFAULT_RETURN_URL_PREFIXES];
+  for (const p of list) {
+    const ok = p === APP_RETURN_SCHEME
+      || ((p.startsWith('https://') || p.startsWith('http://127.0.0.1:') || p.startsWith('http://localhost:')) && p.endsWith('/'));
+    if (!ok) throw new Error(`Bad ${ENV.returnUrlPrefixes} entry`);
+  }
+  return list;
 }
 
 export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promise<HttpResponse> {
@@ -61,26 +64,20 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
   const doc = createDocClient();
   const kms = new KMSClient({});
   const s3 = new S3Client({});
-  const mac = new KmsMacSigner(kms, need(env, 'HMAC_KEY_ID'));
-  const encryptor = new KmsEnvelopeEncryptor(kms, need(env, 'DATA_KEY_ID'));
-  const signer = new KmsTokenSigner(kms, need(env, 'JWT_KEY_ID'));
-  const authRepos = dynamoRepos(
-    tableNamesFromEnv({
-      USERS_TABLE: env.USERS_TABLE ?? env.TABLE_USERS,
-      SESSIONS_TABLE: env.SESSIONS_TABLE ?? env.TABLE_SESSIONS,
-      OTP_TABLE: env.OTP_TABLE ?? env.TABLE_OTP,
-    }),
-    doc,
-  );
+  const mac = new KmsMacSigner(kms, requireEnv(env, ENV.hmacKeyId));
+  const encryptor = new KmsEnvelopeEncryptor(kms, requireEnv(env, ENV.dataKeyId));
+  const signer = new KmsTokenSigner(kms, requireEnv(env, ENV.jwtKeyId));
+  const authRepos = dynamoRepos(tableNamesFromEnv(env), doc);
   const tokens = new TokenService({ sessions: authRepos.sessions, signer, clock });
-  const otp = new OtpService({
-    repos: authRepos, clock, mac, encryptor, hasher: new Argon2Hasher(), sender: new UnconfiguredSender(), tokens,
-  });
+  const sender = senderFromEnv(env, { sns: () => new SNSClient({}), ses: () => new SESv2Client({}) });
+  const otp = new OtpService({ repos: authRepos, clock, mac, encryptor, hasher: new Argon2Hasher(), sender, tokens });
   const tables = kycTablesFromEnv(env);
-  const bucket = need(env, 'DOCS_BUCKET');
-  const docsPrefix = env.DOCS_PREFIX ?? DEFAULT_DOCS_PREFIX;
+  const bucket = requireEnv(env, ENV.docsBucket);
+  const docsPrefix = env[ENV.docsPrefix] ?? DEFAULT_DOCS_PREFIX;
+  // One shared store for the KYC routes and the review routes.
+  const repos = dynamoKycRepos(tables, doc);
   const kyc = new KycService({
-    repos: dynamoKycRepos(tables, doc),
+    repos,
     partner: createPartner(env),
     uploads: new S3UploadSigner(s3, bucket),
     encryptor,
@@ -91,14 +88,17 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
     docsPrefix,
   });
   const review = reviewRoutes({
-    cases: new DynamoReviewCaseStore(doc, tables.cases, tables.audit),
-    audit: new DynamoAuditLog(doc, tables.audit),
+    cases: reviewCaseStore(repos.cases),
+    audit: repos.audit,
     documents: new S3DocumentStore(s3, bucket, docsPrefix),
     signer: new S3DownloadSigner(s3, bucket),
     clock,
+    onApproved: async (userId) => void (await kyc.uploadToKra(userId)),
   });
   const staff = new CognitoStaffVerifier(
-    need(env, 'AWS_REGION', 'AWS_DEFAULT_REGION'), need(env, 'STAFF_USER_POOL_ID'), need(env, 'STAFF_CLIENT_ID'),
+    env.AWS_REGION ?? requireEnv(env, 'AWS_DEFAULT_REGION'),
+    requireEnv(env, ENV.staffUserPoolId),
+    requireEnv(env, ENV.staffClientId),
   );
   return createRouter({
     auth: { otp, tokens, clock },
@@ -106,7 +106,7 @@ export function buildRouter(env: Env = process.env): (req: HttpRequest) => Promi
     kyc: kycRoutes(kyc),
     review,
     staff,
-    allowedOrigins: (env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    allowedOrigins: listEnv(env, ENV.allowedOrigins),
     logger: new ConsoleLogger(),
     clock,
   });

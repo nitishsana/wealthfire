@@ -6,11 +6,15 @@ import { fileURLToPath } from 'node:url';
 import {
   Annotations,
   Duration,
+  Lazy,
   RemovalPolicy,
   Stack,
+  Token,
   type StackProps,
   aws_apigateway as apigw,
   aws_budgets as budgets,
+  aws_cloudfront as cloudfront,
+  aws_cloudfront_origins as origins,
   aws_cognito as cognito,
   aws_dynamodb as dynamodb,
   aws_iam as iam,
@@ -23,6 +27,8 @@ import {
   CfnOutput,
 } from 'aws-cdk-lib';
 import type { Construct } from 'constructs';
+// The one env naming scheme, shared with the Lambda code (no AWS SDK imports in that file).
+import { ENV, TABLE_ENV } from '../src/lib/env.js';
 
 export type Stage = 'dev' | 'prod';
 
@@ -38,6 +44,27 @@ export const PROD_ORIGIN = 'https://nitishsana.github.io';
 export const DEV_PREVIEW_ORIGIN = 'http://127.0.0.1:5180';
 /** S3 key prefix under which the api Lambda may read and write KYC documents. */
 export const DOCS_PREFIX = 'kyc/';
+/** DigiLocker / e-sign return-URL allow-list (the dev stack adds the local preview). */
+export const PROD_RETURN_URL_PREFIXES = ['https://nitishsana.github.io/wealthfire/', 'wealthfire://'] as const;
+export const DEV_RETURN_URL_PREFIXES = [...PROD_RETURN_URL_PREFIXES, `${DEV_PREVIEW_ORIGIN}/`] as const;
+
+/**
+ * CSP for the review console. Mirrors review-console/build.mjs (which also writes it as a meta tag)
+ * and adds frame-ancestors, which only works as a real header.
+ */
+export function consoleCsp(apiOrigin: string, cognitoOrigin: string): string {
+  return [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self'",
+    `connect-src ${apiOrigin} ${cognitoOrigin}`,
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+    'upgrade-insecure-requests',
+  ].join('; ');
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DIST = join(here, '..', 'dist');
@@ -50,6 +77,44 @@ function numberContext(scope: Construct, key: string, fallback: number): number 
   if (!Number.isFinite(n) || n <= 0) throw new Error(`Context "${key}" must be a positive number, got "${String(raw)}"`);
   return n;
 }
+
+/** A list context value: a JSON array or a comma-separated string. Empty → []. */
+function listContext(scope: Construct, key: string): string[] {
+  const raw: unknown = scope.node.tryGetContext(key);
+  if (raw === undefined || raw === null || raw === '') return [];
+  const items = Array.isArray(raw) ? raw : String(raw).split(',');
+  return items.map((s) => String(s).trim()).filter(Boolean);
+}
+
+/** An optional string context value matching `re`. Throws (naming the key, not the value) on a bad one. */
+function stringContext(scope: Construct, key: string, re: RegExp): string | undefined {
+  const raw: unknown = scope.node.tryGetContext(key);
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const v = String(raw).trim();
+  if (!re.test(v)) throw new Error(`Context "${key}" is not valid`);
+  return v;
+}
+
+/** Console callback / logout URLs: https, or http://localhost / 127.0.0.1 on dev only (Cognito rule). */
+function consoleUrls(scope: Construct, key: string, isProd: boolean): string[] {
+  const urls = listContext(scope, key);
+  for (const u of urls) {
+    let p: URL;
+    try {
+      p = new URL(u);
+    } catch {
+      throw new Error(`Context "${key}" has an invalid URL`);
+    }
+    const local = p.protocol === 'http:' && (p.hostname === 'localhost' || p.hostname === '127.0.0.1');
+    if (!(p.protocol === 'https:' || (local && !isProd)) || p.hash || p.username || p.password) {
+      throw new Error(`Context "${key}" URLs must be https${isProd ? '' : ' (or http://localhost / 127.0.0.1 on dev)'}`);
+    }
+  }
+  return urls;
+}
+
+const DOMAIN_PREFIX = /^(?!.*(?:aws|amazon|cognito))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const EMAIL = /^[^\s@<>()",;:]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 
 export class KycStack extends Stack {
   constructor(scope: Construct, id: string, props: KycStackProps) {
@@ -128,6 +193,67 @@ export class KycStack extends Stack {
     const audit = table('AuditTable', 'audit', 'userId', 'ts');
     // Design key "yyyy-mm#checkId": partition month (yyyy-mm), sort checkId.
     const costs = table('CostsTable', 'costs', 'month', 'checkId');
+    // Seen partner webhook event ids (replay / duplicate guard); items expire via TTL after a day.
+    const webhookEvents = table('WebhookEventsTable', 'webhook_events', 'eventId', undefined, 'expiresAt');
+
+    // ---------- Review console hosting: private S3 + CloudFront (OAC) ----------
+    // Files are uploaded by hand after `node review-console/build.mjs` (aws s3 sync dist/ s3://<ConsoleBucketName>);
+    // a BucketDeployment would add a custom-resource Lambda with wildcard S3 actions.
+    const consoleBucket = new s3.Bucket(this, 'ConsoleBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: false,
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      removalPolicy,
+    });
+    const domainPrefix = stringContext(this, 'cognitoDomainPrefix', DOMAIN_PREFIX) ?? `${prefix}-staff`;
+    const cognitoOrigin = `https://${domainPrefix}.auth.${this.region}.amazoncognito.com`;
+    // The API is created further down; the CSP resolves its origin at synth time.
+    let apiForCsp: apigw.RestApi | undefined;
+    const apiOrigin = Lazy.string({
+      produce: () => {
+        if (!apiForCsp) throw new Error('API not created');
+        return `https://${apiForCsp.restApiId}.execute-api.${this.region}.${this.urlSuffix}`;
+      },
+    });
+    const consoleHeaders = new cloudfront.ResponseHeadersPolicy(this, 'ConsoleHeaders', {
+      responseHeadersPolicyName: `${prefix}-review-console`,
+      comment: 'Wealthfire review console security headers',
+      securityHeadersBehavior: {
+        contentSecurityPolicy: { contentSecurityPolicy: consoleCsp(apiOrigin, cognitoOrigin), override: true },
+        strictTransportSecurity: {
+          accessControlMaxAge: Duration.days(730), includeSubdomains: true, preload: true, override: true,
+        },
+        contentTypeOptions: { override: true },
+        frameOptions: { frameOption: cloudfront.HeadersFrameOption.DENY, override: true },
+        referrerPolicy: { referrerPolicy: cloudfront.HeadersReferrerPolicy.NO_REFERRER, override: true },
+      },
+    });
+    const consoleCdn = new cloudfront.Distribution(this, 'ConsoleDistribution', {
+      comment: `Wealthfire KYC review console (${stage})`,
+      defaultRootObject: 'index.html',
+      priceClass: cloudfront.PriceClass.PRICE_CLASS_200,
+      httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(consoleBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        responseHeadersPolicy: consoleHeaders,
+      },
+    });
+    const consoleUrl = `https://${consoleCdn.distributionDomainName}/`;
+    // Hosted UI redirect targets: context, else the CloudFront URL.
+    const callbackUrls = consoleUrls(this, 'consoleCallbackUrls', isProd);
+    const logoutUrls = consoleUrls(this, 'consoleLogoutUrls', isProd);
+    const consoleCallbacks = callbackUrls.length ? callbackUrls : [consoleUrl];
+    const consoleLogouts = logoutUrls.length ? logoutUrls : consoleCallbacks;
+    // Browser origins of the console (for API / docs CORS).
+    const consoleOrigins = callbackUrls.length
+      ? [...new Set(callbackUrls.map((u) => new URL(u).origin))]
+      : [`https://${consoleCdn.distributionDomainName}`];
+    const apiOrigins = [...allowedOrigins, ...consoleOrigins.filter((o) => Token.isUnresolved(o) || !allowedOrigins.includes(o))];
 
     // ---------- S3 documents bucket ----------
     // Retention is set by the compliance adviser (DOC_RETENTION_DAYS). 2555 days (~7 years) is only
@@ -146,12 +272,19 @@ export class KycStack extends Stack {
         { id: 'delete-after-retention', enabled: true, expiration: Duration.days(retentionDays) },
         { id: 'abort-incomplete-uploads', enabled: true, abortIncompleteMultipartUploadAfter: Duration.days(1) },
       ],
-      // Browser uploads/downloads via presigned URLs.
+      // Browser uploads/downloads via presigned URLs: the apps PUT + GET, the review console GETs.
       cors: [
         {
+          id: 'apps',
           allowedOrigins,
           allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET],
           allowedHeaders: ['content-type', 'content-length'],
+          maxAge: 300,
+        },
+        {
+          id: 'review-console',
+          allowedOrigins: consoleOrigins,
+          allowedMethods: [s3.HttpMethods.GET],
           maxAge: 300,
         },
       ],
@@ -198,35 +331,58 @@ export class KycStack extends Stack {
       groupName: 'reviewer',
       description: 'Staff who may approve or reject Under-review KYC cases',
     });
+    // Hosted UI (managed sign-in) for the console: authorization code flow. The client is public
+    // (no secret), so Cognito requires and checks PKCE from the browser.
+    const hostedUi = staffPool.addDomain('HostedUiDomain', { cognitoDomain: { domainPrefix } });
     const staffClient = staffPool.addClient('ReviewConsoleClient', {
       userPoolClientName: `${prefix}-review-console`,
       generateSecret: false,
       authFlows: { userSrp: true },
+      oAuth: {
+        flows: { authorizationCodeGrant: true, implicitCodeGrant: false, clientCredentials: false },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
+        callbackUrls: consoleCallbacks,
+        logoutUrls: consoleLogouts,
+      },
+      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
       preventUserExistenceErrors: true,
+      enableTokenRevocation: true,
       accessTokenValidity: Duration.minutes(15),
       idTokenValidity: Duration.minutes(15),
       refreshTokenValidity: Duration.hours(8),
     });
 
     // ---------- Lambdas ----------
+    // OTP delivery (optional; a channel without config makes /auth/otp/send answer 503 for it).
+    const smsSenderId = stringContext(this, 'otpSmsSenderId', /^[A-Za-z0-9]{3,11}$/);
+    const smsEntityId = stringContext(this, 'otpSmsEntityId', /^\d{1,30}$/);
+    const smsTemplateId = stringContext(this, 'otpSmsTemplateId', /^\d{1,30}$/);
+    const emailFrom = stringContext(this, 'otpEmailFrom', EMAIL);
+
     const distDir = props.distDir ?? DEFAULT_DIST;
-    const env = {
-      STAGE: stage,
-      ALLOWED_ORIGINS: allowedOrigins.join(','),
-      TABLE_USERS: users.tableName,
-      TABLE_SESSIONS: sessions.tableName,
-      TABLE_OTP: otp.tableName,
-      TABLE_KYC_CASES: kycCases.tableName,
-      TABLE_AUDIT: audit.tableName,
-      TABLE_COSTS: costs.tableName,
-      DOCS_BUCKET: docs.bucketName,
-      DOCS_PREFIX,
-      DATA_KEY_ID: dataKey.keyArn,
-      JWT_KEY_ID: jwtKey.keyArn,
-      HMAC_KEY_ID: hmacKey.keyArn,
-      PARTNER_SECRET_ARN: partnerSecret.secretArn,
-      STAFF_USER_POOL_ID: staffPool.userPoolId,
-      STAFF_CLIENT_ID: staffClient.userPoolClientId,
+    // Every name comes from src/lib/env.ts, the one scheme the Lambda code reads.
+    const env: Record<string, string> = {
+      [ENV.stage]: stage,
+      [ENV.allowedOrigins]: apiOrigins.join(','),
+      [ENV.returnUrlPrefixes]: (isProd ? PROD_RETURN_URL_PREFIXES : DEV_RETURN_URL_PREFIXES).join(','),
+      [TABLE_ENV.users]: users.tableName,
+      [TABLE_ENV.sessions]: sessions.tableName,
+      [TABLE_ENV.otp]: otp.tableName,
+      [TABLE_ENV.kycCases]: kycCases.tableName,
+      [TABLE_ENV.audit]: audit.tableName,
+      [TABLE_ENV.costs]: costs.tableName,
+      [ENV.docsBucket]: docs.bucketName,
+      [ENV.docsPrefix]: DOCS_PREFIX,
+      [ENV.dataKeyId]: dataKey.keyArn,
+      [ENV.jwtKeyId]: jwtKey.keyArn,
+      [ENV.hmacKeyId]: hmacKey.keyArn,
+      [ENV.partnerSecretArn]: partnerSecret.secretArn,
+      [ENV.staffUserPoolId]: staffPool.userPoolId,
+      [ENV.staffClientId]: staffClient.userPoolClientId,
+      ...(smsSenderId ? { [ENV.smsSenderId]: smsSenderId } : {}),
+      ...(smsEntityId ? { [ENV.smsEntityId]: smsEntityId } : {}),
+      ...(smsTemplateId ? { [ENV.smsTemplateId]: smsTemplateId } : {}),
+      ...(emailFrom ? { [ENV.emailFrom]: emailFrom } : {}),
       NODE_OPTIONS: '--enable-source-maps',
     };
 
@@ -259,10 +415,11 @@ export class KycStack extends Stack {
 
     const apiFn = makeFn('api', Duration.seconds(15), env);
     const webhookFn = makeFn('webhook', Duration.seconds(10), {
-      STAGE: stage,
-      TABLE_KYC_CASES: kycCases.tableName,
-      TABLE_AUDIT: audit.tableName,
-      WEBHOOK_SECRET_ARN: webhookSecret.secretArn,
+      [ENV.stage]: stage,
+      [TABLE_ENV.kycCases]: kycCases.tableName,
+      [TABLE_ENV.audit]: audit.tableName,
+      [TABLE_ENV.webhookEvents]: webhookEvents.tableName,
+      [ENV.webhookSecretArn]: webhookSecret.secretArn,
       NODE_OPTIONS: '--enable-source-maps',
     });
 
@@ -311,6 +468,36 @@ export class KycStack extends Stack {
         resources: [docs.arnForObjects(`${DOCS_PREFIX}*`)],
       }),
     );
+    // The review case detail lists a case's documents (ListObjectsV2, Prefix kyc/<userId>/).
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'DocsList',
+        actions: ['s3:ListBucket'],
+        resources: [docs.bucketArn],
+        conditions: { StringLike: { 's3:prefix': [`${DOCS_PREFIX}*`] } },
+      }),
+    );
+    if (smsSenderId) {
+      // SMS to a phone number has no resource ARN. NotResource on every SNS ARN allows ONLY direct
+      // SMS publishing: no topic or platform endpoint can be published to.
+      apiFn.addToRolePolicy(
+        new iam.PolicyStatement({ sid: 'OtpSms', actions: ['sns:Publish'], notResources: ['arn:aws:sns:*:*:*'] }),
+      );
+    }
+    if (emailFrom) {
+      const domain = emailFrom.split('@')[1] as string;
+      apiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: 'OtpEmail',
+          actions: ['ses:SendEmail'],
+          resources: [
+            `arn:${this.partition}:ses:${this.region}:${this.account}:identity/${emailFrom}`,
+            `arn:${this.partition}:ses:${this.region}:${this.account}:identity/${domain}`,
+          ],
+          conditions: { StringEquals: { 'ses:FromAddress': emailFrom } },
+        }),
+      );
+    }
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         sid: 'PartnerSecretRead',
@@ -320,7 +507,7 @@ export class KycStack extends Stack {
     );
 
     webhookFn.addToRolePolicy(
-      new iam.PolicyStatement({ sid: 'TablesReadWrite', actions: tableRw, resources: tableArns([kycCases, audit]) }),
+      new iam.PolicyStatement({ sid: 'TablesReadWrite', actions: tableRw, resources: tableArns([kycCases, audit, webhookEvents]) }),
     );
     webhookFn.addToRolePolicy(
       new iam.PolicyStatement({
@@ -350,7 +537,8 @@ export class KycStack extends Stack {
         tracingEnabled: false,
       },
       defaultCorsPreflightOptions: {
-        allowOrigins: allowedOrigins,
+        // the apps plus the review console (it calls /review/* from the browser)
+        allowOrigins: apiOrigins,
         allowMethods: ['GET', 'POST', 'OPTIONS'],
         allowHeaders: ['content-type', 'authorization', 'idempotency-key'],
         allowCredentials: true,
@@ -358,6 +546,7 @@ export class KycStack extends Stack {
       },
       disableExecuteApiEndpoint: false,
     });
+    apiForCsp = api;
     const apiIntegration = new apigw.LambdaIntegration(apiFn);
     api.root.addProxy({ defaultIntegration: apiIntegration, anyMethod: true });
 
@@ -440,5 +629,9 @@ export class KycStack extends Stack {
     new CfnOutput(this, 'StaffUserPoolId', { value: staffPool.userPoolId });
     new CfnOutput(this, 'StaffClientId', { value: staffClient.userPoolClientId });
     new CfnOutput(this, 'DocsBucketName', { value: docs.bucketName });
+    new CfnOutput(this, 'ConsoleUrl', { value: consoleUrl });
+    new CfnOutput(this, 'ConsoleBucketName', { value: consoleBucket.bucketName });
+    new CfnOutput(this, 'CognitoHostedUiDomain', { value: hostedUi.baseUrl() });
+    new CfnOutput(this, 'WebhookEventsTableName', { value: webhookEvents.tableName });
   }
 }

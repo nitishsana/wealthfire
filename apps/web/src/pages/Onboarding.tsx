@@ -4,13 +4,16 @@
 // AppData keeps the final PAN, Aadhaar last 4 and masked review fields.
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
-  applyReread, canReread, canSend, canSendForHandCheck, checkOutcome, countsAsFailedRead, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
+  applyReread, canReread, normalizeDob, validateDob, canSend, canSendForHandCheck, checkOutcome, countsAsFailedRead, confirmAadhaarRetype, DOC_MESSAGES, groupAadhaar, initialChecks, MAX_REREADS, maskAadhaar,
   maskEmail, maskMobile, normalizeAadhaar, normalizeEmail, normalizeMobile, normalizePan, onboardingReducer, panSurnameWarning,
   readBlocked, readsLeft, resendIn, reviewFields, sameDocument, takeDocumentNumber, validateAadhaar, validateEmail, validateMobile, validateName, validatePan,
   type ContactKind, type DocFile, type DocKind, type FieldCheck, type KycField, type OnboardingEvent,
 } from '@wealthfire/core';
 import { useStore } from '../store';
-import { otpProvider } from '../otp';
+import { aadhaarOtpProvider, otpProvider } from '../otp';
+import { kycServer } from '../server';
+import { ServerKyc, startDetails } from '../components/ServerKyc';
+import { DobField, isoToDmy } from '../components/DobField';
 import * as readerModule from '../docreader';
 import { documentReader } from '../docreader';
 import { OtpStep, requestOtp, type OtpRequest } from '../components/OtpStep';
@@ -291,7 +294,7 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         <p className="intro">We need these to tie your account to you.</p>
         <Identity initial={ob.identity} onContinue={async (id, digits) => {
           // Req 3.8 / C1: save name + PAN, keep the full Aadhaar in memory, send the Aadhaar OTP.
-          const r = await requestOtp(otpProvider, 'aadhaar', digits, ob.sends.aadhaar, ob.aadhaarLockedUntil);
+          const r = await requestOtp(aadhaarOtpProvider, 'aadhaar', digits, ob.sends.aadhaar, ob.aadhaarLockedUntil);
           setAadhaar(digits);
           setChecks(null);
           setPrevious(null);
@@ -311,14 +314,14 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
         {heading('Verify Aadhaar')}
         <p className="intro">Enter the OTP sent to the mobile linked with Aadhaar {maskAadhaar(aadhaar.slice(-4))}.</p>
         <Card>
-          <OtpStep provider={otpProvider} channel="aadhaar" target={aadhaar}
+          <OtpStep provider={aadhaarOtpProvider} channel="aadhaar" target={aadhaar}
             sends={ob.sends.aadhaar} lockedUntil={ob.aadhaarLockedUntil} initial={firstSend} verifyLabel="Verify Aadhaar"
             onSent={(at) => dispatch({ type: 'otp-sent', channel: 'aadhaar', at })}
             onVerified={(r) => {
               const last4 = r.aadhaarLast4 ?? aadhaar.slice(-4);
               // Req 4.3 / C1: only the last 4 is stored; the full number stays in memory until Check numbers.
               setFirstSend(undefined);
-              dispatch({ type: 'aadhaar-verified', last4, at: new Date().toISOString(), provider: otpProvider.id });
+              dispatch({ type: 'aadhaar-verified', last4, at: new Date().toISOString(), provider: aadhaarOtpProvider.id });
             }}
             onLocked={(until) => dispatch({ type: 'aadhaar-locked', until })} />
           {/* C1: Back returns to "Your details" (name and PAN kept, Aadhaar typed again). */}
@@ -383,6 +386,8 @@ export function OnboardingPage({ onCompleting, onFinish }: Props) {
       <section data-feature="onboard-aadhaar-otp" aria-label="You're all set">
         {heading(ob.identity ? `You're all set, ${ob.identity.firstName}.` : "You're all set.")}
         <p className="intro" role="status">{ob.kyc.status === 'pre-verified' ? DOC_MESSAGES.donePreVerified : ob.kyc.status === 'verified' ? DOC_MESSAGES.doneVerified : UNDER_REVIEW_TEXT}</p>
+        {/* With a KYC server: start the final KYC and follow its next step (R2/R3, design 6). */}
+        {kycServer && <Card title="Final KYC"><ServerKyc client={kycServer} details={startDetails(ob)} autoStart /></Card>}
         <button type="button" className="btn primary" onClick={onFinish}>Go to Home</button>
       </section>
     );
@@ -864,15 +869,17 @@ function SignIn({ onSent }: { onSent: (kind: ContactKind, value: string, r: Extr
   );
 }
 
-interface IdentityValues { firstName: string; lastName: string; pan: string }
+/** dob: ISO yyyy-mm-dd when saved (missing for identities saved before DOB was asked); the form takes DD/MM/YYYY. */
+interface IdentityValues { firstName: string; lastName: string; pan: string; dob?: string }
 
 function Identity({ initial, onContinue }: {
   initial: IdentityValues | null;
-  onContinue: (id: IdentityValues, aadhaarDigits: string) => Promise<void>;
+  onContinue: (id: Required<IdentityValues>, aadhaarDigits: string) => Promise<void>;
 }) {
   const [firstName, setFirst] = useState(initial?.firstName ?? '');
   const [lastName, setLast] = useState(initial?.lastName ?? '');
   const [pan, setPan] = useState(initial?.pan ?? '');
+  const [dob, setDob] = useState(isoToDmy(initial?.dob ?? ''));
   // Full Aadhaar typed here: component state only, empty again after Back.
   const [aadhaar, setAadhaar] = useState('');
   const [showAadhaar, setShowAadhaar] = useState(false);
@@ -886,17 +893,18 @@ function Identity({ initial, onContinue }: {
     first: validateName(firstName),
     last: validateName(lastName),
     pan: validatePan(panN),
+    dob: validateDob(dob),
     aadhaar: validateAadhaar(aadhaar),
   };
   const panWarn = !errs.pan && !errs.last ? panSurnameWarning(panN, lastName.trim()) : null;
-  const allValid = !errs.first && !errs.last && !errs.pan && !errs.aadhaar;
+  const allValid = !errs.first && !errs.last && !errs.pan && !errs.dob && !errs.aadhaar;
   const show = (k: keyof typeof errs) => (touched[k] ? errs[k] : null);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!allValid || !consent || busy) return;
     setBusy(true);
-    await onContinue({ firstName: firstName.trim(), lastName: lastName.trim(), pan: panN }, aadhaar);
+    await onContinue({ firstName: firstName.trim(), lastName: lastName.trim(), pan: panN, dob: normalizeDob(dob) }, aadhaar);
     setBusy(false);
   }
 
@@ -929,6 +937,7 @@ function Identity({ initial, onContinue }: {
             {show('pan') && <span id="ob-pan-err" className="error" role="status">{show('pan')}</span>}
             {panWarn && touched.pan && <span id="ob-pan-warn" className="field-warn" role="status">{panWarn}</span>}
           </label>
+          <DobField id="ob-dob" value={dob} touched={!!touched.dob} onChange={setDob} onBlur={() => touch('dob')} />
           <div className="field">
             <label htmlFor="ob-aadhaar">Aadhaar number</label>
             <span className="input-wrap has-toggle">

@@ -53,6 +53,71 @@ export function panSurnameWarning(pan: string, lastName: string): string | null 
   return p[4] === first ? null : "PAN's 5th letter usually matches your last name";
 }
 
+export const DOB_LABEL = 'Date of birth';
+export const DOB_HINT = 'DD/MM/YYYY';
+/** Investors must be at least this old. */
+export const MIN_INVEST_AGE = 18;
+export const MAX_DOB_AGE = 120;
+
+export const DOB_MESSAGES = {
+  format: 'Enter your date of birth as DD/MM/YYYY.',
+  minor: 'You must be 18 or older to invest.',
+  unreal: 'Enter a real date of birth.',
+} as const;
+
+/** Identity exists but has no date of birth: ask for it (dispatch 'dob-added') before server KYC starts. */
+export function needsDob(s: OnboardingState | null | undefined): boolean {
+  return !!s?.identity && !s.identity.dob;
+}
+
+/** dd/mm/yyyy or yyyy-mm-dd → [y, m, d]; null when the shape is wrong. */
+function dobParts(input: string): [number, number, number] | null {
+  const v = input.trim();
+  const dmy = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v);
+  if (dmy) return [Number(dmy[3]), Number(dmy[2]), Number(dmy[1])];
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])];
+  return null;
+}
+
+function isCalendarDate(y: number, m: number, d: number): boolean {
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+
+/** Date of birth as ISO yyyy-mm-dd (from dd/mm/yyyy or yyyy-mm-dd); '' when it isn't a calendar date. */
+export function normalizeDob(input: string): string {
+  const p = dobParts(input);
+  if (!p || !isCalendarDate(...p)) return '';
+  const [y, m, d] = p;
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/** Whole years from a birth date to `today` (local calendar date). A 29 Feb birthday counts from 1 Mar. */
+export function ageOn(dobIso: string, today: Date = new Date()): number {
+  const [y, m, d] = dobIso.split('-').map(Number) as [number, number, number];
+  const ty = today.getFullYear();
+  const tm = today.getMonth() + 1;
+  const td = today.getDate();
+  return ty - y - (tm < m || (tm === m && td < d) ? 1 : 0);
+}
+
+/**
+ * Date of birth check (dd/mm/yyyy or yyyy-mm-dd). Error text, or null when OK.
+ * Not a calendar date, in the future or over 120 years → 'Enter a real date of birth.'; under 18 → minor.
+ */
+export function validateDob(input: string, today: Date = new Date()): string | null {
+  if (typeof input !== 'string' || !dobParts(input)) return DOB_MESSAGES.format;
+  const iso = normalizeDob(input);
+  if (!iso) return DOB_MESSAGES.unreal;
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  if (iso > todayIso) return DOB_MESSAGES.unreal;
+  const age = ageOn(iso, today);
+  if (age > MAX_DOB_AGE) return DOB_MESSAGES.unreal;
+  if (age < MIN_INVEST_AGE) return DOB_MESSAGES.minor;
+  return null;
+}
+
 export function normalizeAadhaar(s: string): string {
   return s.replace(/\D/g, '');
 }
@@ -202,7 +267,10 @@ export type OnboardingEvent =
   | { type: 'otp-sent'; channel: 'contact' | 'aadhaar'; at: string; contact?: { kind: ContactKind; value: string } }
   | { type: 'contact-verified'; at: string }
   | { type: 'change-contact' }
-  | { type: 'identity-saved'; firstName: string; lastName: string; pan: string }
+  /** `dob`: dd/mm/yyyy or yyyy-mm-dd (stored ISO). `at`: ISO time of the save, for the 18+ check (default now). */
+  | { type: 'identity-saved'; firstName: string; lastName: string; pan: string; dob: string; at?: string }
+  /** Add / replace the date of birth from any step with an identity (validated 18+; stored ISO). `at` as in identity-saved. */
+  | { type: 'dob-added'; dob: string; at?: string }
   | { type: 'back-to-identity' }
   | { type: 'aadhaar-verified'; last4: string; at: string; provider: OtpProviderId }
   | { type: 'aadhaar-locked'; until: string }
@@ -285,12 +353,21 @@ export function onboardingReducer(s: OnboardingState, e: OnboardingEvent): Onboa
       return { ...s, step: 'signin', contact: null };
     case 'identity-saved': {
       if (s.step !== 'identity') return s;
-      if (validateName(e.firstName) || validateName(e.lastName) || validatePan(e.pan)) return s;
+      const t = e.at ? Date.parse(e.at) : NaN;
+      const today = Number.isFinite(t) ? new Date(t) : new Date();
+      if (validateName(e.firstName) || validateName(e.lastName) || validatePan(e.pan) || validateDob(e.dob, today)) return s;
       return {
         ...s,
         step: 'aadhaar-otp',
-        identity: { firstName: e.firstName.trim(), lastName: e.lastName.trim(), pan: normalizePan(e.pan) },
+        identity: { firstName: e.firstName.trim(), lastName: e.lastName.trim(), pan: normalizePan(e.pan), dob: normalizeDob(e.dob) },
       };
+    }
+    case 'dob-added': {
+      // Any step with an identity (users who onboarded before DOB was asked). Step unchanged.
+      if (!s.identity) return s;
+      const t = e.at ? Date.parse(e.at) : NaN;
+      if (validateDob(e.dob, Number.isFinite(t) ? new Date(t) : new Date())) return s;
+      return { ...s, identity: { ...s.identity, dob: normalizeDob(e.dob) } };
     }
     case 'back-to-identity':
       // Only before the Aadhaar OTP passes. From documents / check the Aadhaar is locked.

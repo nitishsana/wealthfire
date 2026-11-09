@@ -8,7 +8,7 @@
     "backgroundColor": "#0f1115",
     "platforms": ["ios"],
     "experiments": { "tsconfigPaths": false },
-    "scheme": "com.nitishsana.wealthfire",
+    "scheme": ["com.nitishsana.wealthfire", "wealthfire"],
     "plugins": [
       [
         "expo-image-picker",

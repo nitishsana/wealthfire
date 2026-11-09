@@ -95,16 +95,20 @@ describe('Idempotency-Key on paid POSTs', () => {
 });
 
 describe('daily paid-check cap (R7) and costs', () => {
-  it('blocks user-triggered paid calls past the cap; resets the next IST day', async () => {
-    const e = env({ maxPaidChecksPerDay: 2 });
+  it('the default cap is 10 paid calls a day', () => {
+    expect(env().config.maxPaidChecksPerDay).toBe(10);
+  });
+
+  it('blocks paid calls past the cap; resets the next IST day', async () => {
+    const e = env({ maxPaidChecksPerDay: 3 });
     const token = await e.signIn();
-    await fullKyc(e, token); // kra-lookup (1) + aadhaar (2); pan check is a system follow-up
+    await fullKyc(e, token); // kra-lookup (1) + aadhaar (2) + automatic pan check (3): every call counts
+    expect(e.partner.calls.verifyPan).toBe(1);
     const id = await e.uploadSelfie(token);
     const blocked = await e.call('POST', '/kyc/selfie', { token, body: { uploadId: id } });
     expect(blocked.statusCode).toBe(429);
     expect(blocked.json.error).toBe('limit_reached');
     expect(e.partner.calls.faceMatch).toBe(0);
-    expect(e.partner.calls.verifyPan).toBe(1); // not blocked
     e.clock.advance(24 * 60 * 60_000);
     const again = await e.signIn(MOBILE); // the access token expired meanwhile; same user
     expect(await e.userIdOf(again)).toBe(e.repos.cases.all()[0]!.userId);
@@ -117,8 +121,46 @@ describe('daily paid-check cap (R7) and costs', () => {
     const t1 = await e.signIn();
     const t2 = await e.signIn();
     expect((await e.call('POST', '/kyc/start', { token: t1, body: startBody(PANS.fullPass) })).statusCode).toBe(200);
-    expect((await e.call('POST', '/kyc/start', { token: t2, body: startBody(PANS.fullPass) })).statusCode).toBe(200);
+    expect((await e.call('POST', '/kyc/start', { token: t2, body: startBody('ABCPS0002K') })).statusCode).toBe(200);
+    expect(e.partner.calls.lookupKyc).toBe(2);
     expect((await e.call('POST', '/kyc/aadhaar', { token: t1, body: { mode: 'otp', returnUrl: RETURN_URL } })).statusCode).toBe(429);
+  });
+
+  it('system follow-ups count too: a PAN check past the cap is deferred, the user step still succeeds', async () => {
+    const e = env({ maxPaidChecksPerDay: 2 });
+    const token = await e.signIn();
+    const { userId, afterPan } = await fullKyc(e, token); // kra-lookup (1) + aadhaar (2); pan check would be 3
+    expect(e.partner.calls.verifyPan).toBe(0);
+    expect(afterPan.statusCode).toBe(200);
+    expect(afterPan.json).toMatchObject({ status: 'pre-verified', next: 'pan-check' });
+    expect(await e.repos.costs.used(userId, '2026-11-06')).toBe(2);
+    // next IST day: the status read runs the deferred check
+    e.clock.advance(24 * 60 * 60_000);
+    const again = await e.signIn(MOBILE);
+    const st = await e.call('GET', '/kyc/status', { token: again });
+    expect(st.json).toMatchObject({ next: 'selfie', checks: { pan: 'pass' } });
+    expect(e.partner.calls.verifyPan).toBe(1);
+  });
+
+  it('every retry counts; past the cap a retry is not made and the call ends as a timeout', async () => {
+    const e = env({ maxPaidChecksPerDay: 1 });
+    e.partner.failNext('lookupKyc', 1); // first try times out; a retry would be call 2
+    const token = await e.signIn();
+    const s = await e.call('POST', '/kyc/start', { token, body: startBody(PANS.kraValidated) });
+    expect(s.statusCode).toBe(200);
+    expect(s.json).toMatchObject({ status: 'under-review', reason: 'partner-timeout' });
+    expect(e.partner.calls.lookupKyc).toBe(1);
+    expect(e.repos.costs.rows).toHaveLength(1);
+  });
+
+  it('a full KYC with the KRA upload (6 paid calls) fits the default cap', async () => {
+    const e = env();
+    const token = await e.signIn();
+    const { userId } = await fullKyc(e, token);
+    await e.call('POST', '/kyc/selfie', { token, body: { uploadId: await e.uploadSelfie(token) } });
+    await e.call('POST', '/kyc/esign', { token, body: { returnUrl: RETURN_URL } });
+    expect(await e.svc.recordEsign(userId, 'done')).toMatchObject({ status: 'verified', next: 'none' });
+    expect(await e.repos.costs.used(userId, '2026-11-06')).toBe(6);
   });
 
   it('a capped start creates no case', async () => {
