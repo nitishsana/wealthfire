@@ -77,15 +77,22 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - KYC today: the device check gives Pre-verified; Verified comes only from final KYC on the KYC server. Investing requires Verified (`isEligibleToInvest`).
 - Profile today: name and age are editable fields; the name also comes from onboarding ("Your details").
 
-### Questions to settle in the spec (ask Nitish then, not now)
+### Answers from Nitish (2026-11-09)
 
-- Which "KYC completed" starts the cards: the end of onboarding (Pre-verified or Under review), or final KYC Verified? (The note says "KYA"; this is read as KYC.)
-- Can the user skip the cards and use the planner meanwhile, with only investing blocked? Or must they finish the cards before anything else?
-- One question per card with Next/Back, or all cards on one screen? And can answers be changed later in Profile, with a new score?
-- Age: is it worked out from the date of birth given in onboarding (so it updates every birthday), or stored once? Should the date of birth be shown and locked too?
-- Name: show the name as typed in "Your details", or the name read from the PAN card?
-- If a user deletes KYC data or withdraws consent, do name and age become editable again?
-- Old users who answered Risk before this change: keep their answers, or ask again?
+| Question | Answer |
+|---|---|
+| Which "KYC completed" starts the risk cards? | The **end of onboarding** ("KYA" meant KYC). |
+| One question per card? | **Yes**, one question per card. |
+| Can the risk answers be changed later? | **Yes**, in the **Risk section inside the Profile tab** (the Risk tab moves there as a collapsible section). |
+| Date of birth | **Locked**: shown, cannot be edited. |
+| Name | Always the **name as per the PAN card**. Onboarding does not move past the check until the typed name matches the PAN card, so the name is always in sync with the PAN; Profile shows it read-only. |
+| Users who already answered Risk | Keep their answers; they can change them later in the Risk section in Profile. |
+
+### Still open (ask Nitish in the spec)
+
+- Can the user skip the risk cards and use the planner meanwhile, with only investing blocked? Or must the cards be finished before anything else?
+- Age: shown from the locked date of birth (so it goes up every birthday)?
+- If a user deletes KYC data or withdraws consent, do name, date of birth and age stay locked?
 - Home tiles and links that point to the Risk tab today need a new target. Same layout on web, Android and iOS.
 
 ---
