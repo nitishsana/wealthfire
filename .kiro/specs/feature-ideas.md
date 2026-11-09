@@ -259,8 +259,28 @@ Added 2026-11-09 by Nitish. Status: **idea, waiting**.
 - Consent rules: purpose, which data, how long, how often; the user can revoke. Data handling follows the same privacy and retention rules as KYC (adviser to confirm).
 - Today's app: Connect page has "Coming soon" placeholders for Bank, CAS, Stocks/broker and EPF/NPS; Net worth is typed in by hand; Expenses reads card statements and Gmail alerts. Fetched debits could also feed Expenses.
 
+### What INDmoney captures for net worth (research, 2026-11-09)
+
+Checked INDmoney's public pages to see which sources a full, correct net worth needs. Summary in our own words, with links:
+
+| Source | How INDmoney gets it | Route for Wealthfire | Net worth side |
+|---|---|---|---|
+| Savings, current accounts, fixed deposits (any bank) | Synced bank accounts ([net worth page](https://www.indmoney.com/networth)) | Account Aggregator | Asset |
+| Mutual funds held anywhere | MF Central OTP consent, consolidated statement against the PAN ([track external funds](https://www.indmoney.com/mutual-funds/track-mutual-funds)) | MF Central / CAMS-KFintech CAS, or AA | Asset |
+| Indian stocks across brokers and Demat accounts | Holdings synced across every broker ([track brokers](https://www.indmoney.com/stocks/track-brokers)) | NSDL / CDSL CAS, or AA | Asset |
+| US stocks | Its own US investing account | Manual entry (or a broker link later) | Asset |
+| EPF | PF records under the UAN ([EPFO tracker](https://www.indmoney.com/networth/track-epfo-account)) | UAN-based fetch (not through AA) | Asset |
+| NPS | NPS balance and contributions tracker ([track all investments](https://indmoney.com/features/track-all-investments)) | NPS CRA, or AA | Asset |
+| PPF, other deposits | Listed among tracked items ([how the tracker started](https://www.indmoney.com/blog/personal-finance/the-idea-behind-networth-on-indmoney)) | Bank / post office via AA where available, else manual | Asset |
+| Credit cards, loans, EMIs | Listed among tracked items (same blog) | AA for lenders that share; credit bureau report for the rest | Liability |
+| Insurance policies | Listed among tracked items (same blog) | Manual entry (policy, cover, premium) | Shown separately (cover is not net worth; surrender value can be an asset) |
+| Family members | Separate and combined family net worth ([family accounts](https://www.indmoney.com/networth/family-accounts)) | Later idea | Both |
+
+Other things a correct net worth usually needs, typed in by hand: gold (physical and Sovereign Gold Bonds), real estate, recurring deposits and post office schemes, company shares (ESOP / RSU / ESPP), cash, money lent to others, and crypto.
+
 ### Questions to settle in the spec (ask Nitish then, not now)
 
+- Which sources from the table go in v1, and which later? Is "family net worth" in scope?
 - **Order:** Idea 4 says the Retirement planner starts right after the risk profile; this idea also comes right after it. Which comes first, or does account linking feed the planner (existing investments, EPF, NPS filled in automatically)?
 - Can the user skip linking and type numbers by hand instead?
 - How often are accounts refreshed (once, daily, on opening the app)?
