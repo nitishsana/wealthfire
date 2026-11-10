@@ -468,9 +468,20 @@ Added 2026-11-10 by Nitish. Status: **idea, waiting**.
 | NPS | A **"Connect NPS"** button: finds the NPS accounts mapped to the mobile number |
 | Real estate | **Typed in only:** land / property name and **purchase price** |
 
-**Real estate value rule:**
+| PMS | A **"Connect PMS"** button (Nitish, 2026-11-10) |
+| Gold (new card) | **Typed in:** physical gold, with the **purchase price** |
+
+**Real estate value rule (updated 2026-11-10):**
 - While the property is held, it counts in net worth at its **purchase price** (no market value guess).
-- If it is **sold**, the user enters the **selling price**. The property then leaves the Real estate card, and the selling price is added to net worth as a balance (cash from the sale).
+- When it is **sold**, the user marks it sold and it is **removed from assets**.
+- The sale money is **not added by hand**. If it lands in a bank account, it shows in the **Bank accounts** card at the next automatic sync. This avoids counting the same money twice.
+
+**Gold card (new, 2026-11-10):**
+- For physical gold (coins, bars, jewellery). The user records the **purchase price**.
+- Net worth counts gold at **today's market price**, which moves with the gold rate.
+- When gold is **sold**, it is **removed from assets**; the sale money shows in **Bank accounts** at the next automatic sync.
+
+**Card order now:** 1 Net worth (graph) · 2 Bank accounts · 3 Mutual funds · 4 NPS · 5 PMS · 6 Real estate · 7 Gold (position to confirm in the spec).
 
 ### Links to other ideas
 
@@ -486,7 +497,11 @@ Added 2026-11-10 by Nitish. Status: **idea, waiting**.
 - Where do the other sources go (stocks, EPF, FDs, gold, ESOPs, crypto, loans, CIBIL): more cards after Real estate, or inside these cards?
 - Where does the Insurance card sit in the order?
 - Can each card open to show the accounts inside it?
-- PMS card: a connect button too, or typed in?
-- After a sale, where does the selling price show: as cash in Bank accounts, or as a separate "sale proceeds" line? And is the sale date recorded?
+- ~~PMS: connect button?~~ **Yes** (answered).
+- ~~Where the sale money shows?~~ **In Bank accounts at the next sync**; the sold asset is removed (answered).
+- Gold market price: needs the **weight (grams) and purity (24K / 22K / 18K)** for each item. Ask for them along with the purchase price? Which gold rate source, and how often to refresh?
+- Sale money paid in cash (not into a bank): how does it enter net worth?
+- Keep a record of sold real estate and gold (sale date, selling price), or just remove them?
+- Sovereign Gold Bonds and gold funds: in the Gold card, or in their own (Demat / mutual funds) cards?
 - Insurance: typed in only, or fetched later (for example from the insurance repository / Bima Central)?
 - Same on web, Android and iOS, across browsers and devices.
