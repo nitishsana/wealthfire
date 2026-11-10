@@ -437,3 +437,71 @@ Added 2026-11-09 by Nitish (split from Idea 8, "for future consideration, not ri
 - How far back the chart goes, and whether old points are kept after "Delete my KYC data" (Idea 2 says all data is erased).
 - Which reasons the bureau partner actually provides.
 - Same on web, Android and iOS, across browsers and devices.
+
+---
+
+## Idea 10: Insurance policies and a new Net worth tab layout
+
+Added 2026-11-10 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+**Insurance policies** are added, so the app understands the user's whole financial profile. They live in the **Net worth** tab (life, term, health, motor and others: insurer, policy number, cover amount, premium and how often, renewal date, and surrender value where there is one).
+
+**The Net worth tab is laid out as cards, in this order:**
+
+| Order | Card | What it shows |
+|---|---|---|
+| 1 | **Net worth** card with a graph | Retirement age; **total value of all assets** after combining every source; **target value** (the corpus needed, from Idea 3); the **gap** between them |
+| 2 | Bank accounts | All bank accounts combined |
+| 3 | Mutual funds | All mutual funds combined |
+| 4 | NPS | All NPS accounts combined |
+| 5 | PMS | Portfolio Management Services holdings combined |
+| 6 | Real estate | All property combined |
+
+### How each card gets its data (Nitish, 2026-11-10)
+
+| Card | How the user adds data |
+|---|---|
+| Bank accounts | A **"Connect bank accounts"** button: finds and links the accounts mapped to the user's mobile number (Idea 6, Account Aggregator) |
+| Mutual funds | A **"Connect mutual funds"** button: finds the funds mapped to the mobile number / PAN (MF Central / CAS) |
+| NPS | A **"Connect NPS"** button: finds the NPS accounts mapped to the mobile number |
+| Real estate | **Typed in only:** land / property name and **purchase price** |
+
+| PMS | A **"Connect PMS"** button (Nitish, 2026-11-10) |
+| Gold (new card) | **Typed in:** physical gold, with the **purchase price** |
+
+**Real estate value rule (updated 2026-11-10):**
+- While the property is held, it counts in net worth at its **purchase price** (no market value guess).
+- When it is **sold**, the user marks it sold and it is **removed from assets**.
+- The sale money is **not added by hand**. If it lands in a bank account, it shows in the **Bank accounts** card at the next automatic sync. This avoids counting the same money twice.
+
+**Gold card (new, 2026-11-10):**
+- For physical gold (coins, bars, jewellery). The user records the **purchase price**.
+- Net worth counts gold at **today's market price**, which moves with the gold rate.
+- When gold is **sold**, it is **removed from assets**; the sale money shows in **Bank accounts** at the next automatic sync.
+
+**Card order now:** 1 Net worth (graph) · 2 Bank accounts · 3 Mutual funds · 4 NPS · 5 PMS · 6 Real estate · 7 Gold (position to confirm in the spec).
+
+### Links to other ideas
+
+- Card 1's **target value** is Idea 3's "corpus needed", worked out from the current age and retirement age; the retirement age comes from the Retirement planner tab (Idea 5).
+- Cards 2-6 are filled by Idea 6's linked and typed-in sources. **PMS is new**: it was not in Idea 6's 17 sources. PMS statements come from the PMS provider (some via the Demat CAS); otherwise typed in.
+- Insurance was already in Idea 6 as typed in; this idea gives it its own card. Cover is not counted in net worth; surrender value can be an asset.
+- Idea 8's CIBIL score also sits in this tab.
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- Graph type for card 1: assets growing toward the target by age (a line to the retirement age), or a simple bar of "have vs need" with the gap?
+- Should the gap use today's value of assets, or their expected value at retirement?
+- Where do the other sources go (stocks, EPF, FDs, gold, ESOPs, crypto, loans, CIBIL): more cards after Real estate, or inside these cards?
+- Where does the Insurance card sit in the order?
+- Can each card open to show the accounts inside it?
+- ~~PMS: connect button?~~ **Yes** (answered).
+- ~~Where the sale money shows?~~ **In Bank accounts at the next sync**; the sold asset is removed (answered).
+- Gold market price: needs the **weight (grams) and purity (24K / 22K / 18K)** for each item. Ask for them along with the purchase price? Which gold rate source, and how often to refresh?
+- Sale money paid in cash (not into a bank): how does it enter net worth?
+- Keep a record of sold real estate and gold (sale date, selling price), or just remove them?
+- Sovereign Gold Bonds and gold funds: in the Gold card, or in their own (Demat / mutual funds) cards?
+- Insurance: typed in only, or fetched later (for example from the insurance repository / Bima Central)?
+- Same on web, Android and iOS, across browsers and devices.
