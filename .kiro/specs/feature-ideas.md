@@ -437,3 +437,41 @@ Added 2026-11-09 by Nitish (split from Idea 8, "for future consideration, not ri
 - How far back the chart goes, and whether old points are kept after "Delete my KYC data" (Idea 2 says all data is erased).
 - Which reasons the bureau partner actually provides.
 - Same on web, Android and iOS, across browsers and devices.
+
+---
+
+## Idea 10: Insurance policies and a new Net worth tab layout
+
+Added 2026-11-10 by Nitish. Status: **idea, waiting**.
+
+### What Nitish wants
+
+**Insurance policies** are added, so the app understands the user's whole financial profile. They live in the **Net worth** tab (life, term, health, motor and others: insurer, policy number, cover amount, premium and how often, renewal date, and surrender value where there is one).
+
+**The Net worth tab is laid out as cards, in this order:**
+
+| Order | Card | What it shows |
+|---|---|---|
+| 1 | **Net worth** card with a graph | Retirement age; **total value of all assets** after combining every source; **target value** (the corpus needed, from Idea 3); the **gap** between them |
+| 2 | Bank accounts | All bank accounts combined |
+| 3 | Mutual funds | All mutual funds combined |
+| 4 | NPS | All NPS accounts combined |
+| 5 | PMS | Portfolio Management Services holdings combined |
+| 6 | Real estate | All property combined |
+
+### Links to other ideas
+
+- Card 1's **target value** is Idea 3's "corpus needed", worked out from the current age and retirement age; the retirement age comes from the Retirement planner tab (Idea 5).
+- Cards 2-6 are filled by Idea 6's linked and typed-in sources. **PMS is new**: it was not in Idea 6's 17 sources. PMS statements come from the PMS provider (some via the Demat CAS); otherwise typed in.
+- Insurance was already in Idea 6 as typed in; this idea gives it its own card. Cover is not counted in net worth; surrender value can be an asset.
+- Idea 8's CIBIL score also sits in this tab.
+
+### Questions to settle in the spec (ask Nitish then, not now)
+
+- Graph type for card 1: assets growing toward the target by age (a line to the retirement age), or a simple bar of "have vs need" with the gap?
+- Should the gap use today's value of assets, or their expected value at retirement?
+- Where do the other sources go (stocks, EPF, FDs, gold, ESOPs, crypto, loans, CIBIL): more cards after Real estate, or inside these cards?
+- Where does the Insurance card sit in the order?
+- Can each card open to show the accounts inside it?
+- Insurance: typed in only, or fetched later (for example from the insurance repository / Bima Central)?
+- Same on web, Android and iOS, across browsers and devices.
