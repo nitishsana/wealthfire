@@ -459,6 +459,19 @@ Added 2026-11-10 by Nitish. Status: **idea, waiting**.
 | 5 | PMS | Portfolio Management Services holdings combined |
 | 6 | Real estate | All property combined |
 
+### How each card gets its data (Nitish, 2026-11-10)
+
+| Card | How the user adds data |
+|---|---|
+| Bank accounts | A **"Connect bank accounts"** button: finds and links the accounts mapped to the user's mobile number (Idea 6, Account Aggregator) |
+| Mutual funds | A **"Connect mutual funds"** button: finds the funds mapped to the mobile number / PAN (MF Central / CAS) |
+| NPS | A **"Connect NPS"** button: finds the NPS accounts mapped to the mobile number |
+| Real estate | **Typed in only:** land / property name and **purchase price** |
+
+**Real estate value rule:**
+- While the property is held, it counts in net worth at its **purchase price** (no market value guess).
+- If it is **sold**, the user enters the **selling price**. The property then leaves the Real estate card, and the selling price is added to net worth as a balance (cash from the sale).
+
 ### Links to other ideas
 
 - Card 1's **target value** is Idea 3's "corpus needed", worked out from the current age and retirement age; the retirement age comes from the Retirement planner tab (Idea 5).
@@ -473,5 +486,7 @@ Added 2026-11-10 by Nitish. Status: **idea, waiting**.
 - Where do the other sources go (stocks, EPF, FDs, gold, ESOPs, crypto, loans, CIBIL): more cards after Real estate, or inside these cards?
 - Where does the Insurance card sit in the order?
 - Can each card open to show the accounts inside it?
+- PMS card: a connect button too, or typed in?
+- After a sale, where does the selling price show: as cash in Bank accounts, or as a separate "sale proceeds" line? And is the sale date recorded?
 - Insurance: typed in only, or fetched later (for example from the insurance repository / Bima Central)?
 - Same on web, Android and iOS, across browsers and devices.
